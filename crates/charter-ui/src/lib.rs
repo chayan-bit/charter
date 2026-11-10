@@ -14,6 +14,7 @@ pub mod fold;
 pub mod gitread;
 pub mod highlight;
 pub mod markdown;
+pub mod pace;
 mod pages;
 pub mod security;
 pub mod sync_loop;

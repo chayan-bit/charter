@@ -4,6 +4,8 @@
 //! Rabdi's explorer documents only `/address/` and `/tx/` paths, and these facts are
 //! blocks and entity keys, so they are shown as ids in mono (full value in `title`).
 
+use std::time::Instant;
+
 use super::{ago, short};
 use crate::cache::RepoView;
 use crate::sync_loop::Round;
@@ -22,7 +24,9 @@ pub struct Verify {
     pub threshold: u64,
     pub peers: Vec<PeerRow>,
     pub equivocations: Vec<EquivRow>,
+    /// Age of the last round, or of the last probe that found nothing new.
     pub synced: String,
+    pub pause: Option<String>,
     pub head_block: u64,
     pub error: Option<String>,
     pub busy: u64,
@@ -47,7 +51,7 @@ pub struct EquivRow {
 impl Verify {
     pub fn new(view: Option<&RepoView>, round: &Round) -> Self {
         let Some(v) = view else {
-            return Self::unsynced(round.error.clone(), round.busy);
+            return Self::unsynced(round);
         };
         let peers = peer_rows(v);
         let equivocations = equiv_rows(v);
@@ -66,14 +70,16 @@ impl Verify {
             threshold: v.threshold,
             peers,
             equivocations,
-            synced: ago(v.synced_ms),
+            synced: ago(v.synced_ms.max(round.checked_ms)),
+            pause: pause(round),
             head_block: v.head_block,
             error: round.error.clone(),
             busy: round.busy,
         }
     }
 
-    fn unsynced(error: Option<String>, busy: u64) -> Self {
+    fn unsynced(round: &Round) -> Self {
+        let error = round.error.clone();
         Self {
             state: "pending",
             word: "Pending",
@@ -86,15 +92,28 @@ impl Verify {
             peers: vec![],
             equivocations: vec![],
             synced: "never".into(),
+            pause: pause(round),
             head_block: 0,
             error,
-            busy,
+            busy: round.busy,
         }
     }
 
     pub fn short(&self, h: &str) -> String {
         short(h)
     }
+}
+
+/// "paused: RPC quota, resumes in 3 min" while background rounds wait for the quota.
+fn pause(round: &Round) -> Option<String> {
+    let s = round
+        .paused?
+        .saturating_duration_since(Instant::now())
+        .as_secs();
+    Some(format!(
+        "paused: RPC quota, resumes in {} min",
+        s.div_ceil(60).max(1)
+    ))
 }
 
 fn peer_rows(v: &RepoView) -> Vec<PeerRow> {

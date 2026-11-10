@@ -430,10 +430,15 @@ async fn pin_cmd<A: Arkiv>(a: &A, cfg: &Config, p: &program::PinArgs) -> Result<
     Ok(())
 }
 
-async fn ui_cmd(a: backend::Backend, cfg: Config, u: &UiArgs) -> Result<()> {
+async fn ui_cmd(mut a: backend::Backend, cfg: Config, u: &UiArgs) -> Result<()> {
     let want = u.repo.as_deref().map(rid_of).transpose()?;
-    let ws = match &a {
-        backend::Backend::Rpc(r) => Some(r.config().ws()),
+    // The UI reschedules on a 429 rather than sleeping inside a round; the socket carries
+    // the same `ARKIV_ACCESS_KEY` as the HTTP client (`RpcConfig::ws`).
+    let ws = match &mut a {
+        backend::Backend::Rpc(r) => {
+            r.set_max_rate_wait(std::time::Duration::ZERO);
+            Some(r.config().ws())
+        }
         backend::Backend::Mem(_) => None,
     };
     let opts = charter_ui::Options {

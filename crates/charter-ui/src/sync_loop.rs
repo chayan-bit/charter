@@ -1,10 +1,9 @@
 //! The one background sync loop (docs/p6/ui.md 4.2, 4.5). A round takes the repo lock with
 //! `Repo::try_open` (skipping the round if a push holds it), runs the fetch sync and
 //! `cob::list_since`, writes `view.json` and `cobs.json`, and drops the lock, then
-//! broadcasts what changed ([`Event`]) to the pages' event streams. The repo on screen is
-//! due at each new block from an `eth_subscribe newHeads` socket, or every 2 s while no
-//! socket is live (the fake backend, or a dropped subscription); the others every 30 s.
-//! It runs on its own thread and runtime, so git subprocesses never stall page handlers.
+//! broadcasts what changed ([`Event`]) to the pages' event streams. [`crate::pace`] decides
+//! when a round is worth its RPC quota. It runs on its own thread and runtime, so git
+//! subprocesses never stall page handlers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -14,16 +13,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use charter_core::Rid;
 use charter_store::Arkiv;
 use charter_store::heads::{self, WsConfig};
-use charter_sync::ids::{hex32, unhex32};
+use charter_sync::ids::unhex32;
 use charter_sync::{Config, Keys, Repo, Want, cob};
 
 use crate::UiError;
 use crate::cache::{self, Cobs, RepoView};
 
-pub const FOCUS_EVERY: Duration = Duration::from_secs(2);
-pub const OTHERS_EVERY: Duration = Duration::from_secs(30);
-/// While heads arrive, the repo on screen still syncs at least this often.
-pub const HEADS_GAP: Duration = Duration::from_secs(10);
+use crate::pace::Pacer;
+
+/// A page request keeps its repo on screen (and the UI open) this long without a stream.
+pub const OPEN_TTL: Duration = Duration::from_secs(60);
 /// A subscription silent this long is treated as dropped (blocks come every 2 s).
 const HEADS_STALL: Duration = Duration::from_secs(10);
 const TICK: Duration = Duration::from_millis(250);
@@ -60,10 +59,25 @@ impl Kind {
 /// What the last round of one repo did (kept in memory; `view.json` keeps the sync time).
 #[derive(Debug, Clone, Default)]
 pub struct Round {
-    pub tried: Option<Instant>,
     pub error: Option<String>,
     /// Rounds skipped because a push or fetch held the lock.
     pub busy: u64,
+    /// When a probe last found the repo unchanged since `view.json` (ms).
+    pub checked_ms: u64,
+    /// Background rounds are paused for the RPC quota until then.
+    pub paused: Option<Instant>,
+}
+
+/// Which pages are open, for [`crate::pace`].
+#[derive(Debug, Default)]
+struct Activity {
+    /// Open event streams per repo.
+    viewers: BTreeMap<Rid, usize>,
+    /// Last page request per repo.
+    seen: BTreeMap<Rid, Instant>,
+    /// Last page request of any kind.
+    touched: Option<Instant>,
+    pause: Option<Instant>,
 }
 
 /// State shared between the loop and the page handlers.
@@ -72,6 +86,7 @@ pub struct Shared {
     rounds: Mutex<BTreeMap<Rid, Round>>,
     focus: Mutex<Option<Rid>>,
     wanted: Mutex<BTreeSet<Rid>>,
+    activity: Mutex<Activity>,
     events: tokio::sync::broadcast::Sender<Event>,
 }
 
@@ -81,9 +96,31 @@ impl Default for Shared {
             rounds: Mutex::default(),
             focus: Mutex::default(),
             wanted: Mutex::default(),
+            activity: Mutex::default(),
             events: tokio::sync::broadcast::channel(EVENTS_BUFFER).0,
         }
     }
+}
+
+/// An open event stream of `rid`; dropping it closes it for the loop.
+#[derive(Debug)]
+pub struct Viewer {
+    shared: Arc<Shared>,
+    rid: Rid,
+}
+
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        self.shared.act(|a| {
+            if let Some(n) = a.viewers.get_mut(&self.rid) {
+                *n = n.saturating_sub(1);
+            }
+        });
+    }
+}
+
+fn recent(t: Option<&Instant>, now: Instant) -> bool {
+    t.is_some_and(|t| now.saturating_duration_since(*t) < OPEN_TTL)
 }
 
 impl Shared {
@@ -96,10 +133,68 @@ impl Shared {
         let _ = self.events.send(Event { rid, kind });
     }
 
+    fn act<T: Default>(&self, f: impl FnOnce(&mut Activity) -> T) -> T {
+        self.activity
+            .lock()
+            .map(|mut a| f(&mut a))
+            .unwrap_or_default()
+    }
+
+    /// A page of `rid` was requested: it is on screen.
     pub fn focus(&self, rid: Rid) {
         if let Ok(mut f) = self.focus.lock() {
             *f = Some(rid);
         }
+        let now = Instant::now();
+        self.act(|a| {
+            a.seen.insert(rid, now);
+            a.touched = Some(now);
+        });
+    }
+
+    /// A page not about one repo (the index) was requested.
+    pub fn touch(&self) {
+        self.act(|a| a.touched = Some(Instant::now()));
+    }
+
+    pub fn viewer(self: &Arc<Self>, rid: Rid) -> Viewer {
+        self.act(|a| *a.viewers.entry(rid).or_default() += 1);
+        Viewer {
+            shared: self.clone(),
+            rid,
+        }
+    }
+
+    /// `rid` is the last repo requested, and a stream of it is open or it was requested lately.
+    pub fn on_screen(&self, rid: &Rid, now: Instant) -> bool {
+        let focus = self.focus.lock().ok().and_then(|f| *f);
+        focus == Some(*rid)
+            && self
+                .act(|a| a.viewers.get(rid).is_some_and(|n| *n > 0) || recent(a.seen.get(rid), now))
+    }
+
+    /// Any page is open: a stream, or any request lately.
+    pub fn any_open(&self, now: Instant) -> bool {
+        self.act(|a| a.viewers.values().any(|n| *n > 0) || recent(a.touched.as_ref(), now))
+    }
+
+    pub fn pause(&self, until: Option<Instant>) {
+        self.act(|a| a.pause = until);
+    }
+
+    pub fn paused(&self) -> Option<Instant> {
+        self.act(|a| a.pause)
+    }
+
+    pub fn wanted(&self, rid: &Rid) -> bool {
+        self.wanted.lock().is_ok_and(|w| w.contains(rid))
+    }
+
+    /// Cached repos and wanted ones, by rid.
+    pub fn repos(&self, home: &Path) -> Vec<Rid> {
+        let mut all: BTreeSet<Rid> = cached_repos(home).into_iter().collect();
+        all.extend(self.wanted.lock().map(|w| w.clone()).unwrap_or_default());
+        all.into_iter().collect()
     }
 
     /// Sync `rid` even before its cache directory exists (`chart ui <rid>`).
@@ -110,17 +205,34 @@ impl Shared {
     }
 
     pub fn round(&self, rid: &Rid) -> Round {
-        self.rounds
-            .lock()
-            .ok()
-            .and_then(|r| r.get(rid).cloned())
-            .unwrap_or_default()
+        let r = self.rounds.lock().ok().and_then(|r| r.get(rid).cloned());
+        Round {
+            paused: self.paused().filter(|t| *t > Instant::now()),
+            ..r.unwrap_or_default()
+        }
     }
 
     fn record(&self, rid: Rid, f: impl FnOnce(&mut Round)) {
         if let Ok(mut r) = self.rounds.lock() {
             f(r.entry(rid).or_default());
         }
+    }
+
+    /// A probe found nothing new.
+    pub fn checked(&self, rid: Rid) {
+        self.record(rid, |s| s.checked_ms = now_ms());
+    }
+
+    pub fn failed(&self, rid: Rid, error: String) {
+        self.record(rid, |s| s.error = Some(error));
+    }
+
+    pub fn recorded(&self, rid: Rid, r: Result<Outcome, UiError>) {
+        self.record(rid, |s| match r {
+            Ok(Outcome::Synced(_)) => s.error = None,
+            Ok(Outcome::Busy) => s.busy += 1,
+            Err(e) => s.error = Some(e.to_string()),
+        });
     }
 }
 
@@ -203,68 +315,16 @@ async fn locked_round<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<Outcom
     }))
 }
 
-/// What paces the repo on screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pace {
-    /// No `newHeads` socket: every [`FOCUS_EVERY`].
-    Poll,
-    /// A live socket: at each new block (`fresh`), and at least every [`HEADS_GAP`].
-    Heads { fresh: bool },
-}
-
-pub fn due(shared: &Shared, home: &Path, now: Instant, pace: Pace) -> Vec<Rid> {
-    let focus = shared.focus.lock().ok().and_then(|f| *f);
-    let mut all: BTreeSet<Rid> = cached_repos(home).into_iter().collect();
-    all.extend(shared.wanted.lock().map(|w| w.clone()).unwrap_or_default());
-    all.into_iter()
-        .filter(|rid| {
-            let every = match (focus == Some(*rid), pace) {
-                (false, _) => OTHERS_EVERY,
-                (true, Pace::Poll) => FOCUS_EVERY,
-                (true, Pace::Heads { fresh: true }) => Duration::ZERO,
-                (true, Pace::Heads { fresh: false }) => HEADS_GAP,
-            };
-            shared.round(rid).tried.is_none_or(|t| now >= t + every)
-        })
-        .collect()
-}
-
-async fn sync_due<A: Arkiv>(a: &A, cfg: &Config, shared: &Shared, pace: Pace) {
-    for rid in due(shared, &cfg.home, Instant::now(), pace) {
-        let r = round(a, cfg, &rid).await;
-        let kinds = Outcome::kinds(&r);
-        shared.record(rid, |s| {
-            s.tried = Some(Instant::now());
-            match r {
-                Ok(Outcome::Synced(_)) => s.error = None,
-                Ok(Outcome::Busy) => s.busy += 1,
-                Err(e) => {
-                    charter_sync::warn(&format!("ui sync {}: {e}", hex32(&rid)));
-                    s.error = Some(e.to_string());
-                }
-            }
-        });
-        kinds.into_iter().for_each(|k| shared.emit(rid, k));
-    }
-}
-
 async fn run<A: Arkiv>(a: Arc<A>, cfg: Config, shared: Arc<Shared>, ws: Option<WsConfig>) {
     let mut heads = ws.map(|ws| {
         let (tx, rx) = tokio::sync::watch::channel(None);
         tokio::spawn(follow(ws, tx));
         rx
     });
-    let mut seen = None;
+    let mut pacer = Pacer::default();
     loop {
-        let head = heads.as_ref().and_then(|h| *h.borrow());
-        let pace = match head {
-            None => Pace::Poll,
-            Some(_) => Pace::Heads {
-                fresh: head != seen,
-            },
-        };
-        seen = head;
-        sync_due(a.as_ref(), &cfg, &shared, pace).await;
+        pacer.head(heads.as_ref().and_then(|h| *h.borrow()), Instant::now());
+        pacer.tick(a.as_ref(), &cfg, &shared, Instant::now()).await;
         match heads.as_mut() {
             Some(h) => {
                 if let Ok(Err(_)) = tokio::time::timeout(TICK, h.changed()).await {
@@ -311,29 +371,4 @@ pub fn spawn<A: Arkiv + 'static>(
     std::thread::Builder::new()
         .name("chart-ui-sync".into())
         .spawn(move || rt.block_on(run(a, cfg, shared, ws)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_repo_on_screen_syncs_at_each_new_head_or_every_poll() {
-        let (s, home) = (Shared::default(), Path::new("/no/charter/home"));
-        let (a, b) = ([1; 32], [2; 32]);
-        s.want(a);
-        s.want(b);
-        s.focus(a);
-        let t0 = Instant::now();
-        s.record(a, |r| r.tried = Some(t0));
-        s.record(b, |r| r.tried = Some(t0));
-        let at = |secs| t0 + Duration::from_secs(secs);
-        let (fresh, quiet) = (Pace::Heads { fresh: true }, Pace::Heads { fresh: false });
-        assert_eq!(due(&s, home, at(1), Pace::Poll), Vec::<Rid>::new());
-        assert_eq!(due(&s, home, at(2), Pace::Poll), [a]);
-        assert_eq!(due(&s, home, t0, fresh), [a], "a new block is due at once");
-        assert_eq!(due(&s, home, at(5), quiet), Vec::<Rid>::new());
-        assert_eq!(due(&s, home, at(10), quiet), [a]);
-        assert_eq!(due(&s, home, at(30), quiet), [a, b]);
-    }
 }

@@ -53,6 +53,7 @@ fn row(app: &App, rid: charter_core::Rid) -> RepoRow {
 }
 
 pub async fn index(State(app): State<Arc<App>>, theme: Theme) -> Response {
+    app.shared.touch();
     blocking(move || {
         let repos = cached_repos(&app.home)
             .into_iter()

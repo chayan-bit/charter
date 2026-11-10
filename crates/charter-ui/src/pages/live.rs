@@ -2,8 +2,8 @@
 //! stream per open page: each sync round of the repo sends what it found (`push`, `op`,
 //! then `sync`), and a page that fell behind gets `resync`. `assets/live.js` then refetches
 //! the regions marked `data-live` for that event; `GET /r/<rid>/verify` is the
-//! verification panel alone, refetched on every `sync`. Opening a stream puts its repo on
-//! screen for the sync loop. With JS off neither is used.
+//! verification panel alone, refetched on every `sync`. An open stream keeps its repo on
+//! screen for the sync loop ([`crate::pace`]). With JS off neither is used.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -23,7 +23,9 @@ pub async fn events(State(app): State<Arc<App>>, Path(rid): Path<String>) -> Res
         return StatusCode::NOT_FOUND.into_response();
     };
     app.shared.focus(rid);
-    let stream = futures_util::stream::unfold(app.shared.subscribe(), move |mut rx| async move {
+    // The stream owns the viewer: the loop keeps the repo on screen until it closes.
+    let state = (app.shared.subscribe(), app.shared.viewer(rid));
+    let stream = futures_util::stream::unfold(state, move |(mut rx, v)| async move {
         loop {
             let name = match rx.recv().await {
                 Ok(e) if e.rid == rid => e.kind.name(),
@@ -32,7 +34,7 @@ pub async fn events(State(app): State<Arc<App>>, Path(rid): Path<String>) -> Res
                 Err(RecvError::Closed) => return None,
             };
             let ev = Event::default().event(name).data(name);
-            return Some((Ok::<_, Infallible>(ev), rx));
+            return Some((Ok::<_, Infallible>(ev), (rx, v)));
         }
     });
     Sse::new(stream)
