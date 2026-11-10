@@ -495,6 +495,31 @@ Proposal, in order:
 
 The last two columns are ESTIMATES until step 1 measures them; execution speed in GolemDB and follower bandwidth are not yet measured and could lower the ceiling.
 
+### 3.15 Format v2 on Rabdi (2026-11-11, MEASURED)
+
+Release build of v0.4.0 rebased on `main` 611da1f, against the v0.3.0 release, both on Rabdi with 1 gwei base fee; design in `docs/p5/head-model.md`.
+
+| Scenario | v0.3.0 | v0.4.0 (format v2) |
+|---|---|---|
+| (a) new repo, init plus first push | - | 38.1 s, 19 txs, 3.85M gas |
+| (b) small push, 5 interleaved rounds | 24.4 to 28.1 s, 6 txs, about 968k gas | 11.7 to 13.6 s, 1 tx, 340k to 354k gas |
+| (c) 10 MiB push (snapshot refresh) | - | 72.9 s, 164 txs, 432M gas, 0.697 tGLM |
+| (c) 2 MiB push (pieces) | - | 26.6 s, 34 txs, 84.9M gas, 0.0947 tGLM |
+| (d) migration push of a v0.3.0 repo | - | 38.4 s, 8 txs, 1.13M gas |
+| (e) two devices, different branches | - | both land, 12.6 s and 14.7 s |
+| (e) two devices, same branch | - | winner 11.7 s; loser `E_LOST_RACE` |
+| (f) clone after the pieces expired | - | 18.3 s for 12 MiB; 11.3 s for a small repo |
+| (h) private repo, push and clone | - | 31.9 s first push, 12.2 s next push, 4.2 s clone |
+
+- (b) A small push is 2x faster and 2.8x cheaper.
+  Most of the remaining 12 s is round trips: about 13 s of RPC calls at 300 to 500 ms each in the trace (the verified sync before the push, then the re-check after the receipt), of which about 3 s is the re-check; the head transaction lands in one block.
+- (c) The 10 MiB push cost more than section 3.14 estimated, because a snapshot refresh writes the whole pack as 30-day entity chunks; the base fee also rose to about 1.6 gwei during it.
+- (d) After the migration v0.3.0 fetch and clone stop with `E_UNSUPPORTED_VERSION`; the v0.4.0 fetch and a fresh clone match, the issue is still listed, `git fsck` is clean.
+- (h) No ref name, commit message or file content appears in plaintext in the calldata of the private repo's transactions.
+- (i) CI-gated program on a v2 repo: a contributor's patch pushed to its own namespace, a CI attestation by the runner key, the delegate's merge to `main`, a release and its artifact attestation, and `chart release verify` reports it valid; a push of an unreviewed commit to `main` is refused with `E_PROGRAM_REJECTED` before any transaction.
+- (j) `chart ui` shows the device head (seq, body, block) and the merged refs, and picks up a new push within one sync round.
+- The live probe for the rollback rule and the block-history depth are in `docs/p5/head-model.md` section 12.
+
 ## 4. Rejected
 
 - Creating chunks with a short lifetime and extending them later: the total gas is the same; it only moves the payment and adds a data-loss risk if the extension fails to land.
@@ -518,4 +543,4 @@ The last two columns are ESTIMATES until step 1 measures them; execution speed i
 - Whether `arkiv_query` works inside a JSON-RPC batch.
 - Whether Rabdi's RPC watchers will prune block history later: on 2026-11-11 `eth_getTransactionByHash` still served transactions back to block 1, about 11 days (head-model section 12).
 - A fair wall-time comparison of compressed vs uncompressed responses.
-- Section 3.8 covers one key and one repo shape; multi-peer repos, snapshots and the completeness change are not exercised yet.
+- Section 3.8 covers one key and one repo shape; section 3.15 exercises two devices of one identity, a snapshot refresh and the rollback rule, but not yet a repo with several delegates.

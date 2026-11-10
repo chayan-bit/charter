@@ -276,4 +276,13 @@ Known limits not handled in v0.4.0:
 
 ## 12. Measurements
 
-Filled in from the on-chain run, see `docs/p5/speed-and-cost.md` section 3.15.
+MEASURED on Rabdi on 2026-11-11 with the v0.4.0 release build rebased on `main` 611da1f; the comparison with v0.3.0 and the cost table are in `docs/p5/speed-and-cost.md` section 3.15.
+
+- Rollback rule (section 6): the live probe `crates/charter-cli/tests/rabdi_head_nonce.rs` patched a head with its own body (248,540 gas), extended it (43,085 gas) and sent a reverted patch from `C_d`; `entityNonce(C_d)` stayed 16 through all three, so only creates move it.
+- Block history: `eth_getTransactionByHash` served transactions back to block 1 (about 11 days of history) on the day of the run.
+- Small push (2.7 KB change, warm cache): 11.7 to 13.6 s, one transaction of 340k to 354k gas; the head grows by about 3.5k gas per push as its signed body carries one more entry.
+  About 13 s of a push is RPC round trips at 300 to 500 ms each (the fetch sync before the push and the re-check after the receipt); the transaction itself lands in one 2 s block.
+- Big pushes: 10 MiB took 72.9 s and refreshed the snapshot (164 transactions, 432M gas, 0.697 tGLM); 2 MiB afterwards stayed on the piece path (34 transactions, 84.9M gas, 0.0947 tGLM, 26.6 s).
+- Clone after the pieces expired from the entity store: 18.3 s for the 12 MiB repo, objects read from calldata and the snapshot, `git fsck` clean.
+- Two devices of one identity: concurrent pushes of different branches both landed (12.6 s and 14.7 s) and the merged refs listed both; a concurrent push of the same branch gave the slower device `E_LOST_RACE`, and a pull, rebase and push from that device then landed.
+- Migration of a v0.3.0 repo: one automatic push of 8 transactions (1,134,393 gas, 38.4 s); v0.3.0 fetch and clone of the migrated repo stop with `E_UNSUPPORTED_VERSION`.
