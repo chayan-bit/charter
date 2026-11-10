@@ -202,7 +202,16 @@ mod tests {
         let held = Repo::open(d.path(), &rid).expect("open");
         assert!(Repo::try_open(d.path(), &rid).expect("try").is_none());
         drop(held);
-        let got = Repo::try_open(d.path(), &rid).expect("try").expect("free");
+        // A child forked by a parallel test holds a copy of the flock until its exec
+        // closes it (CLOEXEC), so "free" can lag the drop by a moment.
+        let got = (0..50)
+            .find_map(|_| {
+                let r = Repo::try_open(d.path(), &rid).expect("try");
+                r.is_none()
+                    .then(|| std::thread::sleep(std::time::Duration::from_millis(20)));
+                r
+            })
+            .expect("free");
         assert!(got.git_dir().join("HEAD").exists());
         assert!(Repo::try_open(d.path(), &rid).expect("try").is_none());
     }
