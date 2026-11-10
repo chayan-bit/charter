@@ -53,14 +53,22 @@ pub(crate) fn compile(source: &str) -> Result<AST, ProgramError> {
 pub(crate) struct Runtime {
     engine: Engine,
     pub(crate) logs: Logs,
+    /// Operations spent so far in this fold (a resumed fold starts where it paused).
+    pub(crate) spent: Rc<Cell<u64>>,
 }
 
 impl Runtime {
     pub(crate) fn new() -> Self {
-        let (logs, spent) = (Logs::default(), Rc::default());
+        Self::resumed(vec![], 0)
+    }
+
+    /// A runtime that continues a paused fold: its log so far and the fuel it spent.
+    pub(crate) fn resumed(logs: Vec<String>, spent: u64) -> Self {
+        let (logs, spent) = (Rc::new(RefCell::new(logs)), Rc::new(Cell::new(spent)));
         Self {
             engine: hardened(&logs, &spent),
             logs,
+            spent,
         }
     }
 

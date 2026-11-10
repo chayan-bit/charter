@@ -7,13 +7,14 @@ use std::collections::BTreeMap;
 
 use rhai::{Array, Dynamic};
 
+use crate::checkpoint::{Checkpoint, Val};
 use crate::engine::Runtime;
 use crate::value::{op_map, push_map, repo_map};
 use crate::{Ancestry, Event, Outcome, Program, ProgramError, ProgramOp, RefUpdate, RepoInfo};
 
 pub(crate) const NOT_FF: &str = "not a fast-forward of the accepted head";
 
-struct Folder<'a> {
+pub(crate) struct Folder<'a> {
     prog: &'a Program,
     ancestry: Ancestry<'a>,
     rt: Runtime,
@@ -21,6 +22,9 @@ struct Folder<'a> {
     heads: BTreeMap<String, Vec<u8>>,
     accepted: Vec<RefUpdate>,
     rejected: Vec<(RefUpdate, String)>,
+    last: u64,
+    /// Some ancestry question had no answer (objects missing): not checkpointable.
+    undecided: bool,
 }
 
 pub(crate) fn run(
@@ -30,31 +34,85 @@ pub(crate) fn run(
     events: impl IntoIterator<Item = Event>,
     ancestry: Ancestry<'_>,
 ) -> Result<Outcome, ProgramError> {
-    let rt = Runtime::new();
-    let state = repo_map(repo)
-        .and_then(|r| rt.call(&prog.ast, "init", (r,)))
-        .map_err(ProgramError::Init)?;
-    let mut f = Folder {
-        prog,
-        ancestry,
-        rt,
-        state,
-        heads: seed,
-        accepted: vec![],
-        rejected: vec![],
-    };
-    let mut last = 0;
-    for ev in events {
-        if ev.order() < last {
-            return Err(ProgramError::OutOfOrder(ev.order()));
-        }
-        last = ev.order();
-        match ev {
-            Event::Op(op) => f.op(&op),
-            Event::Push(p) => f.push(p),
+    let mut f = Folder::start(prog, repo, seed, ancestry)?;
+    f.events(events)?;
+    f.finish()
+}
+
+impl<'a> Folder<'a> {
+    /// Runs `init` with an empty log and full fuel.
+    pub(crate) fn start(
+        prog: &'a Program,
+        repo: &RepoInfo,
+        seed: BTreeMap<String, Vec<u8>>,
+        ancestry: Ancestry<'a>,
+    ) -> Result<Self, ProgramError> {
+        let rt = Runtime::new();
+        let state = repo_map(repo)
+            .and_then(|r| rt.call(&prog.ast, "init", (r,)))
+            .map_err(ProgramError::Init)?;
+        Ok(Self {
+            prog,
+            ancestry,
+            rt,
+            state,
+            heads: seed,
+            accepted: vec![],
+            rejected: vec![],
+            last: 0,
+            undecided: false,
+        })
+    }
+
+    /// Continues the fold `cp` paused (its state, heads, verdicts, log and spent fuel).
+    pub(crate) fn resume(prog: &'a Program, cp: &Checkpoint, ancestry: Ancestry<'a>) -> Self {
+        Self {
+            prog,
+            ancestry,
+            rt: Runtime::resumed(cp.logs.clone(), cp.spent),
+            state: cp.state.to_dynamic(),
+            heads: cp.heads.clone(),
+            accepted: cp.accepted.clone(),
+            rejected: cp.rejected.clone(),
+            last: cp.last_order,
+            undecided: false,
         }
     }
-    f.finish()
+
+    pub(crate) fn events(
+        &mut self,
+        events: impl IntoIterator<Item = Event>,
+    ) -> Result<(), ProgramError> {
+        for ev in events {
+            if ev.order() < self.last {
+                return Err(ProgramError::OutOfOrder(ev.order()));
+            }
+            self.last = ev.order();
+            match ev {
+                Event::Op(op) => self.op(&op),
+                Event::Push(p) => self.push(p),
+            }
+        }
+        Ok(())
+    }
+
+    /// The fold so far as a checkpoint, before `obligations` runs; `None` when it could
+    /// not be restored exactly.
+    pub(crate) fn checkpoint(&self, base: Checkpoint) -> Option<Checkpoint> {
+        if self.undecided {
+            return None;
+        }
+        Some(Checkpoint {
+            last_order: self.last,
+            state: Val::of(&self.state)?,
+            heads: self.heads.clone(),
+            accepted: self.accepted.clone(),
+            rejected: self.rejected.clone(),
+            logs: self.rt.logs.borrow().clone(),
+            spent: self.rt.spent.get(),
+            ..base
+        })
+    }
 }
 
 impl Folder<'_> {
@@ -82,7 +140,13 @@ impl Folder<'_> {
         let ff = head.is_empty()
             || p.new.is_empty()
             || head == p.new
-            || (self.ancestry)(&head, &p.new).unwrap_or(head == p.old);
+            || match (self.ancestry)(&head, &p.new) {
+                Some(known) => known,
+                None => {
+                    self.undecided = true;
+                    head == p.old
+                }
+            };
         p.old = head;
         let verdict = match self.prog.abi.check_push {
             true => self
@@ -127,7 +191,7 @@ impl Folder<'_> {
         })
     }
 
-    fn finish(self) -> Result<Outcome, ProgramError> {
+    pub(crate) fn finish(self) -> Result<Outcome, ProgramError> {
         let obligations = self.obligations();
         let state_json =
             serde_json::to_string(&self.state).map_err(|e| ProgramError::State(e.to_string()))?;
