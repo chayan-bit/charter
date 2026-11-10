@@ -1,7 +1,4 @@
-<table class="list tree" data-list>
-<tbody>
+{% import "macros.html" as m %}
 {% for e in entries %}
-<tr data-row data-copy="{{ e.name }}"><td class="ico" aria-hidden="true">{% if e.kind == "tree" %}<svg viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 3h5l1.5 2h6.5v8h-13z" fill="currentColor"/></svg>{% else %}<svg viewBox="0 0 16 16" width="14" height="14"><path d="M3.5 1.5h6l3 3v10h-9z" fill="none" stroke="currentColor"/></svg>{% endif %}</td><td>{% if e.kind == "tree" %}<a href="/r/{{ r.hex }}/tree/{{ rev }}/{{ self.join(e.name.as_str()) }}">{{ e.name }}/</a>{% else if e.kind == "blob" %}<a href="/r/{{ r.hex }}/blob/{{ rev }}/{{ self.join(e.name.as_str()) }}">{{ e.name }}</a>{% else %}{{ e.name }} <span class="dim">submodule <code>{{ self.short(e.oid.as_str()) }}</code></span>{% endif %}</td><td class="num dim">{% if let Some(s) = e.size %}{{ s }} B{% endif %}</td></tr>
+<tr data-row data-copy="{{ e.name }}"><td class="ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round">{% if e.kind == "tree" %}<path d="M1.75 3.75h4.5l1.5 1.75h6.5v7.5h-12.5z"/>{% else %}<path d="M3.75 1.75h5.5l3 3v9.5h-8.5z"/>{% endif %}</svg></td><td>{% if e.kind == "tree" %}<a href="/r/{{ r.hex }}/tree/{{ rev }}/{{ self.join(e.name.as_str()) }}">{{ e.name }}/</a>{% else if e.kind == "blob" %}<a href="/r/{{ r.hex }}/blob/{{ rev }}/{{ self.join(e.name.as_str()) }}">{{ e.name }}</a>{% else %}{{ e.name }} <span class="dim">submodule <code>{{ self.short(e.oid.as_str()) }}</code></span>{% endif %}</td><td class="num dim">{% if e.size.is_some() %}{{ m::bytes(e.size.unwrap_or_default()) }}{% endif %}</td></tr>
 {% endfor %}
-</tbody>
-</table>

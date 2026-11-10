@@ -69,6 +69,22 @@
     e.preventDefault();
   }
 
+  // A link to a closed <details> (the "Verification" tab) opens it; a long tab bar shows the current tab.
+  function arrive() {
+    var t = location.hash.length > 1 && d.getElementById(decodeURIComponent(location.hash.slice(1)));
+    if (t && t.tagName === "DETAILS") t.open = true;
+    var nav = d.querySelector(".tabs"), a = nav && nav.querySelector("[aria-current]");
+    if (a) nav.scrollLeft = a.offsetLeft - (nav.clientWidth - a.offsetWidth) / 2;
+  }
+  function copyFrom(b) {
+    var src = d.getElementById(b.getAttribute("data-copy-from")), label = b.textContent;
+    if (!src || !navigator.clipboard) return;
+    navigator.clipboard.writeText(src.value).then(function () {
+      b.textContent = "Copied";
+      setTimeout(function () { b.textContent = label; }, 1200);
+    });
+  }
+
   function theme() {
     var next = { "": "light", light: "dark", dark: "" }[root.getAttribute("data-theme") || ""];
     if (next) root.setAttribute("data-theme", next); else root.removeAttribute("data-theme");
@@ -77,9 +93,14 @@
 
   d.addEventListener("keydown", key);
   d.addEventListener("click", function (e) {
-    var b = e.target.closest && e.target.closest("[data-help], [data-theme-toggle]");
+    var t = e.target, b = t.closest && t.closest("[data-help], [data-theme-toggle], [data-copy-from]");
+    if (t.matches && t.matches("input[readonly]")) t.select();
     if (!b) return;
-    if (b.hasAttribute("data-help")) d.getElementById("help").showModal(); else theme();
+    if (b.hasAttribute("data-copy-from")) copyFrom(b);
+    else if (b.hasAttribute("data-help")) d.getElementById("help").showModal();
+    else theme();
   });
-  d.addEventListener("htmx:afterSettle", function () { cur = -1; });
+  d.addEventListener("htmx:afterSettle", function () { cur = -1; arrive(); });
+  window.addEventListener("hashchange", arrive);
+  arrive();
 })();

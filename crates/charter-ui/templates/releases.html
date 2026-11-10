@@ -3,14 +3,14 @@
 {% include "repo.html" %}
 {% if releases.is_empty() %}<section class="empty"><p>No releases among the verified ops.</p></section>{% endif %}
 {% for x in releases %}
-<article class="release" id="{{ x.tag }}">
+<article class="art" id="{{ x.tag }}">
 <h2>{{ x.tag }} {% if self.valid(x.verdict) %}<span class="badge b-verified">valid under the pinned program</span>{% else if let Some(m) = self.missing(x.verdict) %}<span class="badge b-equivocation">not valid</span>{% else %}<span class="badge b-unverified">{% if pinned %}not tracked by the program{% else %}no program pinned{% endif %}</span>{% endif %}</h2>
 {% if let Some(m) = self.missing(x.verdict) %}<p class="bad">Needs: {{ m }}</p>{% endif %}
 <p class="dim">Commit <a href="/r/{{ r.hex }}/commit/{{ x.commit }}"><code title="{{ x.commit }}">{{ self.short(x.commit.as_str()) }}</code></a>, signed by <code title="{{ x.author }}">{{ self.short(x.author.as_str()) }}</code> at block <code>{{ x.block }}</code>, op <code title="{{ x.id }}">{{ self.short(x.id.as_str()) }}</code>{% if x.revisions > 0 %}, revised {{ x.revisions }} times{% endif %}</p>
 {% if let Some(n) = x.notes %}<div class="md">{{ n|safe }}</div>{% endif %}
-<table class="list"><thead><tr><th>Artifact</th><th>sha256</th><th>Size</th><th>Locations</th></tr></thead><tbody>
-{% for a in x.artifacts %}<tr><td>{{ a.name }}{% if !a.target.is_empty() %} <span class="dim">{{ a.target }}</span>{% endif %}</td><td><code title="{{ a.sha256 }}" data-copy="{{ a.sha256 }}">{{ self.short(a.sha256.as_str()) }}</code></td><td class="num">{{ a.size }}</td><td>{% for u in a.locations %}<code>{{ u }}</code> {% endfor %}</td></tr>{% endfor %}
-</tbody></table>
+<div class="box"><table class="list"><thead><tr><th>Artifact</th><th>sha256</th><th class="num">Size</th><th>Locations</th></tr></thead><tbody>
+{% for a in x.artifacts %}<tr><td data-l="File">{{ a.name }}{% if !a.target.is_empty() %} <span class="dim">{{ a.target }}</span>{% endif %}</td><td data-l="sha256"><code class="hash" title="{{ a.sha256 }}" data-copy="{{ a.sha256 }}">{{ a.sha256 }}</code></td><td class="num" data-l="Size">{{ a.size }} B</td><td data-l="Where">{% for u in a.locations %}<code class="loc" title="{{ u }}">{{ u }}</code>{% endfor %}</td></tr>{% endfor %}
+</tbody></table></div>
 <p class="dim">Hashes are the signed claim; <code>chart release verify --tag {{ x.tag }}</code> downloads and checks the bytes.</p>
 </article>
 {% endfor %}

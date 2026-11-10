@@ -1,6 +1,5 @@
 <section class="repo">
-<h1><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1>
-{% if !r.description.is_empty() %}<p class="desc">{{ r.description }}</p>{% endif %}
+<div class="rh"><h1><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1>{% if !r.description.is_empty() %}<p class="desc" title="{{ r.description }}">{{ r.description }}</p>{% endif %}</div>
 {% include "verify.html" %}
 <nav class="tabs" aria-label="Repository">
 <a href="/r/{{ r.hex }}" data-go="c"{% if r.tab == "code" %} aria-current="page"{% endif %}>Code</a>

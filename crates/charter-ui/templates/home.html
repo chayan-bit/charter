@@ -1,27 +1,31 @@
 {% extends "base.html" %}
 {% block main %}
 {% include "repo.html" %}
-<section class="clone"><label for="clone">Clone</label> <input id="clone" class="mono" readonly value="{{ clone }}" data-copy="{{ clone }}"></section>
+<section class="clone"><label for="clone">Clone</label> <input id="clone" class="mono" readonly value="{{ clone }}" data-copy="{{ clone }}"><button type="button" class="btn js" data-copy-from="clone">Copy</button></section>
 {% if entries.is_empty() %}
 <section class="empty"><p>No verified commits on <code>{{ r.default_ref }}</code> yet.</p></section>
 {% else %}
+<div class="box"><table class="list tree" data-list>
+<tbody>
 {% include "entries.html" %}
+</tbody>
+</table></div>
 {% endif %}
-{% if let Some(html) = readme %}<article class="readme">{{ html|safe }}</article>{% endif %}
+{% if let Some(html) = readme %}<article class="readme md">{{ html|safe }}</article>{% endif %}
 <section class="refs">
 <h2>Branches and tags</h2>
 {% if !canonical.is_empty() %}
 <h3>Canonical</h3>
-<table class="list"><tbody>
-{% for (name, oid) in canonical %}<tr><td><a href="/r/{{ r.hex }}/tree/{{ self.seg(self.bare(name.as_str())) }}">{{ self.bare(name.as_str()) }}</a></td><td class="num"><a href="/r/{{ r.hex }}/commit/{{ oid }}"><code title="{{ oid }}">{{ self.short(oid.as_str()) }}</code></a></td></tr>{% endfor %}
-</tbody></table>
+<div class="box"><table class="list"><tbody>
+{% for (name, oid) in canonical %}<tr><td><a href="/r/{{ r.hex }}/tree/{{ self.seg(self.bare(name.as_str())) }}"><code>{{ self.bare(name.as_str()) }}</code></a></td><td class="num"><a href="/r/{{ r.hex }}/commit/{{ oid }}"><code title="{{ oid }}">{{ self.short(oid.as_str()) }}</code></a></td></tr>{% endfor %}
+</tbody></table></div>
 {% endif %}
 {% for p in peers %}
 <h3>{% if p.delegate %}Delegate{% else %}Peer{% endif %} <code title="{{ p.nid }}">{{ self.short(p.nid.as_str()) }}</code></h3>
 {% if p.refs.is_empty() %}<p class="dim">no refs</p>{% else %}
-<table class="list"><tbody>
-{% for (name, oid) in p.refs %}<tr><td>{{ name }}</td><td class="num"><a href="/r/{{ r.hex }}/tree/{{ oid }}"><code title="{{ oid }}">{{ self.short(oid.as_str()) }}</code></a></td></tr>{% endfor %}
-</tbody></table>
+<div class="box"><table class="list"><tbody>
+{% for (name, oid) in p.refs %}<tr><td><code>{{ name }}</code></td><td class="num"><a href="/r/{{ r.hex }}/tree/{{ oid }}"><code title="{{ oid }}">{{ self.short(oid.as_str()) }}</code></a></td></tr>{% endfor %}
+</tbody></table></div>
 {% endif %}
 {% endfor %}
 </section>

@@ -11,20 +11,22 @@
 <script src="/assets/keys.js?v={{ l.v }}" defer></script>
 </head>
 <body hx-boost="true">
-<header class="top">
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="bar">
 <a class="mark" href="/" data-go="h">charter</a>
-<nav class="crumbs" aria-label="Breadcrumb">{% for (href, label) in l.crumbs %}<span class="sep">/</span>{% if href.is_empty() %}<span aria-current="page">{{ label }}</span>{% else %}<a href="{{ href }}">{{ label }}</a>{% endif %}{% endfor %}</nav>
+<nav class="crumbs" aria-label="Breadcrumb">{% for (href, label) in l.crumbs %}{% if loop.index0 + 2 == l.crumbs.len() && l.crumbs.len() > 2 %}<span class="ell" aria-hidden="true">/ &hellip;</span>{% endif %}<span class="sep{% if loop.index0 + 2 < l.crumbs.len() %} skip-m{% endif %}">/</span>{% if href.is_empty() %}<span aria-current="page">{{ label }}</span>{% else %}<a{% if loop.index0 + 2 < l.crumbs.len() %} class="skip-m"{% endif %} href="{{ href }}">{{ label }}</a>{% endif %}{% endfor %}</nav>
 <span class="grow"></span>
 <button type="button" class="btn js" data-theme-toggle title="Theme: system, light, dark">theme</button>
 <button type="button" class="btn js" data-help title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
-</header>
-<main>
+</div></header>
+<main id="main" tabindex="-1">
 {% block main %}{% endblock %}
 </main>
-<dialog id="help" aria-label="Keyboard shortcuts">
+<dialog id="help" aria-labelledby="help-title">
+<h2 id="help-title">Keyboard shortcuts</h2>
 <table class="keys">
 <tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>repo list</td></tr>
-<tr><td><kbd>g</kbd> <kbd>c</kbd> / <kbd>l</kbd> / <kbd>i</kbd> / <kbd>p</kbd> / <kbd>r</kbd> / <kbd>v</kbd></td><td>code, log, issues, patches, releases, verification</td></tr>
+<tr><td><kbd>g</kbd> <kbd>c</kbd> <kbd>l</kbd> <kbd>i</kbd> <kbd>p</kbd> <kbd>r</kbd> <kbd>v</kbd></td><td>then one of: code, log, issues, patches, releases, verification</td></tr>
 <tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>move down, up</td></tr>
 <tr><td><kbd>Enter</kbd> <kbd>o</kbd></td><td>open the row</td></tr>
 <tr><td><kbd>u</kbd></td><td>up one level</td></tr>

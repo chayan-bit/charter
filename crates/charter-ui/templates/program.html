@@ -2,36 +2,37 @@
 {% block main %}
 {% include "repo.html" %}
 {% if let Some(p) = p %}
-<table class="facts"><tbody>
+<div class="box"><table class="facts"><tbody>
 <tr><th>Pinned program</th><td><code>{{ p.engine }}</code> <code title="{{ p.hash }}" data-copy="{{ p.hash }}">{{ self.short(p.hash.as_str()) }}</code></td></tr>
 <tr><th>Ref moves</th><td>{{ self.accepted().len() }} accepted, {{ self.rejected().len() }} rejected</td></tr>
-</tbody></table>
+</tbody></table></div>
 {% if !bounties.is_empty() %}
 <h2>Bounties</h2>
-<table class="list"><thead><tr><th>Issue</th><th>Amount</th></tr></thead><tbody>
+<div class="box"><table class="list"><thead><tr><th>Issue</th><th class="num">Amount</th></tr></thead><tbody>
 {% for (issue, amount) in bounties %}<tr><td><a href="/r/{{ r.hex }}/issues/{{ issue }}"><code title="{{ issue }}">{{ self.short(issue.as_str()) }}</code></a></td><td class="num"><code>{{ amount }}</code></td></tr>{% endfor %}
-</tbody></table>
+</tbody></table></div>
 {% endif %}
 {% if !p.obligations.is_empty() %}
 <h2>Obligations</h2>
 <ul class="mono">{% for o in p.obligations %}<li><code>{{ o }}</code></li>{% endfor %}</ul>
 {% endif %}
+{% if self.accepted().is_empty() && self.rejected().is_empty() %}<h2>Ref moves</h2><p class="dim">No ref moves yet.</p>{% endif %}
 {% if !self.rejected().is_empty() %}
 <h2>Rejected</h2>
-<table class="list"><thead><tr><th>Ref</th><th>New</th><th>By</th><th>Reason</th></tr></thead><tbody>
+<div class="box"><table class="list"><thead><tr><th>Ref</th><th>New</th><th>By</th><th>Reason</th></tr></thead><tbody>
 {% for m in self.rejected() %}<tr class="bad"><td><code>{{ m.name }}</code></td><td><code title="{{ m.new }}">{{ self.short(m.new.as_str()) }}</code></td><td><code title="{{ m.author }}">{{ self.short(m.author.as_str()) }}</code></td><td>{% if let Some(why) = m.reason %}{{ why }}{% endif %}</td></tr>{% endfor %}
-</tbody></table>
+</tbody></table></div>
 {% endif %}
 {% if !self.accepted().is_empty() %}
 <h2>Accepted</h2>
-<table class="list"><thead><tr><th>Ref</th><th>New</th><th>By</th></tr></thead><tbody>
+<div class="box"><table class="list"><thead><tr><th>Ref</th><th>New</th><th>By</th></tr></thead><tbody>
 {% for m in self.accepted() %}<tr><td><code>{{ m.name }}</code></td><td><a href="/r/{{ r.hex }}/commit/{{ m.new }}"><code title="{{ m.new }}">{{ self.short(m.new.as_str()) }}</code></a></td><td><code title="{{ m.author }}">{{ self.short(m.author.as_str()) }}</code></td></tr>{% endfor %}
-</tbody></table>
+</tbody></table></div>
 {% endif %}
 <h2>State</h2>
-<pre class="json">{{ state }}</pre>
-{% if !p.logs.is_empty() %}<h2>Logs</h2><pre class="json">{% for g in p.logs %}{{ g }}
-{% endfor %}</pre>{% endif %}
+<details class="file box"><summary>Raw program state (JSON)</summary><pre>{{ state }}</pre></details>
+{% if !p.logs.is_empty() %}<h2>Logs</h2><details class="file box"><summary>{{ p.logs.len() }} log lines</summary><pre>{% for g in p.logs %}{{ g }}
+{% endfor %}</pre></details>{% endif %}
 {% else %}
 <section class="empty"><p>No program is pinned in the identity document.</p><p>Pin one with <code>chart program pin</code>.</p></section>
 {% endif %}
