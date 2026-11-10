@@ -477,6 +477,42 @@ async fn a_stolen_nonce_is_reread() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_pinned_nonce_someone_else_took_fails_instead_of_moving_on() {
+    let (fake, key) = setup();
+    // Mined by another sender of the same key.
+    exec(&fake, &key, vec![small("n", 0, 0)]).await;
+    let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default()).at_nonce(0);
+    let err = with_miner(fake.clone(), p.run(vec![vec![small("n", 1, 1)]]))
+        .await
+        .expect_err("mined nonce");
+    assert!(matches!(err, StoreError::NonceTooLow(_)), "{err:?}");
+    // Waiting in the pool for another sender of the same key.
+    let params = TxParams {
+        nonce: 1,
+        to: ARKIV_ADDRESS,
+        value: U256::ZERO,
+        input: execute_calldata(&[small("n", 2, 2)]),
+        gas_limit: 16_000_000,
+        max_fee_per_gas: 2_000_000_000,
+        max_priority_fee_per_gas: 0,
+    };
+    fake.send(SignedTx::sign(&key, CHAIN, params).expect("sign"))
+        .await
+        .expect("pending");
+    let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default()).at_nonce(1);
+    let err = with_miner(fake.clone(), p.run(vec![vec![small("n", 3, 3)]]))
+        .await
+        .expect_err("pending nonce");
+    assert!(matches!(err, StoreError::NonceTooLow(_)), "{err:?}");
+    fake.mine();
+    assert_eq!(
+        fake.entity_nonce(key.address()).await.expect("n"),
+        2,
+        "only the others landed"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn transfers_and_insufficient_funds() {
     let (fake, key) = setup();
     let to = Address::repeat_byte(0x42);
