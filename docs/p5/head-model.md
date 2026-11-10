@@ -53,7 +53,9 @@ DeviceBody = {
 - `ag.seq` is the maximum because v0.3.0 reads anchors incrementally with `ag.seq >= mark`: any smaller value would drop out of a long-lived v0.3.0 clone's read once its mark passed it, and that clone would keep showing its old refs.
 - Because `C_N` creates it, deleting it or letting it expire trips N's P1 completeness check (`E_CONTROL_NOT_LIVE`), so a device cannot be hidden.
 - A device delegation is valid if it opens with layout version 2, its signature verifies under N's key, `body.rid = R`, and its creator is one of N's bind control addresses under the P1 creator rule.
-- A device is not revocable on its own: it holds the same identity seed as every other device, so a lost device is a lost identity key, removed by an identity revision exactly as in P1 section 3.5.
+- The device key comes from its own seed (`device/seed`, outside `keys/`), not from the identity seed; the identity key only signs the delegation.
+- A device cannot be revoked on its own: there is no revoke entity, so a leaked device seed can sign heads for this identity until the identity itself is replaced by an identity revision (P1 section 3.5).
+  A machine that also holds `keys/` holds the identity key anyway, so in practice a lost machine means a lost identity key.
 
 ### 4.2 Head (`head`)
 
@@ -201,9 +203,12 @@ Clients also keep the highest seq and body hash seen per device (section 5.2, ru
 5. First write of this device to this repo: one `C_N` transaction with the P1 `peer` and `bind_0` if missing and the device delegation, waited for.
 6. Snapshot chunks and manifests, or bulk pieces, from `B_d`, through the pipeline; every receipt must succeed.
 7. The head transaction from `C_d`: `[create head]` the first time, `[patch head]` afterwards, plus the inline pieces or the marker; `at` and `entityNonce(C_d)` are read just before signing, and only once the pending nonce of `C_d` equals its mined nonce (no earlier head tx of this device is still in flight).
-   It also requires `entityNonce(C_d)` to equal what its previous body accounts for (`pieces_created + 1`, or 0 before the first head), else it stops with `E_CONCURRENT_PUSH`: another writer of this device seed would otherwise fork the body chain.
+   It reads the confirmed tx count of `C_d` first, then `entityNonce(C_d)`, and requires `entityNonce(C_d)` to equal what its previous body accounts for (`pieces_created + 1`, or 0 before the first head), else it stops with `E_CONCURRENT_PUSH`: another writer of this device seed would otherwise fork the body chain.
+   The head transaction is signed at exactly that confirmed tx count, never at the pending one, and it is never re-signed at a later nonce: when another sender of `C_d` holds that nonce, mined or pending, the push stops with `E_CONCURRENT_PUSH` (section 7.4).
+   After `setup` sent the delegation or waited, the writer reads the identity's heads again; a pushed ref whose value there differs from the listing git checked is `E_LOST_RACE`, and the program check runs again on the fresh refs.
    When nothing was sent and no earlier head tx had to land since the `list for-push` sync, the writer plans from the heads that sync verified instead of reading them again; `C_d` is topped up for four head txs at a time, so most pushes send no top-up first.
    Before sending, the writer records the outgoing head under `outgoing/head-pending`; the next push first waits until `C_d` is idle, so a crash after sending never lets a second body be built on the same `prev_tx`.
+   The writer records the body it sends in `state.json` (`sent_heads`, per device) before sending it.
 8. Re-check (7.3), then commit locally: index the packs, move staging refs into the namespace, store the device mark and the tx hash and block of the body.
 
 A small push is one transaction and one block after the staging, whatever the repo's history.
@@ -223,7 +228,12 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
 - One device, two processes: serialised by the repo lock, as today.
 - Two devices: never the same head, so a blind write can never overwrite another device; conflicts are decided by section 5.3 and reported by 7.3.
 - A copied `CHARTER_HOME` (two machines sharing one device seed) is the only way to get two writers of one head.
-  Both sign from `C_d`, so two concurrent head transactions share one account nonce and only one can land; a later push reads the landed head first and continues its chain.
+  Both sign from `C_d`, and each signs its head transaction at the confirmed tx count it read just before `entityNonce(C_d)`, so two concurrent head transactions carry the same nonce and only one can land; the other fails with `E_CONCURRENT_PUSH` and is never re-signed at the next nonce.
+  A later push reads the landed head first and continues its chain.
+  Clients before this rule signed at the pending nonce and could land a second head transaction behind a pending one; `C_d` then created more entities than the current body records and every reader fails with `E_CONTROL_NOT_LIVE`.
+  The machine that sent the current body (it is the one recorded in its `sent_heads`) accepts that head anyway, with a warning, and its next push signs a body whose `pieces_created` matches the real `entityNonce(C_d)`, which every reader accepts again.
+  Any other machine, including another copy of the same seed that sent a different body, keeps failing closed until that repair lands.
+  A rollback is not repaired: an older body is not the body the device sent last, and the local mark rejects it as before (section 6).
   If a body still forks (two bodies naming the same `prev_tx`), readers follow only the current head back along `prev_tx`, so the discarded body never enters the merge or the fold, and the rollback check stays sound because every head transaction adds creates.
 
 ## 8. Programs, releases, CI
@@ -233,9 +243,13 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
 - Each step of the walk must carry a body of the same device whose seq is one lower and which landed in a strictly earlier block, with a successful receipt; otherwise the fold fails closed.
 - Entities and head bodies share one order: by block, the block's entities first in query order, then the merge of that block's head bodies; every client computes the same order, so every client folds the same state.
 - For a v2 update, `RefUpdate.old` is the signed `base` of the winning entry, and `ff` is true exactly when the identity's previously accepted value equals that base; the fold never looks at git ancestry for a v2 update, so a fresh clone missing old objects and a long-lived client reach the same verdict.
+- The base is the writer's claim, so every fetch checks it where all clients hold the same objects: after the connectivity check, each winning entry of every synced v2 peer must have a base that is an ancestor of its oid (or no base), else that peer's head is refused with `E_BAD_REFS` (a delegate's refusal fails the fetch).
+  This holds for every client because the live refs' full history is in every cache after a fetch.
+  Not covered: a body with a false base that the same device replaces before any client fetched it is only seen by the fold, which does not check ancestry; the forced commit stays visible in the walked history, and readers that synced while it was current refused it.
 - Fetched bodies are cached under the repo directory (`git/arkiv-head-bodies.json`), so each fetch walks only the bodies it has not seen.
 - What depends on block history: a fresh client of a pinned repo reads every body since the pin from calldata, which needs Rabdi to serve those transactions (it serves them back to block 1, section 12); the walk is bounded by the pin, so re-pinning a program resets it.
   If that history were pruned, the fold fails closed with `E_CONTROL_NOT_LIVE` instead of guessing.
+- A delegate pinned under v1 keeps needing its v1 refs entities after it migrates: the fold reads its last v1 link before the pin and every later one, so `chart keepalive` keeps those refs entities alive (they are not reproducible from the migration body, whose v1 counterpart is a signed refs envelope).
 - `chart program status`, `chart release verify`, `programs/ci-gated.rhai`, `scripts/chart-ci.sh` and `scripts/chart-merge.sh` need no change: they consume the fold.
 
 ## 9. Private repos
@@ -272,7 +286,7 @@ Known limits not handled in v0.4.0:
 
 - A device's head holds at most about 550 to 900 refs (section 4.2); a migration or push past that fails with `E_REFS_TOO_LARGE` instead of moving the ref list into a piece.
 - A pack no live ref reaches that cannot be indexed is downloaded again on every fetch (section 5.5).
-- A copied `device/seed` makes two machines one device; they serialise on one account nonce, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4).
+- A copied `device/seed` makes two machines one device; they serialise on the confirmed nonce of `C_d`, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4).
 - Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can collide on the wallet nonce and one push fails with an RPC error; running it again succeeds.
 
 ## 12. Measurements
