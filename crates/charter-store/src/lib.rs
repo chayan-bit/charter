@@ -13,6 +13,7 @@ pub use arkiv_rpc_types::EntityData;
 mod error;
 #[cfg(feature = "fake")]
 pub mod fake;
+pub mod heads;
 mod ops;
 mod opts;
 pub mod paging;

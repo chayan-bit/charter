@@ -42,6 +42,14 @@ pub struct RpcConfig {
 }
 
 impl RpcConfig {
+    /// The `newHeads` socket on the same host, with the same access key.
+    pub fn ws(&self) -> crate::heads::WsConfig {
+        crate::heads::WsConfig {
+            url: crate::heads::ws_url(&self.url),
+            access_key: self.access_key.clone(),
+        }
+    }
+
     pub fn rabdi(access_key: Option<String>) -> Self {
         Self {
             url: RABDI_RPC.into(),
@@ -106,6 +114,10 @@ struct RawBlock {
 }
 
 impl RpcArkiv {
+    pub fn config(&self) -> &RpcConfig {
+        &self.cfg
+    }
+
     /// Build the client and refuse to continue unless the RPC serves `cfg.chain_id`.
     pub async fn connect(cfg: RpcConfig) -> Result<Self, StoreError> {
         let http = reqwest::Client::builder()
