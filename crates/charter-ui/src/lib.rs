@@ -62,6 +62,10 @@ pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
         .fallback(pages::not_found)
         .with_state(app)
         .layer(axum::middleware::from_fn_with_state(auth, security::guard))
+        // Outermost, so denials are gzipped too; tower-http skips images and event streams.
+        // No BREACH exposure: the cookie is SameSite=Strict, so no cross-site request ever
+        // gets a page with the CSRF token in it.
+        .layer(tower_http::compression::CompressionLayer::new())
 }
 
 /// What `chart ui` passes in.

@@ -2097,7 +2097,6 @@ dependencies = [
  "charter-program",
  "charter-store",
  "charter-sync",
- "flate2",
  "getrandom 0.4.3",
  "gix",
  "hex",
@@ -2109,6 +2108,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tower",
+ "tower-http",
 ]
 
 [[package]]
