@@ -246,7 +246,7 @@ async fn reads_parse_the_wire_types() {
     });
     let (rpc, seen) = client(move |b| match b["method"].as_str().unwrap_or("") {
         "eth_blockNumber" => ok(json!("0x10")),
-        "eth_getBlockByNumber" => ok(json!({ "baseFeePerGas": "0x3b9aca00" })),
+        "eth_getBlockByNumber" => ok(json!({ "number": "0x11", "baseFeePerGas": "0x3b9aca00" })),
         "eth_getBalance" => ok(json!("0x64")),
         "eth_getTransactionCount" => ok(json!("0x5")),
         "eth_estimateGas" => ok(json!("0x5208")),
@@ -262,6 +262,8 @@ async fn reads_parse_the_wire_types() {
     .await;
     assert_eq!(rpc.head().await, Ok(16));
     assert_eq!(rpc.base_fee().await, Ok(1_000_000_000));
+    assert_eq!(rpc.head_fee().await, Ok((17, 1_000_000_000)));
+    assert!(rpc.heads_ws().is_none(), "plain-http mocks have no socket");
     assert_eq!(rpc.balance(Address::ZERO).await, Ok(U256::from(100)));
     assert_eq!(rpc.tx_count(Address::ZERO).await, Ok(5));
     assert_eq!(rpc.estimate(Address::ZERO, &[]).await, Ok(21_000));

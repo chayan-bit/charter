@@ -21,6 +21,7 @@ pub mod pipeline;
 mod query;
 pub mod quota;
 pub mod rpc;
+mod shape;
 mod tx;
 
 pub use error::StoreError;
@@ -47,6 +48,15 @@ pub trait Arkiv: Send + Sync {
     fn head(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
     /// Base fee of the latest block, in wei.
     fn base_fee(&self) -> impl Future<Output = Result<u128, StoreError>> + Send;
+    /// Latest block number and its base fee; [`RpcArkiv`] reads both from one block header.
+    fn head_fee(&self) -> impl Future<Output = Result<(u64, u128), StoreError>> + Send {
+        futures_util::future::try_join(self.head(), self.base_fee())
+    }
+    /// The `newHeads` socket of this backend, if it has one; the tx pipeline waits on it
+    /// for inclusion instead of polling on a timer.
+    fn heads_ws(&self) -> Option<heads::WsConfig> {
+        None
+    }
     fn query(
         &self,
         q: &Query,

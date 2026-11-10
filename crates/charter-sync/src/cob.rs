@@ -26,6 +26,57 @@ pub async fn post<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys, body: &CobOpBody) 
     Ok(s.h)
 }
 
+/// Validates and signs one op; its `h` is the op id, so a later op can name it as parent
+/// before it is sent (signatures are randomized: send these exact bytes, never re-sign).
+pub fn sign_op(keys: &Keys, body: &CobOpBody) -> Result<crate::write::Signed> {
+    body.validate()?;
+    sign(keys.sk(), body)
+}
+
+/// Writes signed ops of `rid` in order, one tx each, back to back on one nonce pipeline
+/// without waiting for each receipt (docs/p5/speed-and-cost.md 2.2 item 7). A writer with
+/// no bind gets its `peer` and `bind_0` in the first tx. Returns the op ids in order.
+pub async fn post_signed<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    rid: &Rid,
+    signed: &[crate::write::Signed],
+) -> Result<Vec<Hash32>> {
+    if signed.is_empty() {
+        return Ok(vec![]);
+    }
+    let ops = signed
+        .iter()
+        .map(|s| entity_op::<CobOpBody>(&s.bytes, cfg.control_lifetime))
+        .collect::<Result<Vec<_>>>()?;
+    identity::with_bind_all(a, cfg, keys, rid, ops).await?;
+    Ok(signed.iter().map(|s| s.h).collect())
+}
+
+/// [`post_signed`] for independent ops of one repo (none names another as parent).
+pub async fn post_many<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    bodies: &[CobOpBody],
+) -> Result<Vec<Hash32>> {
+    let Some(rid) = bodies.first().map(|b| b.rid) else {
+        return Ok(vec![]);
+    };
+    if bodies.iter().any(|b| b.rid != rid) {
+        return Err(crate::SyncError::coded(
+            charter_core::ErrorCode::Internal,
+            "post_many: ops of more than one repo",
+        ));
+    }
+    let signed = bodies
+        .iter()
+        .map(|b| sign_op(keys, b))
+        .collect::<Result<Vec<_>>>()?;
+    post_signed(a, cfg, keys, &rid, &signed).await
+}
+
 /// Verified ops of `rid`, optionally of one object and one type, in Arkiv creation order.
 pub async fn list<A: Arkiv>(
     a: &A,

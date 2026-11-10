@@ -32,6 +32,12 @@ impl<A: Arkiv> Arkiv for Sealed<'_, A> {
     async fn base_fee(&self) -> Result<u128, StoreError> {
         self.inner.base_fee().await
     }
+    async fn head_fee(&self) -> Result<(u64, u128), StoreError> {
+        self.inner.head_fee().await
+    }
+    fn heads_ws(&self) -> Option<charter_store::heads::WsConfig> {
+        self.inner.heads_ws()
+    }
     async fn query(&self, q: &Query, o: &QueryOpts) -> Result<QueryPage, StoreError> {
         let q = Query {
             filter: blind_pred(&self.ring, &q.filter),

@@ -114,6 +114,7 @@ struct RawTx {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawBlock {
+    number: U64,
     base_fee_per_gas: Option<U128>,
 }
 
@@ -197,6 +198,7 @@ impl RpcArkiv {
                 Err(e) => return Err(StoreError::Rpc(format!("{method}: {e}"))),
             };
             let status = resp.status().as_u16();
+            let version = resp.version();
             let now = std::time::Instant::now();
             self.note_quota(method, Quota::from_response(status, resp.headers(), now));
             if status == 429 {
@@ -233,7 +235,7 @@ impl RpcArkiv {
             }
             if self.trace {
                 eprintln!(
-                    "chart-trace: {method} {} ms {} B",
+                    "chart-trace: {method} {} ms {} B {version:?}",
                     started.elapsed().as_millis(),
                     text.len()
                 );
@@ -306,10 +308,20 @@ impl Arkiv for RpcArkiv {
     }
 
     async fn base_fee(&self) -> Result<u128, StoreError> {
+        self.head_fee().await.map(|(_, fee)| fee)
+    }
+
+    async fn head_fee(&self) -> Result<(u64, u128), StoreError> {
         let b: RawBlock = self
             .call("eth_getBlockByNumber", json!(["latest", false]))
             .await?;
-        Ok(b.base_fee_per_gas.map(|f| f.to::<u128>()).unwrap_or(0))
+        let fee = b.base_fee_per_gas.map(|f| f.to::<u128>()).unwrap_or(0);
+        Ok((u64_of(b.number), fee))
+    }
+
+    fn heads_ws(&self) -> Option<crate::heads::WsConfig> {
+        // Only real endpoints serve a socket; tests point at plain HTTP mocks.
+        self.cfg.url.starts_with("https://").then(|| self.cfg.ws())
     }
 
     async fn query(&self, q: &Query, opts: &QueryOpts) -> Result<QueryPage, StoreError> {

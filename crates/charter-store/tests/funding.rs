@@ -1,5 +1,7 @@
-//! Rolling top-ups (design 4.2 step 6): a pipeline with a funder tops its sender up per
-//! window of in-flight txs, never holding more than one window's max-fee reserve.
+//! Top-ups (design 4.2 step 6): a pipeline with a funder tops its sender up once for the
+//! whole run (one window at the max fee plus the expected burn of the rest), falling back
+//! to one window at a time when the funder cannot spare that, and is left holding at most
+//! one window's max-fee reserve.
 #![cfg(feature = "fake")]
 
 mod common;
@@ -31,7 +33,7 @@ async fn chunk_gas(fake: &MemArkiv, sender: &PrivateKeySigner) -> u64 {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_unfunded_sender_is_topped_up_per_window_from_the_funder() {
+async fn an_unfunded_sender_is_topped_up_once_for_the_whole_run() {
     let (fake, wallet, sender) = setup(U256::from(10u128.pow(21)));
     let cfg = PipelineConfig::default();
     let mut p =
@@ -50,10 +52,7 @@ async fn an_unfunded_sender_is_topped_up_per_window_from_the_funder() {
         "the sender keeps at most one window's reserve: {left} > {window}"
     );
     let top_ups = fake.tx_count(wallet.address()).await.expect("nonce");
-    assert!(
-        top_ups > 1,
-        "several rolling top-ups, not one up-front transfer"
-    );
+    assert_eq!(top_ups, 1, "one top-up funds every window");
     let spent: U256 = landed
         .iter()
         .map(|l| U256::from(l.receipt.gas_used) * U256::from(l.receipt.effective_gas_price))

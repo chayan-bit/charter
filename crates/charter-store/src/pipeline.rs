@@ -2,13 +2,15 @@
 //! revert decoding for one sender (design 4.6), rolling top-ups from a funder (design 4.2
 //! step 6), plus greedy batching under caps.
 
-use std::collections::VecDeque;
-use std::time::Duration;
+use std::collections::{HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_signer_local::PrivateKeySigner;
 use arkiv_bindings::Operation;
 
+use crate::heads::{self, Heads};
+use crate::shape::{Estimates, Shape};
 use crate::tx::EXECUTE_BASE_BYTES;
 use crate::{
     ARKIV_ADDRESS, Arkiv, BLOCK_GAS_LIMIT, MAX_RAW_TX_BYTES, Receipt, SignedTx, StoreError,
@@ -37,6 +39,15 @@ pub struct PipelineConfig {
     /// Blocks without a receipt before a tx is resent.
     pub resend_after_blocks: u64,
     pub max_resends: u32,
+    /// Price a create job from an earlier estimate of the same shape instead of its own
+    /// `eth_estimateGas` (a failed tx is re-estimated and sent once more).
+    pub reuse_estimates: bool,
+    /// Wait for inclusion on the backend's `newHeads` socket when it has one, polling
+    /// on the `poll` timer only as the fallback.
+    pub use_heads: bool,
+    /// The jobs depend on each other in order (control and COB posts): a job is never
+    /// sent again behind txs that already went out after it; the run fails instead.
+    pub ordered: bool,
 }
 
 impl Default for PipelineConfig {
@@ -52,11 +63,31 @@ impl Default for PipelineConfig {
             poll: Duration::from_millis(250),
             resend_after_blocks: 30,
             max_resends: 3,
+            reuse_estimates: true,
+            use_heads: true,
+            ordered: false,
         }
     }
 }
 
 impl PipelineConfig {
+    /// For many large independent txs (a big upload): up to two blocks of gas may be
+    /// unconfirmed, so this sender keeps every block it can get full instead of 40 percent.
+    pub fn bulk(&self) -> Self {
+        Self {
+            pace_percent: self.pace_percent.max(200),
+            ..self.clone()
+        }
+    }
+
+    /// For jobs that must land in order (each may depend on the ones before it).
+    pub fn ordered(&self) -> Self {
+        Self {
+            ordered: true,
+            ..self.clone()
+        }
+    }
+
     /// `maxFeePerGas` at `base_fee`: twice the base fee plus the tip.
     pub fn max_fee(&self, base_fee: u128) -> u128 {
         2 * base_fee + self.tip
@@ -95,6 +126,23 @@ impl PipelineConfig {
         (have < reserve).then(|| reserve * U256::from(slots.max(1)) - have)
     }
 
+    /// One top-up for the rest of a run: `slots` txs at their max-fee `reserve` (what the
+    /// node checks before it admits them) plus `later` txs of about `gas` each at the fee
+    /// they are expected to burn, `gas x (base_fee + tip)`; the window's max fee is the
+    /// headroom. `None` when `have` covers this tx.
+    pub fn top_up_run(
+        &self,
+        have: U256,
+        reserve: U256,
+        slots: u64,
+        later: u64,
+        gas: u64,
+        base_fee: u128,
+    ) -> Option<U256> {
+        let burn = U256::from(later) * U256::from(gas) * U256::from(base_fee + self.tip);
+        Self::top_up(have, reserve, slots).map(|window| window + burn)
+    }
+
     /// The most a top-up transfer itself costs in fees at `base_fee`.
     pub fn top_up_fee(&self, base_fee: u128) -> U256 {
         U256::from(TRANSFER_GAS) * U256::from(self.max_fee(base_fee))
@@ -115,6 +163,21 @@ pub struct Landed {
     pub receipt: Receipt,
 }
 
+/// Bytes of calldata a run landed and how long it took, for throughput reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Throughput {
+    pub txs: usize,
+    pub bytes: usize,
+    pub elapsed: Duration,
+}
+
+impl Throughput {
+    /// Landed calldata in MB (10^6 bytes) per second.
+    pub fn mb_per_s(&self) -> f64 {
+        self.bytes as f64 / self.elapsed.as_secs_f64().max(1e-9) / 1e6
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Job {
     Execute(Vec<Operation>),
@@ -129,7 +192,26 @@ struct InFlight {
     gas: u64,
     sent_at: u64,
     resends: u32,
+    /// Its gas came from an earlier estimate of the same shape, not its own.
+    shape: Option<Shape>,
 }
+
+/// A job ready to sign: calldata, recipient, value and gas.
+struct Priced {
+    input: Bytes,
+    to: Address,
+    value: U256,
+    gas: u64,
+    /// Set when the gas was reused from an estimate of this shape.
+    reused: Option<Shape>,
+}
+
+/// Longest wait for the next `newHeads` block before polling anyway.
+const HEAD_WAIT: Duration = Duration::from_millis(2_500);
+/// Attempts at sending one signed tx; resending the same bytes can never double-spend.
+const SEND_ATTEMPTS: u32 = 3;
+/// A head and base fee seen this recently are reused instead of read again.
+const FEE_FRESH: Duration = Duration::from_secs(2);
 
 /// Sends jobs (each one `execute(ops)` tx) from one key. See the module docs.
 pub struct TxPipeline<'a, A: Arkiv> {
@@ -140,6 +222,21 @@ pub struct TxPipeline<'a, A: Arkiv> {
     nonce: Option<u64>,
     /// Tops the sender up from this key before each window that its balance cannot cover.
     funder: Option<PrivateKeySigner>,
+    estimates: Estimates,
+    /// Jobs (index and calldata hash, so each half of a split job counts on its own)
+    /// whose failed tx did not reproduce on re-estimate; they are estimated afresh and
+    /// fail for good the second time.
+    retried: HashSet<(usize, B256)>,
+    /// The latest head, its base fee and when they were read.
+    seen: Option<(u64, u128, Instant)>,
+    heads: Option<Heads>,
+    /// The socket failed once: poll on the timer for the rest of the run.
+    heads_off: bool,
+    /// The nonce was re-read because someone else took it; a second time is an error.
+    reread: bool,
+    /// A tx could not be sent or landed: send nothing more, let what is in flight land
+    /// (gaps below it plugged), then fail with this.
+    abort: Option<StoreError>,
 }
 
 impl<'a, A: Arkiv> TxPipeline<'a, A> {
@@ -151,6 +248,13 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             cfg,
             nonce: None,
             funder: None,
+            estimates: Estimates::default(),
+            retried: HashSet::new(),
+            seen: None,
+            heads: None,
+            heads_off: false,
+            reread: false,
+            abort: None,
         }
     }
 
@@ -175,6 +279,23 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         self.drive(jobs.into_iter().enumerate().collect()).await
     }
 
+    /// [`TxPipeline::run`] for many independent jobs (a big upload), also reporting the
+    /// calldata landed per second. Pair it with [`PipelineConfig::bulk`].
+    pub async fn run_measured(
+        &mut self,
+        jobs: Vec<Vec<Operation>>,
+    ) -> Result<(Vec<Landed>, Throughput), StoreError> {
+        let bytes = jobs.iter().map(|ops| execute_calldata(ops).len()).sum();
+        let started = Instant::now();
+        let landed = self.run(jobs).await?;
+        let t = Throughput {
+            txs: landed.len(),
+            bytes,
+            elapsed: started.elapsed(),
+        };
+        Ok((landed, t))
+    }
+
     /// A plain value transfer (wallet top-up).
     pub async fn transfer(&mut self, to: Address, value: U256) -> Result<Receipt, StoreError> {
         let landed = self
@@ -192,36 +313,96 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
     ) -> Result<Vec<Landed>, StoreError> {
         let (mut inflight, mut done) = (Vec::new(), Vec::new());
         loop {
-            self.fill(&mut queue, &mut inflight).await?;
+            if self.abort.is_none() {
+                self.fill(&mut queue, &mut inflight).await?;
+            }
+            if inflight.is_empty()
+                && let Some(e) = self.abort.take()
+            {
+                self.nonce = None;
+                return Err(e);
+            }
             if inflight.is_empty() && queue.is_empty() {
                 done.sort_by_key(|l: &Landed| (l.job, l.receipt.block_number));
                 return Ok(done);
             }
-            tokio::time::sleep(self.cfg.poll).await;
-            self.poll(&mut inflight, &mut done).await?;
+            self.wait().await;
+            self.poll(&mut queue, &mut inflight, &mut done).await?;
         }
     }
 
-    /// Send queued jobs while the window and the gas budget allow.
+    /// Until the next block is announced on the `newHeads` socket (or [`HEAD_WAIT`] passes),
+    /// else one poll interval. The socket is opened on the first wait, which returns at
+    /// once so a block announced during the handshake is not missed.
+    async fn wait(&mut self) {
+        if self.cfg.use_heads && self.heads.is_none() && !self.heads_off {
+            match self.arkiv.heads_ws() {
+                Some(ws) => match tokio::time::timeout(HEAD_WAIT, heads::subscribe(&ws)).await {
+                    Ok(Ok(h)) => {
+                        self.heads = Some(h);
+                        return;
+                    }
+                    _ => self.heads_off = true,
+                },
+                None => self.heads_off = true,
+            }
+        }
+        if let Some(h) = self.heads.as_mut() {
+            match tokio::time::timeout(HEAD_WAIT, h.next()).await {
+                Ok(Ok(Some(_))) | Err(_) => return,
+                Ok(_) => {
+                    self.heads = None;
+                    self.heads_off = true;
+                }
+            }
+        }
+        tokio::time::sleep(self.cfg.poll).await;
+    }
+
+    /// The head and its base fee: the last seen if fresh, else one read.
+    async fn head_fee(&mut self) -> Result<(u64, u128), StoreError> {
+        if let Some((head, fee, at)) = self.seen
+            && at.elapsed() < FEE_FRESH
+        {
+            return Ok((head, fee));
+        }
+        let (head, fee) = self.arkiv.head_fee().await?;
+        self.seen = Some((head, fee, Instant::now()));
+        Ok((head, fee))
+    }
+
+    /// Send queued jobs while the window and the gas budget allow: price and sign them in
+    /// order, then send them together (nonces are consecutive, so the node orders them).
     async fn fill(
         &mut self,
         queue: &mut VecDeque<(usize, Job)>,
         inflight: &mut Vec<InFlight>,
     ) -> Result<(), StoreError> {
-        // Read fresh every round: the base fee can rise while we fill blocks.
-        let (base_fee, sent_at) =
-            futures_util::future::try_join(self.arkiv.base_fee(), self.arkiv.head()).await?;
+        while self.fill_once(queue, inflight).await? {}
+        Ok(())
+    }
+
+    /// One round of [`TxPipeline::fill`]; `true` when jobs went back to the queue after a
+    /// nonce re-read and should be sent again now.
+    async fn fill_once(
+        &mut self,
+        queue: &mut VecDeque<(usize, Job)>,
+        inflight: &mut Vec<InFlight>,
+    ) -> Result<bool, StoreError> {
+        // The base fee can rise while we fill blocks: at most one block old.
+        let (sent_at, base_fee) = self.head_fee().await?;
         let budget = self.cfg.pace_budget(base_fee);
         let mut unconfirmed: u64 = inflight.iter().map(|f| f.gas).sum();
         let mut covered = match self.funder {
             Some(_) => Some(self.covered(inflight).await?),
             None => None,
         };
-        while inflight.len() < self.cfg.window {
+        let mut ready: Vec<(usize, Job, Priced)> = vec![];
+        while inflight.len() + ready.len() < self.cfg.window {
             let Some((job, body)) = queue.pop_front() else {
                 break;
             };
-            let (input, to, value, gas) = match self.price(&body).await {
+            let p = match self.price(job, &body).await {
                 Ok(p) => p,
                 Err(e) => match split(&body, &e) {
                     Some((a, b)) => {
@@ -233,50 +414,51 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 },
             };
             // One tx may exceed the budget alone, else nothing that large could ever go.
-            if !inflight.is_empty() && unconfirmed + gas > budget {
+            let empty = inflight.is_empty() && ready.is_empty();
+            if !empty && unconfirmed + p.gas > budget {
                 queue.push_front((job, body));
                 break;
             }
-            let reserve = self.cfg.tx_reserve(gas, value, base_fee);
+            let reserve = self.cfg.tx_reserve(p.gas, p.value, base_fee);
             // One transfer covers the rest of the window (free slots, capped at the jobs
             // left) at this tx's size.
-            let slots = ((self.cfg.window - inflight.len()) as u64).min(1 + queue.len() as u64);
-            let top = covered.and_then(|h| PipelineConfig::top_up(h, reserve, slots));
-            if let (Some(have), Some(amount)) = (covered.as_mut(), top) {
-                self.top_up(amount, base_fee).await?;
-                *have += amount;
+            let free = self.cfg.window - inflight.len() - ready.len();
+            let slots = (free as u64).min(1 + queue.len() as u64);
+            // The jobs after this window are funded now too, with this tx's estimate
+            // standing in for each, so later windows go out without waiting on a top-up.
+            let later = (1 + queue.len() as u64).saturating_sub(slots);
+            if let Some(have) = covered.as_mut()
+                && let Some(window) = PipelineConfig::top_up(*have, reserve, slots)
+            {
+                let all = self
+                    .cfg
+                    .top_up_run(*have, reserve, slots, later, p.gas, base_fee)
+                    .unwrap_or(window);
+                *have += self.top_up(all, window, base_fee).await?;
             }
-            let tx = match self.sign_and_send(input, to, value, gas, base_fee).await {
-                Err(e @ StoreError::TxTooLarge { .. }) => match split(&body, &e) {
-                    Some((a, b)) => {
-                        queue.push_front((job, b));
-                        queue.push_front((job, a));
-                        continue;
-                    }
-                    None => return Err(e),
-                },
-                other => other?,
-            };
-            unconfirmed += gas;
+            unconfirmed += p.gas;
             if let Some(have) = covered.as_mut() {
                 *have = have.saturating_sub(reserve);
             }
-            inflight.push(InFlight {
-                job,
-                body,
-                tx,
-                gas,
-                sent_at,
-                resends: 0,
-            });
+            ready.push((job, body, p));
         }
-        Ok(())
+        self.send_all(ready, base_fee, sent_at, queue, inflight)
+            .await
     }
 
-    /// Calldata, recipient, value and estimated gas, checking the byte and gas caps.
-    async fn price(&self, body: &Job) -> Result<(Bytes, Address, U256, u64), StoreError> {
+    /// Calldata, recipient, value and gas, checking the byte and gas caps. A create job
+    /// of a shape already estimated reuses that estimate unless it failed before.
+    async fn price(&mut self, job: usize, body: &Job) -> Result<Priced, StoreError> {
         let ops = match body {
-            Job::Transfer(to, value) => return Ok((Bytes::new(), *to, *value, TRANSFER_GAS)),
+            Job::Transfer(to, value) => {
+                return Ok(Priced {
+                    input: Bytes::new(),
+                    to: *to,
+                    value: *value,
+                    gas: TRANSFER_GAS,
+                    reused: None,
+                });
+            }
             Job::Execute(ops) => ops,
         };
         let input = execute_calldata(ops);
@@ -287,59 +469,180 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 cap: self.cfg.max_raw_bytes,
             });
         }
-        let gas = self.arkiv.estimate(self.address(), ops).await?;
+        let shape = self
+            .cfg
+            .reuse_estimates
+            .then(|| Shape::of(ops, &input))
+            .flatten()
+            .filter(|_| !self.retried.contains(&(job, keccak256(&input))));
+        let reuse = shape.as_ref().and_then(|s| self.estimates.get(s, &input));
+        let gas = match reuse {
+            Some(g) => g,
+            None => self.arkiv.estimate(self.address(), ops).await?,
+        };
         if gas > self.cfg.gas_cap {
             return Err(StoreError::GasCap {
                 gas,
                 cap: self.cfg.gas_cap,
             });
         }
-        Ok((input, ARKIV_ADDRESS, U256::ZERO, gas))
+        let reused = match (reuse, shape) {
+            (Some(_), s) => s,
+            (None, Some(s)) => {
+                self.estimates.put(s, &input, gas);
+                None
+            }
+            (None, None) => None,
+        };
+        Ok(Priced {
+            input,
+            to: ARKIV_ADDRESS,
+            value: U256::ZERO,
+            gas,
+            reused,
+        })
     }
 
-    async fn sign_and_send(
+    /// Signs `ready` with consecutive nonces and sends them concurrently. A nonce someone
+    /// else took is re-read once and the affected jobs go back to the queue.
+    async fn send_all(
         &mut self,
-        input: Bytes,
-        to: Address,
-        value: U256,
-        gas: u64,
+        ready: Vec<(usize, Job, Priced)>,
         base_fee: u128,
-    ) -> Result<SignedTx, StoreError> {
-        let gas_limit = self.cfg.gas_limit(gas);
-        for attempt in 0..2 {
-            let nonce = match self.nonce {
-                Some(n) => n,
-                None => self.arkiv.tx_count(self.address()).await?,
-            };
+        sent_at: u64,
+        queue: &mut VecDeque<(usize, Job)>,
+        inflight: &mut Vec<InFlight>,
+    ) -> Result<bool, StoreError> {
+        if ready.is_empty() {
+            return Ok(false);
+        }
+        let mut nonce = match self.nonce {
+            Some(n) => n,
+            None => self.arkiv.tx_count(self.address()).await?,
+        };
+        let mut signed = Vec::with_capacity(ready.len());
+        let mut ready = ready.into_iter();
+        while let Some((job, body, p)) = ready.next() {
             let params = TxParams {
                 nonce,
-                to,
-                value,
-                input: input.clone(),
-                gas_limit,
+                to: p.to,
+                value: p.value,
+                input: p.input,
+                gas_limit: self.cfg.gas_limit(p.gas),
                 max_fee_per_gas: self.cfg.max_fee(base_fee),
                 max_priority_fee_per_gas: self.cfg.tip,
             };
             let tx = SignedTx::sign(&self.signer, self.chain_id, params)?;
             if tx.raw().len() > self.cfg.max_raw_bytes {
-                return Err(StoreError::TxTooLarge {
+                // Only the envelope estimate was off: shrink this job and resend it later.
+                let e = StoreError::TxTooLarge {
                     size: tx.raw().len(),
                     cap: self.cfg.max_raw_bytes,
-                });
-            }
-            match self.arkiv.send(tx.clone()).await {
-                Ok(_) => {
-                    self.nonce = Some(nonce + 1);
-                    return Ok(tx);
+                };
+                let (a, b) = split(&body, &e).ok_or(e)?;
+                let rest: Vec<_> = ready.map(|(j, b, _)| (j, b)).collect();
+                for item in rest.into_iter().rev() {
+                    queue.push_front(item);
                 }
-                // Someone else used this nonce: re-read it once and re-sign.
-                Err(StoreError::NonceTooLow(_)) if attempt == 0 => self.nonce = None,
-                Err(e) => return Err(e),
+                queue.push_front((job, b));
+                queue.push_front((job, a));
+                break;
+            }
+            nonce += 1;
+            signed.push((job, body, p.gas, p.reused, tx));
+        }
+        self.nonce = Some(nonce);
+        let results = futures_util::future::join_all(
+            signed.iter().map(|(.., tx)| send_retrying(self.arkiv, tx)),
+        )
+        .await;
+        let (mut stolen, mut lost) = (vec![], vec![]);
+        for ((job, body, gas, shape, tx), r) in signed.into_iter().zip(results) {
+            let f = InFlight {
+                job,
+                body,
+                tx,
+                gas,
+                sent_at,
+                resends: 0,
+                shape,
+            };
+            // A send whose reply was lost (or retried after it was mined, which then
+            // reads as nonce too low) may have gone out: if the node has it, it is ours.
+            let r = match r {
+                Ok(()) => Ok(()),
+                Err(e) => match self.known(&f.tx).await? {
+                    true => Ok(()),
+                    false => Err(e),
+                },
+            };
+            match r {
+                Ok(()) => inflight.push(f),
+                Err(StoreError::NonceTooLow(_)) => stolen.push(f),
+                Err(e) => lost.push((f, e)),
             }
         }
-        Err(StoreError::InconsistentView(
-            "nonce still too low after re-reading it".into(),
-        ))
+        if !lost.is_empty() {
+            return self.lost(lost, base_fee, sent_at, inflight).await;
+        }
+        if let Some(n) = stolen.iter().map(|f| f.tx.nonce()).min()
+            && self.cfg.ordered
+            && above(inflight, n)
+        {
+            return Err(StoreError::InconsistentView(format!(
+                "nonce {n} was taken by another sender after later txs of this ordered run went out"
+            )));
+        }
+        if stolen.is_empty() {
+            self.reread = false;
+            return Ok(false);
+        }
+        // Someone else used our nonces: re-read once; a second time is an error.
+        if std::mem::replace(&mut self.reread, true) {
+            return Err(StoreError::InconsistentView(
+                "nonce still too low after re-reading it".into(),
+            ));
+        }
+        self.nonce = None;
+        for f in stolen.into_iter().rev() {
+            queue.push_front((f.job, f.body));
+        }
+        Ok(true)
+    }
+
+    /// Txs above a nonce that never went out would wait on it forever: plug each such gap,
+    /// let everything in flight land, then fail. A tx found to have gone out after all is
+    /// in flight like any other and does not fail the run.
+    async fn lost(
+        &mut self,
+        lost: Vec<(InFlight, StoreError)>,
+        base_fee: u128,
+        sent_at: u64,
+        inflight: &mut Vec<InFlight>,
+    ) -> Result<bool, StoreError> {
+        for (f, e) in lost {
+            let n = f.tx.nonce();
+            if above(inflight, n) {
+                match self.plug(n, base_fee, sent_at).await? {
+                    Some(p) => inflight.push(p),
+                    None if self.known(&f.tx).await? => {
+                        inflight.push(f);
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+            self.abort.get_or_insert(e);
+        }
+        Ok(false)
+    }
+
+    /// Whether the node has `tx`, mined or waiting in its pool.
+    async fn known(&self, tx: &SignedTx) -> Result<bool, StoreError> {
+        if self.arkiv.receipt(tx.hash()).await?.is_some() {
+            return Ok(true);
+        }
+        Ok(self.arkiv.transaction(tx.hash()).await?.is_some())
     }
 
     /// The sender's balance not already reserved by txs in flight.
@@ -349,19 +652,24 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         Ok(have.saturating_sub(reserved))
     }
 
-    /// Moves `amount` from the funder to the sender and waits for it to land; fails with
-    /// `E_INSUFFICIENT_FUNDS` naming the funder when it cannot cover the transfer.
-    async fn top_up(&self, amount: U256, base_fee: u128) -> Result<(), StoreError> {
+    /// Moves `amount` from the funder to the sender, or only `min` when the funder cannot
+    /// spare `amount`, waits for it to land and returns what moved; fails with
+    /// `E_INSUFFICIENT_FUNDS` naming the funder when it cannot cover even `min`.
+    async fn top_up(&self, amount: U256, min: U256, base_fee: u128) -> Result<U256, StoreError> {
         let Some(funder) = &self.funder else {
-            return Ok(());
+            return Ok(U256::ZERO);
         };
         let max_fee = self.cfg.max_fee(base_fee);
-        let need = amount + self.cfg.top_up_fee(base_fee);
+        let fee = self.cfg.top_up_fee(base_fee);
         let have = self.arkiv.balance(funder.address()).await?;
-        if have < need {
+        let amount = match have >= amount + fee {
+            true => amount,
+            false => min,
+        };
+        if have < amount + fee {
             return Err(StoreError::InsufficientFunds {
                 address: funder.address(),
-                need,
+                need: amount + fee,
                 have,
             });
         }
@@ -381,7 +689,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             tokio::time::sleep(self.cfg.poll).await;
             if let Some(r) = self.arkiv.receipt(tx.hash()).await? {
                 return match r.success {
-                    true => Ok(()),
+                    true => Ok(amount),
                     false => Err(StoreError::Reverted {
                         tx: Some(tx.hash()),
                         reason: "top-up transfer failed".into(),
@@ -405,17 +713,22 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
     /// Collect receipts; resend txs that have waited too long; surface reverts.
     async fn poll(
         &mut self,
+        queue: &mut VecDeque<(usize, Job)>,
         inflight: &mut Vec<InFlight>,
         done: &mut Vec<Landed>,
     ) -> Result<(), StoreError> {
-        // The head and every receipt are independent reads: one round trip, not 1 + n.
+        // The head (with its base fee, for the next fill) and every receipt are
+        // independent reads: one round trip, not 1 + n.
         let hashes: Vec<_> = inflight.iter().map(|f| f.tx.hash()).collect();
-        let (head, receipts) = futures_util::future::try_join(
-            self.arkiv.head(),
+        let ((head, fee), receipts) = futures_util::future::try_join(
+            self.arkiv.head_fee(),
             futures_util::future::try_join_all(hashes.iter().map(|h| self.arkiv.receipt(*h))),
         )
         .await?;
+        self.seen = Some((head, fee, Instant::now()));
         let mut receipts = receipts.into_iter().map(Some).collect::<Vec<_>>();
+        // Plugs join the in-flight list after this pass, which only knows the polled txs.
+        let mut plugs = vec![];
         let mut i = 0;
         while i < inflight.len() {
             let f = &mut inflight[i];
@@ -432,10 +745,33 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                     inflight.swap_remove(i);
                     continue;
                 }
-                Some(_) => return Err(self.revert_reason(f).await),
+                Some(_) => {
+                    let f = inflight.swap_remove(i);
+                    let again = self.failed(f).await?;
+                    queue.push_front(again);
+                    continue;
+                }
                 None if head >= f.sent_at + self.cfg.resend_after_blocks => {
                     if f.resends >= self.cfg.max_resends {
-                        return Err(StoreError::Dropped(f.tx.hash()));
+                        let (n, hash, is_plug) = (f.tx.nonce(), f.tx.hash(), f.job == PLUG);
+                        if is_plug {
+                            return Err(StoreError::Dropped(hash));
+                        }
+                        // Replace it so the txs above it can still land, then fail; if its
+                        // nonce got used meanwhile and it was mined, poll it as usual.
+                        let f = inflight.swap_remove(i);
+                        if above(inflight, n) {
+                            match self.plug(n, fee, head).await? {
+                                Some(p) => plugs.push(p),
+                                None if self.arkiv.receipt(hash).await?.is_some() => {
+                                    plugs.push(f);
+                                    continue;
+                                }
+                                None => {}
+                            }
+                        }
+                        self.abort.get_or_insert(StoreError::Dropped(hash));
+                        continue;
                     }
                     f.resends += 1;
                     f.sent_at = head;
@@ -449,32 +785,99 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             }
             i += 1;
         }
+        inflight.extend(plugs);
         Ok(())
     }
 
-    /// Why a mined tx failed: re-estimate it to recover the registry error when possible.
-    async fn revert_reason(&self, f: &InFlight) -> StoreError {
+    /// A zero-value transfer to self at `nonce`, priced to replace whatever the node may
+    /// hold there, so the txs above it can land. `None` when the nonce is already used.
+    async fn plug(
+        &self,
+        nonce: u64,
+        base_fee: u128,
+        sent_at: u64,
+    ) -> Result<Option<InFlight>, StoreError> {
+        let tip = self.cfg.tip + self.cfg.tip / 10 + 1;
+        let params = TxParams {
+            nonce,
+            to: self.address(),
+            value: U256::ZERO,
+            input: Bytes::new(),
+            gas_limit: TRANSFER_GAS,
+            max_fee_per_gas: 2 * self.cfg.max_fee(base_fee) + tip,
+            max_priority_fee_per_gas: tip,
+        };
+        let tx = SignedTx::sign(&self.signer, self.chain_id, params)?;
+        match send_retrying(self.arkiv, &tx).await {
+            Ok(()) => Ok(Some(InFlight {
+                job: PLUG,
+                body: Job::Transfer(self.address(), U256::ZERO),
+                tx,
+                gas: TRANSFER_GAS,
+                sent_at,
+                resends: 0,
+                shape: None,
+            })),
+            Err(StoreError::NonceTooLow(_)) => Ok(None),
+            Err(e) => Err(StoreError::Rpc(format!(
+                "nonce {nonce} of {} is a gap that the txs above it wait on; plugging it failed: {e}",
+                self.address()
+            ))),
+        }
+    }
+
+    /// A mined tx failed, so none of its ops took effect. If re-estimating it reverts, that
+    /// is the error; if not (its gas was too low, or the state moved), the job is returned
+    /// to be priced afresh and sent once more.
+    async fn failed(&mut self, f: InFlight) -> Result<(usize, Job), StoreError> {
         let reason = match &f.body {
             Job::Execute(ops) => match self.arkiv.estimate(self.address(), ops).await {
                 Err(StoreError::Reverted { reason, .. }) => reason,
-                Err(StoreError::InsufficientFunds {
-                    address,
-                    need,
-                    have,
-                }) => {
-                    return StoreError::InsufficientFunds {
-                        address,
-                        need,
-                        have,
-                    };
+                Err(e @ StoreError::InsufficientFunds { .. }) => return Err(e),
+                // Sent again it would land after txs that may depend on it.
+                _ if self.cfg.ordered && self.nonce.is_some_and(|n| n > f.tx.nonce() + 1) => {
+                    "status 0 (not resent: later txs of this ordered run already went out)".into()
+                }
+                _ if self
+                    .retried
+                    .insert((f.job, keccak256(execute_calldata(ops)))) =>
+                {
+                    if let Some(s) = &f.shape {
+                        self.estimates.forget(s);
+                    }
+                    return Ok((f.job, f.body));
                 }
                 _ => "status 0 (does not reproduce on re-estimate)".into(),
             },
             Job::Transfer(..) => "transfer failed".into(),
         };
-        StoreError::Reverted {
+        Err(StoreError::Reverted {
             tx: Some(f.tx.hash()),
             reason,
+        })
+    }
+}
+
+/// Job index of a gap-plugging transfer; it never belongs to a caller's job.
+const PLUG: usize = usize::MAX;
+
+/// Whether a tx in flight has a nonce above `n`, i.e. waits on it.
+fn above(inflight: &[InFlight], n: u64) -> bool {
+    inflight.iter().any(|f| f.tx.nonce() > n)
+}
+
+/// Sends one signed tx, resending the same bytes on an RPC error: an identical tx can land
+/// at most once, so this never double-spends. Other errors return at once.
+async fn send_retrying<A: Arkiv>(a: &A, tx: &SignedTx) -> Result<(), StoreError> {
+    let mut attempt = 1;
+    loop {
+        match a.send(tx.clone()).await {
+            Ok(_) => return Ok(()),
+            Err(StoreError::Rpc(_)) if attempt < SEND_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(200 << attempt)).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -538,7 +941,6 @@ pub fn batch(items: Vec<(Operation, u64)>, limits: BatchLimits) -> Vec<Vec<Opera
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::B256;
 
     fn ext(i: u8) -> Operation {
         Operation::extend_expiry(B256::repeat_byte(i), 0, 100)

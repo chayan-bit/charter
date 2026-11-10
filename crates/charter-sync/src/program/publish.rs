@@ -38,12 +38,17 @@ pub async fn publish<A: Arkiv>(
         })
     };
     let existing = cob::list(a, rid, None, Some(PROGRAM_TYPE)).await?;
-    let object = match existing.iter().find(|o| o.body.is_create()) {
-        Some(o) => o.id,
-        None => cob::post(a, cfg, keys, &op(ZERO, CREATE, &json!({}))?).await?,
-    };
     let payload = json!({ "engine": engine, "source": source });
-    cob::post(a, cfg, keys, &op(object, PUBLISH, &payload)?).await
+    if let Some(o) = existing.iter().find(|o| o.body.is_create()) {
+        return cob::post(a, cfg, keys, &op(o.id, PUBLISH, &payload)?).await;
+    }
+    // A first publish: the create and the publish naming it go out together.
+    let create = cob::sign_op(keys, &op(ZERO, CREATE, &json!({}))?)?;
+    let publish = cob::sign_op(keys, &op(create.h, PUBLISH, &payload)?)?;
+    let ids = cob::post_signed(a, cfg, keys, rid, &[create, publish]).await?;
+    ids.last()
+        .copied()
+        .ok_or_else(|| crate::SyncError::coded(charter_core::ErrorCode::Internal, "no op posted"))
 }
 
 /// Obligations of the pinned program of `rid` (empty without a pin); the escrow hook. It

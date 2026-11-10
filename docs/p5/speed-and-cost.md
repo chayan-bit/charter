@@ -47,9 +47,9 @@ The client is network bound, not CPU bound: every path above spends under 3 perc
 1. Head probe: one batched request carrying `entityNonce` and the live count of every tracked control address plus anchors above the local high-water mark.
    If nothing changed, the sync ends there; otherwise the remaining queries run in parallel, not in sequence.
    ESTIMATE: no-op fetch from 5.3 s to under 1 s; every push and `program status` start with this sync, so they gain too.
-2. Incremental program state: keep the folded state and a cursor (block, entity key) per repo locally, fold only new ops, and refold from scratch only when the pinned program changes.
+2. DONE on `perf/batch-a` (2.7). Incremental program state: keep the folded state and a cursor (block, entity key) per repo locally, fold only new ops, and refold from scratch only when the pinned program changes.
    ESTIMATE: `program status` from 6.8 s to under 1 s.
-3. Transport: enable `reqwest` brotli and gzip, batch independent calls, keep one HTTP/2 connection.
+3. DONE (brotli and gzip in 2.6, HTTP/2 in 2.7). Transport: enable `reqwest` brotli and gzip, batch independent calls, keep one HTTP/2 connection.
    ESTIMATE: about 43 percent fewer bytes on clone, fewer access-key cost units.
 
 ### 2.2 Write path
@@ -62,7 +62,7 @@ The client is network bound, not CPU bound: every path above spends under 3 perc
 5. Sign once per push (format v2): the anchor already commits to the refs and manifest hashes, so those carry no signature of their own; this saves about 6.7 KB (two 3,353 B ML-DSA-65 envelopes) per push.
 6. Thin packs: push with `git pack-objects --thin` against already anchored tips; clone with `git index-pack --fix-thin`, applying packs in anchor order (requires first, as today).
    MEASURED: 1.97x fewer bytes overall, 3 to 57x for a typical commit.
-7. Batch and pipeline ops: several ops per tx (review create plus approve; the blob ops of a receipt), sent on the existing nonce pipeline instead of awaiting each receipt.
+7. DONE on `perf/batch-a` (2.7), one tx per op on one pipeline because entities in one tx have no defined order. Batch and pipeline ops: several ops per tx (review create plus approve; the blob ops of a receipt), sent on the existing nonce pipeline instead of awaiting each receipt.
    ESTIMATE: the 4-minute proof flow drops to about 10 s.
 
 ### 2.3 Long-run cost
@@ -129,6 +129,73 @@ Push bench on Rabdi (2026-11-10, MEASURED): one fresh repo per variant seeded wi
 
 Gas per push is not in this table: the wallet balance delta turned out to track top-ups of the per-repo control and bulk addresses, not the gas each push burned, so it needs a per-address receipt sum instead.
 Item 1 (one head probe that ends a no-op sync early) and item 2 (incremental program fold) are still the large read-path wins; this pass did not attempt them.
+
+### 2.7 Transport, tx pipeline, incremental fold and op batching on branch `perf/batch-a` (2026-11-11, MEASURED)
+
+No format change: v0.3.0 cloned and pulled a repo this branch pushed (2 MiB and 4 MiB blobs included, `git fsck --full` clean), and this branch cloned the same repo after v0.3.0 pushed a commit on top.
+The head probe (item 1) is not in this branch; it moved to the head-model work (3.4).
+
+What changed:
+
+- Item 2: the program fold resumes from a local checkpoint (`arkiv-fold.json` next to the git cache) and runs only the events after it.
+  A checkpoint is used only when its version, program hash, repo facts, seed heads and a running SHA-256 over the exact folded events all match, and when every git-ancestry question it asked was answered; anything else folds from scratch.
+  It is taken before the obligations run, and a test resumes at every split of every template and compares with a full fold.
+- Item 3: `reqwest` speaks HTTP/2, so concurrent calls share one TLS connection; every traced call reports `HTTP/2.0`.
+  TLS sessions are resumed within a process (rustls default) but not across processes, so each `chart` or helper process still pays one full handshake on its first call (about 0.35 to 0.9 s).
+- Tx pipeline (3.13 step 1): one `eth_estimateGas` per create shape (attribute names, types, value lengths, lifetime, calldata length) prices every chunk of that shape, corrected for zero bytes and with the usual 10 percent headroom; a tx that fails on a reused estimate is re-estimated and resent once.
+  The head number and base fee come from one `eth_getBlockByNumber` call, reused for 2 s.
+  Inclusion is awaited on a `newHeads` subscription, with the old polling as the fallback when the socket fails.
+  A window's txs are signed with consecutive nonces and sent concurrently.
+- Item 7: `cob::post_signed` and `cob::post_many` send several ops back to back on one nonce pipeline, one tx each so dependent ops keep their order (entities created in one tx have no defined order); the first program publish and `chart op attach` use it.
+- Big pushes: the bulk address keeps up to two blocks of gas in flight (`PipelineConfig::bulk`), chunks go out in batches of 256 instead of 64, and `TxPipeline::run_measured` reports MB/s.
+
+Read bench on Charter's own repo, interleaved rounds against `main`, 5 rounds each, healthy endpoint (warm calls 0.3 to 0.6 s), 0 failures:
+
+| Operation | main | perf/batch-a | Speedup | RPC calls (both) |
+|---|---|---|---|---|
+| clone | 9.94 s | 10.74 s | none (round spread 9.8 to 13.1 s) | 14 |
+| no-op fetch | 5.82 s | 4.87 s | 1.19x | 14 |
+| `program status` | 5.17 s | 4.90 s | 1.06x | 14 |
+
+The fold itself (46 events) drops from 89 to 224 ms to 0 to 1 ms once a checkpoint exists.
+The 1 s targets for no-op fetch and `program status` are missed: both still make 14 calls in about 10 dependent stages, and only the head probe removes them.
+
+Push bench on Rabdi: one fresh repo per variant seeded with `charter-store/src`, data lifetime 1 day, control lifetime 2 days, same bench wallet, 0 failures.
+
+| Push | main | perf/batch-a | Speedup |
+|---|---|---|---|
+| first push (n=1, not interleaved) | 23.79 s | 20.77 s | 1.15x |
+| small one-line change, median (n=4, interleaved) | 23.04 s | 20.95 s | 1.10x |
+| 2 MiB random blob (n=1) | 81.53 s, 0.026 MB/s | 45.23 s, 0.046 MB/s | 1.80x |
+| 4 MiB random blob (n=1) | not run | 70.46 s, 0.060 MB/s | - |
+
+A traced small push makes 63 RPC calls instead of 81 (`eth_blockNumber` 15 to 5, receipts 11 to 7, balances 10 to 8); its 8 estimates stay, because each of its txs has a different shape.
+The chunk phase alone, taken as the big push minus the small-push median, runs at about 0.036 MB/s on `main` and about 0.085 MB/s here (2.4x).
+A 2 MiB push burned about 0.085 to 0.095 tGLM of gas on both sides (summed per address), so the speedup costs no gas; the bulk address now holds a larger float between pushes (up to about 0.06 tGLM).
+10 MiB was not run because its gas (about 0.43 tGLM, DERIVED) exceeded the bench budget; at the measured chunk rate it would take about 145 s (ESTIMATE).
+
+In those runs the bulk address was topped up once per window and waited for each top-up to land: the 4 MiB push sent 16 chunks over 2 blocks, then left 3 to 5 blocks idle, so its chunks used 25 percent of the gas of the blocks they spanned.
+
+Follow-up on the same branch (2026-11-11, MEASURED):
+
+- One top-up funds the whole run: one window at the max fee (what the node checks before admitting txs) plus the expected burn of every later job, `gas x (base fee + tip)`.
+  If the base fee outgrows that, or the funder cannot spare the whole amount, the per-window top-up still runs as before.
+- A send that still fails after its retries, or a tx dropped after every resend, no longer strands the txs above its nonce: the gap is plugged with a zero-value transfer to self priced to replace it, everything in flight lands, and then the run fails with the original error.
+
+| Push (same repo and bulk address) | per-window top-ups | one top-up per run | Speedup |
+|---|---|---|---|
+| 2 MiB random blob (n=1) | 45.23 s, 0.046 MB/s | 32.70 s, 0.064 MB/s | 1.38x |
+| 3 MiB random blob (n=1) | not run | 39.36 s, 0.080 MB/s | - |
+| 4 MiB random blob (n=1) | 70.46 s, 0.060 MB/s | not run (budget) | - |
+| chunk span, 2 MiB | 12 blocks, 24 percent of their gas | 5 blocks, 58 percent | |
+| chunk span, 3 or 4 MiB | 23 blocks, 25 percent (4 MiB) | 8 blocks, 54 percent (3 MiB) | |
+
+The 2 MiB chunks landed in 4 blocks, about 0.26 MB/s while they were landing; the rest of the 32.7 s is the push's fixed reads and control txs.
+In the 3 MiB push our txs filled blocks to 90 to 99 percent, the base fee rose from 1.00 to 1.37 gwei within 5 blocks, and that rise triggered the one fallback top-up, which cost one idle block.
+The step from 2 to 3 MiB added 6.7 s for 1.05 MB (about 0.16 MB/s), so a 10 MiB push would now take about 85 s instead of about 145 s (ESTIMATE).
+About 11 chunks of 64 KiB fit in a 30M-gas block (DERIVED), so the pipeline now alternates full and half-full blocks: the per-sender limit of 16 pending txs and the round trip between a receipt and the next send leave the second block of each pair partly empty.
+
+Op batching was not measured on chain; with N ops on one pipeline a post waits about one confirmation round instead of N (ESTIMATE).
 
 ## 3. Proposals for a much larger cut (need the user's decision)
 
@@ -379,7 +446,7 @@ Limits that design alone cannot remove:
 
 Order of work, smallest change first:
 
-1. No format change: head probe, TLS session resumption, local fee formula, `newHeads` instead of receipt polling, one batch per stage. Target: no-op fetch under 1 s.
+1. No format change (DONE on `perf/batch-a` except the head probe and cross-process TLS resumption, see 2.7): head probe, TLS session resumption, local fee formula, `newHeads` instead of receipt polling, one batch per stage. Target: no-op fetch under 1 s.
 2. Format v2 with the head model: zero-read single-tx push, device heads, snapshot hash in the head, race-and-verify clone. Target: confirmed push about 2 s, 10 MB clone under GitHub's 3.26 s.
 3. `chart node`: warm connection, subscription, prefetch, outbox. Target: fetch local, accepted push about 0.3 s.
 4. Ask Arkiv: regional RPC, preconfirmations or `eth_sendRawTransactionSync`, and the 200M block gas fix.

@@ -10,7 +10,7 @@ use charter_core::{
     AttrValue, Body, Envelope, ErrorCode, Hash32, IdentityChain, Kind, Nid, ProgramPin, RefsBody,
     Revision, VerifiedOp, canonical_refs, find_refs, verify_ops,
 };
-use charter_program::{Event, Outcome, Program, ProgramOp, RefUpdate, RepoInfo};
+use charter_program::{Checkpoint, Event, Outcome, Program, ProgramOp, RefUpdate, RepoInfo};
 use charter_store::{Arkiv, Pred};
 use serde_json::{Value, json};
 
@@ -46,31 +46,73 @@ pub struct Enforced {
     /// Block of each Arkiv order (rank), to turn an obligation's `due_order` into `since_block`.
     pub blocks: Vec<u64>,
     pub outcome: Outcome,
+    /// The fold paused after `events`: a push check folds only its own updates from here.
+    pub checkpoint: Option<Checkpoint>,
 }
+
+/// File next to the git cache holding the last fold's checkpoint (incremental folds).
+const FOLD_CACHE: &str = "arkiv-fold.json";
 
 fn missing(msg: impl Into<String>) -> SyncError {
     SyncError::coded(ErrorCode::ProgramMissing, msg)
 }
 
-fn fold(e: &Enforced, extra: Vec<RefUpdate>, git: &Git) -> Result<Outcome> {
-    let events = e
+/// Folds `e.events` then `extra`, resuming from `cache` when it is a checkpoint of a
+/// prefix of exactly these events (charter-program checks that); returns the outcome and
+/// the checkpoint after all of them.
+fn fold(
+    e: &Enforced,
+    extra: Vec<RefUpdate>,
+    git: &Git,
+    cache: Option<&Checkpoint>,
+) -> Result<(Outcome, Option<Checkpoint>)> {
+    let events: Vec<Event> = e
         .events
         .iter()
         .cloned()
-        .chain(extra.into_iter().map(Event::Push));
+        .chain(extra.into_iter().map(Event::Push))
+        .collect();
     let ancestry = |a: &[u8], b: &[u8]| is_ancestor(git, a, b);
-    Program::load(&e.engine, &e.source)
+    let (o, cp) = Program::load(&e.engine, &e.source)
         .map_err(|err| missing(err.to_string()))?
-        .fold_with(e.repo.clone(), e.seed.clone(), events, &ancestry)
-        .map_err(|err| missing(format!("program fold failed: {err}")))
-        .map(|o| Outcome {
-            obligations: o
-                .obligations
-                .into_iter()
-                .map(|v| since_block(v, &e.blocks))
-                .collect(),
-            ..o
-        })
+        .fold_cached(
+            &e.source,
+            e.repo.clone(),
+            e.seed.clone(),
+            &events,
+            &ancestry,
+            cache,
+        )
+        .map_err(|err| missing(format!("program fold failed: {err}")))?;
+    let o = Outcome {
+        obligations: o
+            .obligations
+            .into_iter()
+            .map(|v| since_block(v, &e.blocks))
+            .collect(),
+        ..o
+    };
+    Ok((o, cp))
+}
+
+/// The checkpoint saved by the last fold of this cache, if readable.
+fn load_checkpoint(git: &Git) -> Option<Checkpoint> {
+    let b = std::fs::read(git.dir()?.join(FOLD_CACHE)).ok()?;
+    serde_json::from_slice(&b).ok()
+}
+
+/// Keeps `cp` for the next fold; a cache that cannot be written only costs a full fold.
+fn save_checkpoint(git: &Git, cp: Option<&Checkpoint>) {
+    let Some(path) = git.dir().map(|d| d.join(FOLD_CACHE)) else {
+        return;
+    };
+    let r = match cp {
+        Some(cp) => crate::state::write_json(&path, cp),
+        None => std::fs::remove_file(&path).or(Ok(())),
+    };
+    if let Err(e) = r {
+        crate::warn(&format!("fold cache: {e}"));
+    }
 }
 
 /// Adds `since_block` (the block of Arkiv order `due_order`) to an obligation that names
@@ -84,26 +126,23 @@ fn since_block(mut v: Value, blocks: &[u64]) -> Value {
     v
 }
 
-/// Git ancestry of commit `a` to commit `b` in `git`, or `None` if either is missing.
+/// Git ancestry of commit `a` to commit `b` in `git`, or `None` when git cannot decide
+/// (either commit, or any commit between them, is missing): a `None` keeps the fold from
+/// being checkpointed, so the verdict is taken again once the objects arrive.
 pub fn is_ancestor(git: &Git, a: &[u8], b: &[u8]) -> Option<bool> {
     let (a, b) = (hex::encode(a), hex::encode(b));
-    let has = |o: &str| {
-        git.run(&["cat-file", "-e", &format!("{o}^{{commit}}")], b"")
-            .is_ok()
-    };
-    if !has(&a) || !has(&b) {
-        return None;
+    match git.exit_code(&["merge-base", "--is-ancestor", &a, &b]) {
+        Ok(Some(0)) => Some(true),
+        Ok(Some(1)) => Some(false),
+        _ => None,
     }
-    // Exit 1 (no common ancestor) is a plain "not an ancestor".
-    let base = git.run(&["merge-base", &a, &b], b"").unwrap_or_default();
-    Some(String::from_utf8_lossy(&base).trim() == a)
 }
 
 impl Enforced {
     /// Folds again with `updates` appended after everything on chain; the first of them the
     /// program rejects is `E_PROGRAM_REJECTED` with the program's reason.
     pub fn check(&self, updates: Vec<RefUpdate>, git: &Git) -> Result<()> {
-        let o = fold(self, updates, git)?;
+        let (o, _) = fold(self, updates, git, self.checkpoint.as_ref())?;
         match o
             .rejected
             .iter()
@@ -323,8 +362,19 @@ pub async fn enforce<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<E
             logs: vec![],
             heads: BTreeMap::new(),
         },
+        checkpoint: None,
     };
-    e.outcome = fold(&e, vec![], git)?;
+    let (cached, started) = (load_checkpoint(git), std::time::Instant::now());
+    (e.outcome, e.checkpoint) = fold(&e, vec![], git, cached.as_ref())?;
+    if std::env::var_os("CHARTER_TRACE").is_some_and(|v| !v.is_empty()) {
+        eprintln!(
+            "chart-trace: fold {} events (checkpoint had {:?}) {} ms",
+            e.events.len(),
+            cached.as_ref().map(|c| c.events),
+            started.elapsed().as_millis()
+        );
+    }
+    save_checkpoint(git, e.checkpoint.as_ref());
     Ok(Some(e))
 }
 
@@ -363,6 +413,58 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn ancestry_is_undecided_while_a_commit_between_is_missing() {
+        let d = tempfile::tempdir().expect("tmp");
+        let sh = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .current_dir(d.path())
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout)
+                .expect("utf8")
+                .trim()
+                .to_owned()
+        };
+        sh(&["init", "-q"]);
+        let mut c = vec![];
+        for i in 0..3 {
+            sh(&[
+                "commit",
+                "-q",
+                "--no-verify",
+                "--allow-empty",
+                "-m",
+                &format!("chore: c{i}"),
+            ]);
+            c.push(hex::decode(sh(&["rev-parse", "HEAD"])).expect("hex"));
+        }
+        let git = Git::work(Some(d.path()));
+        assert_eq!(is_ancestor(&git, &c[0], &c[2]), Some(true));
+        assert_eq!(is_ancestor(&git, &c[2], &c[0]), Some(false));
+        assert_eq!(is_ancestor(&git, &[7; 20], &c[2]), None, "unknown commit");
+        // Objects still arriving: the middle commit is not here yet.
+        let mid = hex::encode(&c[1]);
+        std::fs::remove_file(
+            d.path()
+                .join(format!(".git/objects/{}/{}", &mid[..2], &mid[2..])),
+        )
+        .expect("remove");
+        assert_eq!(is_ancestor(&git, &c[0], &c[2]), None, "not a frozen false");
     }
 
     #[test]
