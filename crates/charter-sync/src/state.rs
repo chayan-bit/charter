@@ -50,6 +50,9 @@ pub struct State {
     /// Format v2: where each head body landed, by its `h` (head-model 5.4).
     #[serde(default)]
     pub landings: BTreeMap<String, LandingJson>,
+    /// Format v2: the last head body this machine sent, by device nid (head-model 7.4).
+    #[serde(default)]
+    pub sent_heads: BTreeMap<String, String>,
 }
 
 /// The tx that carried a head body.
@@ -88,6 +91,7 @@ impl Default for State {
             equivocations: vec![],
             devices: BTreeMap::new(),
             landings: BTreeMap::new(),
+            sent_heads: BTreeMap::new(),
         }
     }
 }
@@ -162,6 +166,18 @@ impl State {
             block: m.block,
         };
         self.devices.insert(hex32(dev), j);
+    }
+
+    /// The last head body `dev` sent from this machine.
+    pub fn sent_head(&self, dev: &Nid) -> Result<Option<Hash32>> {
+        self.sent_heads
+            .get(&hex32(dev))
+            .map(|h| unhex32(h))
+            .transpose()
+    }
+
+    pub fn set_sent_head(&mut self, dev: &Nid, h: &Hash32) {
+        self.sent_heads.insert(hex32(dev), hex32(h));
     }
 
     pub fn landing(&self, h: &Hash32) -> Option<LandingJson> {

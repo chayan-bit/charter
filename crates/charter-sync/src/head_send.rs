@@ -436,6 +436,9 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 inline.push(vec![]);
             }
             let c_d = self.dev.control_address(&rid);
+            // The confirmed tx count first: a tx of `C_d` landing after it either moves
+            // `entityNonce` (caught below) or takes this nonce (the send fails).
+            let account = self.a.tx_count_mined(c_d).await?;
             let (at, nonce) =
                 futures_util::future::try_join(self.a.head(), self.a.entity_nonce(c_d)).await?;
             // Another writer of this device (a copied device seed) would fork the body
@@ -444,7 +447,14 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 Some(_) => pieces + 1,
                 None => 0,
             };
-            if nonce != expected {
+            let sent = state.sent_head(&self.me())?;
+            let own = plan.prev.as_ref().is_some_and(|p| Some(p.head.h) == sent);
+            if nonce > expected && own && out.is_empty() {
+                warn(
+                    "repairing this device's head: it now accounts for every entity its control address created",
+                );
+                pieces = nonce - 1;
+            } else if nonce != expected {
                 return Err(SyncError::coded(
                     ErrorCode::ConcurrentPush,
                     format!(
@@ -478,7 +488,13 @@ impl<A: Arkiv> HeadPush<'_, A> {
             // body chain (head-model 7.2).
             let marker = self.pending_head_path();
             std::fs::write(&marker, hex32(&h)).map_err(|e| SyncError::io(marker.display(), e))?;
-            let landed = self.send_from(&self.dev.control(&rid), vec![ops]).await?;
+            state.set_sent_head(&self.me(), &h);
+            state.save(&self.repo.state_path())?;
+            let cfg = self.cfg.pipeline.ordered();
+            let wallet = self.keys.wallet();
+            let signer = self.dev.control(&rid);
+            let landed =
+                write::send_funded_at(self.a, &signer, &wallet, &cfg, account, vec![ops]).await?;
             let [l] = landed.as_slice() else {
                 return Err(SyncError::coded(
                     ErrorCode::Internal,

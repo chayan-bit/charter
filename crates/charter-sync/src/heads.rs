@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use charter_core::{
     AttrValue, Device, DeviceHead, ErrorCode, Hash32, HeadBody, HeadNonce, IdentityChain, Kind,
-    Merged, Nid, Observed, PeerInfo, RefsBody, Rid, accept_device_head, devices, merge,
-    merged_refs, verify_entity,
+    Merged, Nid, Observed, PeerInfo, RefsBody, Rid, accept_device_head, accept_own_device_head,
+    devices, merge, merged_refs, verify_entity,
 };
 use charter_store::{Arkiv, MinedTx, Pred, tx_rows};
 use futures_util::future::try_join_all;
@@ -94,7 +94,20 @@ async fn device_view<A: Arkiv>(
 ) -> Result<DeviceView> {
     let (rows, nonce) = bracket(a, rid, &dev).await?;
     let mark = state.device_mark(&dev.nid)?;
-    let head = accept_device_head(rid, nid, &dev, identity, &rows, &nonce, mark.as_ref())?;
+    let m = mark.as_ref();
+    let head = match state.sent_head(&dev.nid)? {
+        Some(sent) => accept_own_device_head(rid, nid, &dev, identity, &rows, &nonce, m, &sent)?,
+        None => accept_device_head(rid, nid, &dev, identity, &rows, &nonce, m)?,
+    };
+    if head
+        .as_ref()
+        .is_some_and(|h| h.body.pieces_created + 1 != nonce.before)
+    {
+        crate::warn(
+            "this device's head accounts for fewer entities than its control address created \
+             (a copy of this device seed pushed at the same time); the next push repairs it",
+        );
+    }
     Ok(DeviceView {
         device: dev,
         head,

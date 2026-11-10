@@ -116,6 +116,29 @@ pub async fn send_funded<A: Arkiv>(
     Ok(p.run(jobs).await?)
 }
 
+/// [`send_funded`] with the first tx signed at exactly `nonce`; a nonce another sender of
+/// `signer` holds fails with `E_CONCURRENT_PUSH` instead of moving on (head-model 7.4).
+pub async fn send_funded_at<A: Arkiv>(
+    a: &A,
+    signer: &PrivateKeySigner,
+    wallet: &PrivateKeySigner,
+    cfg: &PipelineConfig,
+    nonce: u64,
+    jobs: Vec<Vec<Operation>>,
+) -> Result<Vec<Landed>> {
+    let chain_id = a.chain_id().await?;
+    let mut p = TxPipeline::new(a, signer.clone(), chain_id, cfg.clone())
+        .funded_by(wallet.clone())
+        .at_nonce(nonce);
+    p.run(jobs).await.map_err(|e| match e {
+        charter_store::StoreError::NonceTooLow(m) => SyncError::coded(
+            charter_core::ErrorCode::ConcurrentPush,
+            format!("{m}: another machine with this device seed is pushing; push again"),
+        ),
+        e => e.into(),
+    })
+}
+
 /// The one up-front check of a push: `wallet` plus what `spenders` already hold must cover
 /// `need` (predicted spend plus one window's reserve), else `E_INSUFFICIENT_FUNDS`.
 pub async fn check_funds<A: Arkiv>(
