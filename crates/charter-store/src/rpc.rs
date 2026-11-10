@@ -197,6 +197,7 @@ impl RpcArkiv {
                 Err(e) => return Err(StoreError::Rpc(format!("{method}: {e}"))),
             };
             let status = resp.status().as_u16();
+            let version = resp.version();
             let now = std::time::Instant::now();
             self.note_quota(method, Quota::from_response(status, resp.headers(), now));
             if status == 429 {
@@ -233,7 +234,7 @@ impl RpcArkiv {
             }
             if self.trace {
                 eprintln!(
-                    "chart-trace: {method} {} ms {} B",
+                    "chart-trace: {method} {} ms {} B {version:?}",
                     started.elapsed().as_millis(),
                     text.len()
                 );
