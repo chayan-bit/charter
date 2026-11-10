@@ -221,6 +221,9 @@ pub struct TxPipeline<'a, A: Arkiv> {
     heads_off: bool,
     /// The nonce was re-read because someone else took it; a second time is an error.
     reread: bool,
+    /// A tx could not be sent or landed: send nothing more, let what is in flight land
+    /// (gaps below it plugged), then fail with this.
+    abort: Option<StoreError>,
 }
 
 impl<'a, A: Arkiv> TxPipeline<'a, A> {
@@ -238,6 +241,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             heads: None,
             heads_off: false,
             reread: false,
+            abort: None,
         }
     }
 
@@ -296,7 +300,15 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
     ) -> Result<Vec<Landed>, StoreError> {
         let (mut inflight, mut done) = (Vec::new(), Vec::new());
         loop {
-            self.fill(&mut queue, &mut inflight).await?;
+            if self.abort.is_none() {
+                self.fill(&mut queue, &mut inflight).await?;
+            }
+            if inflight.is_empty()
+                && let Some(e) = self.abort.take()
+            {
+                self.nonce = None;
+                return Err(e);
+            }
             if inflight.is_empty() && queue.is_empty() {
                 done.sort_by_key(|l: &Landed| (l.job, l.receipt.block_number));
                 return Ok(done);
@@ -531,7 +543,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             signed.iter().map(|(.., tx)| send_retrying(self.arkiv, tx)),
         )
         .await;
-        let mut stolen = vec![];
+        let (mut stolen, mut lost) = (vec![], vec![]);
         for ((job, body, gas, shape, tx), r) in signed.into_iter().zip(results) {
             match r {
                 Ok(()) => inflight.push(InFlight {
@@ -544,8 +556,19 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                     shape,
                 }),
                 Err(StoreError::NonceTooLow(m)) => stolen.push((job, body, m)),
-                Err(e) => return Err(e),
+                Err(e) => lost.push((tx.nonce(), e)),
             }
+        }
+        if let Some((_, e)) = lost.first() {
+            // Txs above a nonce that never went out would wait on it forever: plug each
+            // such gap, let everything in flight land, then fail.
+            self.abort = Some(e.clone());
+            for (n, _) in &lost {
+                if above(inflight, *n) {
+                    inflight.extend(self.plug(*n, base_fee, sent_at).await?);
+                }
+            }
+            return Ok(false);
         }
         if stolen.is_empty() {
             self.reread = false;
@@ -646,6 +669,8 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         .await?;
         self.seen = Some((head, fee, Instant::now()));
         let mut receipts = receipts.into_iter().map(Some).collect::<Vec<_>>();
+        // Plugs join the in-flight list after this pass, which only knows the polled txs.
+        let mut plugs = vec![];
         let mut i = 0;
         while i < inflight.len() {
             let f = &mut inflight[i];
@@ -670,7 +695,17 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 }
                 None if head >= f.sent_at + self.cfg.resend_after_blocks => {
                     if f.resends >= self.cfg.max_resends {
-                        return Err(StoreError::Dropped(f.tx.hash()));
+                        let (n, hash, is_plug) = (f.tx.nonce(), f.tx.hash(), f.job == PLUG);
+                        if is_plug {
+                            return Err(StoreError::Dropped(hash));
+                        }
+                        // Replace it so the txs above it can still land, then fail.
+                        inflight.swap_remove(i);
+                        self.abort.get_or_insert(StoreError::Dropped(hash));
+                        if above(inflight, n) {
+                            plugs.extend(self.plug(n, fee, head).await?);
+                        }
+                        continue;
                     }
                     f.resends += 1;
                     f.sent_at = head;
@@ -684,7 +719,45 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             }
             i += 1;
         }
+        inflight.extend(plugs);
         Ok(())
+    }
+
+    /// A zero-value transfer to self at `nonce`, priced to replace whatever the node may
+    /// hold there, so the txs above it can land. `None` when the nonce is already used.
+    async fn plug(
+        &self,
+        nonce: u64,
+        base_fee: u128,
+        sent_at: u64,
+    ) -> Result<Option<InFlight>, StoreError> {
+        let tip = self.cfg.tip + self.cfg.tip / 10 + 1;
+        let params = TxParams {
+            nonce,
+            to: self.address(),
+            value: U256::ZERO,
+            input: Bytes::new(),
+            gas_limit: TRANSFER_GAS,
+            max_fee_per_gas: 2 * self.cfg.max_fee(base_fee) + tip,
+            max_priority_fee_per_gas: tip,
+        };
+        let tx = SignedTx::sign(&self.signer, self.chain_id, params)?;
+        match send_retrying(self.arkiv, &tx).await {
+            Ok(()) => Ok(Some(InFlight {
+                job: PLUG,
+                body: Job::Transfer(self.address(), U256::ZERO),
+                tx,
+                gas: TRANSFER_GAS,
+                sent_at,
+                resends: 0,
+                shape: None,
+            })),
+            Err(StoreError::NonceTooLow(_)) => Ok(None),
+            Err(e) => Err(StoreError::Rpc(format!(
+                "nonce {nonce} of {} is a gap that the txs above it wait on; plugging it failed: {e}",
+                self.address()
+            ))),
+        }
     }
 
     /// A mined tx failed, so none of its ops took effect. If re-estimating it reverts, that
@@ -710,6 +783,14 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             reason,
         })
     }
+}
+
+/// Job index of a gap-plugging transfer; it never belongs to a caller's job.
+const PLUG: usize = usize::MAX;
+
+/// Whether a tx in flight has a nonce above `n`, i.e. waits on it.
+fn above(inflight: &[InFlight], n: u64) -> bool {
+    inflight.iter().any(|f| f.tx.nonce() > n)
 }
 
 /// Sends one signed tx, resending the same bytes on an RPC error: an identical tx can land

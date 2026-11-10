@@ -5,6 +5,7 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering::SeqCst;
 
 use alloy_signer_local::PrivateKeySigner;
 use charter_store::fake::{MAX_LIFETIME, MemArkiv};
@@ -113,6 +114,44 @@ async fn a_tx_dropped_on_every_resend_is_reported() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_dropped_tx_below_others_is_plugged_so_they_land() {
+    let (fake, key) = setup();
+    // Sends 0 to 2 are nonces 0 to 2; nonce 0 and its three resends (sends 3 to 5, the
+    // others are already known) are dropped, so nonces 1 and 2 wait on it.
+    fake.drop_sends(0, 1);
+    fake.drop_sends(3, 3);
+    let jobs = (0..3).map(|i| vec![small("g", i, i.into())]).collect();
+    let err = run(&fake, &key, jobs).await.expect_err("dropped");
+    assert!(matches!(err, StoreError::Dropped(_)), "{err:?}");
+    assert_eq!(fake.pending(), 0, "nothing left waiting on the gap");
+    assert_eq!(fake.tx_count_mined(key.address()).await.expect("n"), 3);
+    assert_eq!(fake.entity_nonce(key.address()).await.expect("n"), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_send_failing_below_others_is_plugged_then_reported() {
+    let (fake, key) = setup();
+    let spy = Spy {
+        refuse: Some((1, 3.into())),
+        ..Spy::new(fake.clone(), false)
+    };
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default());
+    let jobs = (0..5).map(|i| vec![small("s", i, i.into())]).collect();
+    let err = with_miner(fake.clone(), p.run(jobs))
+        .await
+        .expect_err("send keeps failing");
+    assert_eq!(err.code(), "E_RPC", "{err:?}");
+    assert_eq!(fake.pending(), 0, "nonces 2 to 4 are not stranded");
+    assert_eq!(fake.tx_count_mined(key.address()).await.expect("n"), 5);
+    assert_eq!(fake.entity_nonce(key.address()).await.expect("n"), 4);
+    // The next run starts from the node's nonce and works.
+    with_miner(fake.clone(), p.run(vec![vec![small("s", 9, 9)]]))
+        .await
+        .expect("next run");
+    assert_eq!(fake.tx_count_mined(key.address()).await.expect("n"), 6);
+}
+
+#[tokio::test(start_paused = true)]
 async fn reverts_are_decoded() {
     let (fake, key) = setup();
     let err = run(&fake, &key, vec![vec![extend_op(B256::repeat_byte(9), 10)]])
@@ -147,6 +186,8 @@ struct Spy {
     revert: bool,
     estimates: std::sync::atomic::AtomicUsize,
     ws: Option<WsConfig>,
+    /// Refuse this many sends of the tx with this nonce, as a flaky RPC would.
+    refuse: Option<(u64, std::sync::atomic::AtomicU32)>,
 }
 
 impl Spy {
@@ -156,6 +197,7 @@ impl Spy {
             revert,
             estimates: Default::default(),
             ws: None,
+            refuse: None,
         }
     }
     fn estimates(&self) -> usize {
@@ -207,6 +249,14 @@ impl Arkiv for Spy {
     async fn send(&self, tx: SignedTx) -> Result<charter_store::TxHash, StoreError> {
         if self.revert {
             self.inner.revert_next_at(0);
+        }
+        if let Some((n, left)) = &self.refuse
+            && tx.nonce() == *n
+            && left
+                .fetch_update(SeqCst, SeqCst, |l| l.checked_sub(1))
+                .is_ok()
+        {
+            return Err(StoreError::Rpc("injected: connection reset".into()));
         }
         self.inner.send(tx).await
     }
