@@ -448,3 +448,54 @@ async fn send_guards_chain_id_and_size_before_any_request() {
         "only the connect probe reached the node"
     );
 }
+
+#[tokio::test]
+async fn the_quota_headers_of_the_latest_responses_are_kept_and_a_long_wait_bails() {
+    let (mut rpc, _) = client(|b| match b["method"].as_str() {
+        Some("arkiv_query") => (
+            429,
+            vec![
+                ("ratelimit", "limit=10000, remaining=0, reset=2035".into()),
+                ("retry-after", "2".into()),
+            ],
+            json!({ "error": "ANON_COST_LIMITED" }),
+        ),
+        _ => {
+            let (s, _, j) = ok(json!("0x10"));
+            (s, vec![("arkiv-quota-used-percent", "12".into())], j)
+        }
+    })
+    .await;
+    assert_eq!(rpc.quota(), None, "nothing reported yet");
+    rpc.head().await.expect("head");
+    assert_eq!(rpc.quota().and_then(|q| q.used()), Some(12.0));
+    // A caller that reschedules itself (chart ui) waits out no Retry-After at all.
+    rpc.set_max_rate_wait(Duration::ZERO);
+    let t = Instant::now();
+    let q = Query::from(Pred::eq(attr("ag.kind"), "cob"));
+    let err = rpc
+        .query(&q, &QueryOpts::count_only())
+        .await
+        .expect_err("limited");
+    assert_eq!(
+        err,
+        StoreError::RateLimited {
+            retry_after: Some(Duration::from_secs(2))
+        }
+    );
+    assert!(
+        t.elapsed() < Duration::from_secs(1),
+        "no sleep inside the call"
+    );
+    let worst = rpc.quota().expect("quota");
+    assert_eq!(
+        (worst.used(), worst.remaining, worst.retry_after),
+        (Some(100.0), Some(0), Some(2))
+    );
+    rpc.head().await.expect("head");
+    assert_eq!(
+        rpc.quota().and_then(|q| q.used()),
+        Some(100.0),
+        "the query budget stays the worst"
+    );
+}

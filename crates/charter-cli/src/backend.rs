@@ -129,6 +129,9 @@ macro_rules! both {
 }
 
 impl Arkiv for Backend {
+    fn quota(&self) -> Option<charter_store::Quota> {
+        both!(self, b => b.quota())
+    }
     async fn chain_id(&self) -> Result<u64, StoreError> {
         both!(self, b => b.chain_id().await)
     }
