@@ -121,6 +121,24 @@ fn a_stale_or_foreign_checkpoint_is_ignored() {
 }
 
 #[test]
+fn a_checkpoint_from_another_build_is_ignored() {
+    let events = history();
+    let src = source("ci-gated");
+    let (_, cp) = cached(&src, &events[..10], &known, None);
+    let mut j = serde_json::to_value(cp.expect("cp")).expect("json");
+    // Same keys otherwise, but written by another build (whose state would show).
+    j["engine"] = json!("rhai/1 charter-program/0.0.0-other");
+    j["logs"] = json!(["from another build"]);
+    let cp: Checkpoint = serde_json::from_value(j).expect("parse");
+    let (got, next) = cached(&src, &events, &known, Some(&cp));
+    assert_eq!(got, full(&src, &events, &known));
+    assert_eq!(
+        next.map(|c| c.engine),
+        Some(charter_program::CHECKPOINT_ENGINE.to_owned())
+    );
+}
+
+#[test]
 fn an_unanswered_ancestry_question_is_never_checkpointed() {
     let events = history();
     let src = source("ci-gated");

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub use checkpoint::{CHECKPOINT_VERSION, Checkpoint};
+pub use checkpoint::{CHECKPOINT_ENGINE, CHECKPOINT_VERSION, Checkpoint};
 pub use value::cbor_from_json;
 
 /// `ancestry(a, b)`: `Some(true)` if commit `a` is an ancestor of (or equal to) commit `b`,
@@ -216,6 +216,7 @@ impl Program {
         let hash = |evs: &[Event]| checkpoint::hash_all(evs).map_err(ProgramError::State);
         let usable = cache.filter(|c| {
             c.v == CHECKPOINT_VERSION
+                && c.engine == CHECKPOINT_ENGINE
                 && c.program == program
                 && c.repo == repo
                 && c.seed == seed
@@ -240,6 +241,7 @@ impl Program {
         f.events(events[from..].iter().cloned())?;
         let base = Checkpoint {
             v: CHECKPOINT_VERSION,
+            engine: CHECKPOINT_ENGINE.into(),
             program,
             repo,
             seed,

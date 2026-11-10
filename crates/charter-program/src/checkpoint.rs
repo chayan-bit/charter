@@ -18,10 +18,18 @@ use crate::{Event, RefUpdate, RepoInfo};
 /// Bump when the checkpoint layout or the fold semantics change: older ones are ignored.
 pub const CHECKPOINT_VERSION: u32 = 1;
 
+/// The engine and build a checkpoint came from. Another build may fold differently (a
+/// Rhai upgrade, changed host functions) without a layout change, so its checkpoints are
+/// ignored too.
+pub const CHECKPOINT_ENGINE: &str = concat!("rhai/1 charter-program/", env!("CARGO_PKG_VERSION"));
+
 /// A fold paused after `events` events. Produced by [`crate::Program::fold_cached`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub v: u32,
+    /// [`CHECKPOINT_ENGINE`] of the build that wrote it; empty in checkpoints from before.
+    #[serde(default)]
+    pub engine: String,
     #[serde(with = "hex::serde")]
     pub program: [u8; 32],
     pub repo: RepoInfo,
