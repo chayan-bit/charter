@@ -10,6 +10,7 @@ The full workflow and trust model are in `docs/p3/arkiv-ci.md`.
 2. Commit on a branch based on the current `main`, then open or update a patch with `scripts/chart-patch.sh <url> <branch>`, which prints the patch id.
 3. The CI runner (`scripts/chart-ci.sh`) tests the patch head and posts a signed attestation; check it with `chart op list --repo <url> --type xyz.arkiv.attest`.
 4. A delegate merges with `scripts/chart-merge.sh <url> <patch-id>`, which works only once CI passed at the patch head.
+   A direct push to `main` is refused with `E_PROGRAM_REJECTED` until the patch head has a delegate approval and a CI pass.
 5. A maintainer mirrors `main` to GitHub with `scripts/mirror-to-github.sh`.
 
 Before posting a patch, run the same checks locally: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo test --workspace --all-features`.
