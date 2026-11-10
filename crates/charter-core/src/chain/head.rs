@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{IdentityChain, PeerInfo, open_all};
+use super::{IdentityChain, PeerInfo, fail_unsupported, open_all};
 use crate::attrs::AttrValue;
 use crate::marks::PeerMark;
 use crate::types::{Address, Hash32, Nid, Observed, Position, Rid};
@@ -136,7 +136,10 @@ fn valid_head(
     identity: &IdentityChain,
     observed: &[Observed],
 ) -> Result<Option<Entity<HeadBody>>, VerifyError> {
-    let mut valid: Vec<Entity<HeadBody>> = open_all::<HeadBody>(observed)
+    let opened = open_all::<HeadBody>(observed);
+    // A head a newer client wrote: say so instead of reporting a missing head.
+    fail_unsupported(&opened.unsupported, &BTreeSet::from([dev.control]))?;
+    let mut valid: Vec<Entity<HeadBody>> = opened
         .ok
         .into_iter()
         .filter(|e| {

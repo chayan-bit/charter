@@ -233,6 +233,40 @@ fn a_head_from_another_creator_or_signer_is_ignored_and_fails_closed() {
 }
 
 #[test]
+fn a_head_of_an_unknown_layout_from_the_control_address_is_unsupported_not_a_rollback() {
+    let w = world();
+    let s = setup();
+    let b = head_body(w.rid, 0, 1, ZERO);
+    let (mut newer, _) = observe(&peers()[1], &b, DEV_CONTROL, 31, 0);
+    for a in newer.attributes.iter_mut().filter(|a| a.name == "ag.v") {
+        a.value = AttrValue::U64(99);
+    }
+    let err = accept_device_head(
+        &w.rid,
+        &alice().nid,
+        &s.device,
+        &s.identity,
+        std::slice::from_ref(&newer),
+        &nonce(2),
+        None,
+    )
+    .expect_err("written by a newer client");
+    assert_eq!(err.code(), ErrorCode::UnsupportedVersion);
+    // From any other creator it is ignored, as every unknown-version row is.
+    newer.creator = DEV_BULK;
+    let err = accept_device_head(
+        &w.rid,
+        &alice().nid,
+        &s.device,
+        &s.identity,
+        &[newer],
+        &nonce(0),
+        None,
+    );
+    assert_eq!(err.expect("ignored"), None);
+}
+
+#[test]
 fn the_delegation_stays_in_every_incremental_v1_anchor_read() {
     let w = world();
     let (obs, _) = observe(alice(), &device_body(w.rid, &peers()[1]), CONTROL0, 30, 0);
