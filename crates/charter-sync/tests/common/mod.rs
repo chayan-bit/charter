@@ -92,6 +92,12 @@ impl Arkiv for Net {
     async fn transaction(&self, h: TxHash) -> Result<Option<TxInfo>, StoreError> {
         self.mem.transaction(h).await
     }
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.mem.mined_tx(h).await
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        self.mem.block_txs(n).await
+    }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
         self.mem.estimate(from, ops).await
     }

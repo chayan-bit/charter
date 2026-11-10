@@ -23,6 +23,7 @@ pub fn full_select() -> Select {
         key: true,
         creator: true,
         created_at: true,
+        updated_at: true,
         expires_at: true,
         attrs: Attrs::All,
         ..Select::default()
@@ -61,6 +62,7 @@ pub fn to_observed(rows: Vec<EntityData>) -> Vec<Observed> {
                 key: r.key?.0,
                 creator: r.creator?.into_array(),
                 block: r.created_at?,
+                updated_at: r.updated_at.or(r.created_at)?,
                 tx: u32::try_from(rank).unwrap_or(u32::MAX),
                 expires_at: r.expires_at?,
                 attributes,

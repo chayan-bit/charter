@@ -160,6 +160,7 @@ mod tests {
             block: 1,
             tx: 0,
             expires_at: 2,
+            updated_at: 1,
             attributes: attrs,
         };
         assert_eq!(open::<PeerBody>(&obs).expect("opens").h, s.h);
