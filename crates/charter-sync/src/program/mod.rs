@@ -380,6 +380,41 @@ async fn ref_events<A: Arkiv>(
     Ok((votes, updates))
 }
 
+/// The v1 refs entities a fold of the pinned program reads: each delegate's last anchor
+/// link before the pin (the seed vote) and every later one. They outlive the peer's own
+/// v1 head, also after it migrated to format v2, so keepalive keeps them (head-model 10).
+pub async fn fold_v1_refs<A: Arkiv>(
+    a: &A,
+    view: &View,
+) -> Result<Vec<(Nid, charter_core::Observed)>> {
+    if view.identity.head().body.program.is_none() {
+        return Ok(vec![]);
+    }
+    let pin = pin_revision(&view.identity).effective.block;
+    let mut out = vec![];
+    for nid in view.delegates() {
+        let Some(pv) = view.peers.get(nid) else {
+            continue;
+        };
+        let links = &pv.chain.links;
+        // A link in the pin's own block may sit on either side of it: keep both.
+        let from = links
+            .iter()
+            .rposition(|l| l.position.block < pin)
+            .unwrap_or(0);
+        let hashes: Vec<Hash32> = links[from..].iter().map(|l| l.body.refs).collect();
+        let bulk = pv.info.binds.bulk_set();
+        let found = by_hashes(a, kind(Kind::Refs), &hashes).await?;
+        out.extend(
+            found
+                .into_iter()
+                .filter(|o| bulk.contains(&o.creator))
+                .map(|o| (*nid, o)),
+        );
+    }
+    Ok(out)
+}
+
 /// Each delegate's v2 timeline (landing block, merge), bounded at the pin's block.
 async fn v2_timelines<A: Arkiv>(
     a: &A,

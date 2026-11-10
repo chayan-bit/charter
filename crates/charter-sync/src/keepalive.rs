@@ -95,6 +95,9 @@ pub async fn keep_set<A: Arkiv>(a: &A, view: &View) -> Result<Vec<Kept>> {
             }
         }
     }
+    for (nid, o) in crate::program::fold_v1_refs(a, view).await? {
+        out.push(kept(&o, Plane::Bulk, nid));
+    }
     out.sort_by_key(|k| (k.plane == Plane::Bulk, k.size >= CHUNK_SIZE as u64, k.key));
     out.dedup_by_key(|k| k.key);
     Ok(out)

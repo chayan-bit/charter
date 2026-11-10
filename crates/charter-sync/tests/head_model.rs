@@ -4,7 +4,7 @@
 
 mod common;
 
-use charter_core::{Start, anchor_chain};
+use charter_core::{Hash32, Start, anchor_chain};
 use charter_store::Arkiv;
 use charter_sync::state::State;
 use common::*;
@@ -400,4 +400,64 @@ async fn a_rolled_back_or_hidden_head_fails_closed_and_refs_only_pushes_verify()
     let dave = Peer::new(&net, 4);
     let r = Box::pin(clone_into(&net, &dave, &rid, &tmp.path().join("c2"))).await;
     assert_eq!(code(r), "E_CONTROL_NOT_LIVE");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keepalive_keeps_every_v1_refs_entity_a_program_pinned_before_migration_folds() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "pinned-v1").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    commit(&work, &[("a", b"1")], "feat: seed");
+    push(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("v1 push");
+    // Pin a program under v1, then one more v1 push after the pin.
+    let src = include_str!("../../../programs/bounty.rhai");
+    charter_sync::program::publish(&net, &alice.cfg, &alice.keys, &rid, "rhai/1", src)
+        .await
+        .expect("publish");
+    let pin = charter_core::ProgramPin {
+        engine: "rhai/1".into(),
+        hash: charter_program::Program::hash(src),
+    };
+    let st = charter_sync::state::State::default();
+    charter_sync::identity::propose(&net, &alice.cfg, &alice.keys, &rid, &st, |b| {
+        charter_core::IdBody {
+            program: Some(pin),
+            ..b.clone()
+        }
+    })
+    .await
+    .expect("pin");
+    commit(&work, &[("a", b"2")], "feat: after the pin");
+    push(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("v1 push after the pin");
+    // The first v0.4.0 push migrates.
+    commit(&work, &[("a", b"3")], "feat: migrate");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("migration");
+
+    let view = Box::pin(charter_sync::sync(&net, &alice.repo(&rid), &alice.want()))
+        .await
+        .expect("sync");
+    assert!(view.program.is_some(), "the fold runs");
+    let keep: std::collections::BTreeSet<Hash32> = charter_sync::keepalive::keep_set(&net, &view)
+        .await
+        .expect("keep set")
+        .iter()
+        .map(|k| k.key)
+        .collect();
+    let refs = entities(&net, &rid, charter_core::Kind::Refs).await;
+    assert_eq!(refs.len(), 2, "the seed vote and the post-pin push");
+    for r in &refs {
+        assert!(
+            keep.contains(&r.key),
+            "the fold reads refs entity {}",
+            h32_hex(&r.key)
+        );
+    }
 }
