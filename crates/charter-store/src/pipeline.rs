@@ -114,6 +114,23 @@ impl PipelineConfig {
         (have < reserve).then(|| reserve * U256::from(slots.max(1)) - have)
     }
 
+    /// One top-up for the rest of a run: `slots` txs at their max-fee `reserve` (what the
+    /// node checks before it admits them) plus `later` txs of about `gas` each at the fee
+    /// they are expected to burn, `gas x (base_fee + tip)`; the window's max fee is the
+    /// headroom. `None` when `have` covers this tx.
+    pub fn top_up_run(
+        &self,
+        have: U256,
+        reserve: U256,
+        slots: u64,
+        later: u64,
+        gas: u64,
+        base_fee: u128,
+    ) -> Option<U256> {
+        let burn = U256::from(later) * U256::from(gas) * U256::from(base_fee + self.tip);
+        Self::top_up(have, reserve, slots).map(|window| window + burn)
+    }
+
     /// The most a top-up transfer itself costs in fees at `base_fee`.
     pub fn top_up_fee(&self, base_fee: u128) -> U256 {
         U256::from(TRANSFER_GAS) * U256::from(self.max_fee(base_fee))
@@ -382,10 +399,17 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             // left) at this tx's size.
             let free = self.cfg.window - inflight.len() - ready.len();
             let slots = (free as u64).min(1 + queue.len() as u64);
-            let top = covered.and_then(|h| PipelineConfig::top_up(h, reserve, slots));
-            if let (Some(have), Some(amount)) = (covered.as_mut(), top) {
-                self.top_up(amount, base_fee).await?;
-                *have += amount;
+            // The jobs after this window are funded now too, with this tx's estimate
+            // standing in for each, so later windows go out without waiting on a top-up.
+            let later = (1 + queue.len() as u64).saturating_sub(slots);
+            if let Some(have) = covered.as_mut()
+                && let Some(window) = PipelineConfig::top_up(*have, reserve, slots)
+            {
+                let all = self
+                    .cfg
+                    .top_up_run(*have, reserve, slots, later, p.gas, base_fee)
+                    .unwrap_or(window);
+                *have += self.top_up(all, window, base_fee).await?;
             }
             unconfirmed += p.gas;
             if let Some(have) = covered.as_mut() {
@@ -547,19 +571,24 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         Ok(have.saturating_sub(reserved))
     }
 
-    /// Moves `amount` from the funder to the sender and waits for it to land; fails with
-    /// `E_INSUFFICIENT_FUNDS` naming the funder when it cannot cover the transfer.
-    async fn top_up(&self, amount: U256, base_fee: u128) -> Result<(), StoreError> {
+    /// Moves `amount` from the funder to the sender, or only `min` when the funder cannot
+    /// spare `amount`, waits for it to land and returns what moved; fails with
+    /// `E_INSUFFICIENT_FUNDS` naming the funder when it cannot cover even `min`.
+    async fn top_up(&self, amount: U256, min: U256, base_fee: u128) -> Result<U256, StoreError> {
         let Some(funder) = &self.funder else {
-            return Ok(());
+            return Ok(U256::ZERO);
         };
         let max_fee = self.cfg.max_fee(base_fee);
-        let need = amount + self.cfg.top_up_fee(base_fee);
+        let fee = self.cfg.top_up_fee(base_fee);
         let have = self.arkiv.balance(funder.address()).await?;
-        if have < need {
+        let amount = match have >= amount + fee {
+            true => amount,
+            false => min,
+        };
+        if have < amount + fee {
             return Err(StoreError::InsufficientFunds {
                 address: funder.address(),
-                need,
+                need: amount + fee,
                 have,
             });
         }
@@ -579,7 +608,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             tokio::time::sleep(self.cfg.poll).await;
             if let Some(r) = self.arkiv.receipt(tx.hash()).await? {
                 return match r.success {
-                    true => Ok(()),
+                    true => Ok(amount),
                     false => Err(StoreError::Reverted {
                         tx: Some(tx.hash()),
                         reason: "top-up transfer failed".into(),
