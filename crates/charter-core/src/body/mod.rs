@@ -2,12 +2,16 @@
 
 mod anchor;
 mod cob;
+mod head;
 mod id;
 mod peer;
 mod refs;
 
 pub use anchor::{AnchorBody, ManifestBody, Require};
 pub use cob::{CREATE, CobOpBody, MAX_ACTION, MAX_PAYLOAD, MAX_TYPE_NAME};
+pub use head::{
+    DEVICE_LAYOUT_VERSION, DeviceBody, HeadBody, HeadPack, HeadRef, MAX_HEAD_PIECES, PieceRef,
+};
 pub use id::{IdBody, ProgramPin};
 pub use peer::{BindBody, IdAccBody, PeerBody};
 pub use refs::{RefEntry, RefsBody};
@@ -19,6 +23,11 @@ use crate::{FormatError, Kind};
 /// A signed entity body: canonical CBOR, field rules, and the kind-specific attributes.
 pub trait Body: Sized + Clone {
     const KIND: Kind;
+    /// The `ag.kind` attribute; differs from the kind name only for the v2 device
+    /// delegation, stored as an `anchor` so v0.3.0 clients stop on it.
+    const AG_KIND: &'static str = Self::KIND.name();
+    /// The `ag.v` entity layout version.
+    const AG_V: u64 = crate::ENTITY_LAYOUT_VERSION;
 
     /// Canonical CBOR bytes.
     fn encode(&self) -> Vec<u8>;

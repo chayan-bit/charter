@@ -4,6 +4,7 @@ mod accept;
 mod anchor;
 mod bind;
 mod cob;
+mod head;
 mod identity;
 
 pub use accept::{
@@ -13,6 +14,10 @@ pub use accept::{
 pub use anchor::{AnchorChain, AnchorLink, Start, anchor_chain};
 pub use bind::{BindChain, BindLink, bind_chain};
 pub use cob::{VerifiedOp, verify_ops, verify_ops_after};
+pub use head::{
+    Device, DeviceHead, HeadNonce, Merged, Winner, accept_device_head, check_head_nonce, devices,
+    is_device_row, merge, merged_refs, next_entries, resolve_stamps,
+};
 pub use identity::{IdentityChain, Revision, identity_chain, maj};
 
 use crate::entity::open;

@@ -82,6 +82,7 @@ pub fn observe_bytes<B: Body>(
         block,
         tx,
         expires_at: block + 1_000_000,
+        updated_at: block,
         attributes,
     }
 }

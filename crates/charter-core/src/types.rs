@@ -32,6 +32,8 @@ pub struct Observed {
     pub block: u64,
     pub tx: u32,
     pub expires_at: u64,
+    /// `$updatedAt`: the last patch or extend (equal to `block` when never mutated).
+    pub updated_at: u64,
     pub attributes: Vec<Attribute>,
 }
 
