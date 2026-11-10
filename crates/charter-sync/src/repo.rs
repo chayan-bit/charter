@@ -45,7 +45,7 @@ impl Config {
             control_lifetime: CONTROL_LIFETIME,
             pipeline: PipelineConfig::default(),
             extra_peers: vec![],
-            chunk_batch: 64,
+            chunk_batch: 256,
             alias: String::new(),
         }
     }

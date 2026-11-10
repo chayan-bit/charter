@@ -251,6 +251,24 @@ async fn one_estimate_prices_every_chunk_of_a_shape() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn bulk_keeps_two_blocks_of_gas_in_flight() {
+    let (fake, key) = setup();
+    let cfg = PipelineConfig::default().bulk();
+    let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, cfg);
+    let jobs: Vec<_> = (0..40).map(|i| vec![blob(65_536, DAY, i)]).collect();
+    let (landed, t) = with_miner(fake.clone(), p.run_measured(jobs))
+        .await
+        .expect("run");
+    assert_eq!((landed.len(), t.txs), (40, 40));
+    assert!(t.bytes > 40 * 65_536 && t.mb_per_s() > 0.0);
+    let best = gas_by_block(&landed).values().map(|(_, c)| *c).max();
+    assert!(
+        best > Some(4),
+        "more than the 4 chunks per block the 40 percent pace allows: {best:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn jobs_over_the_byte_cap_are_split() {
     let (fake, key) = setup();
     let landed = run(

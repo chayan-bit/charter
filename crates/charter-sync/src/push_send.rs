@@ -191,20 +191,19 @@ impl<A: Arkiv> Push<'_, A> {
         .await
     }
 
-    /// Sends `jobs` from `signer`, topped up from the wallet per window.
+    /// Sends `jobs` from `signer`, topped up from the wallet per window. The bulk address
+    /// only sends independent data txs (chunks, manifests, refs), so it keeps up to two
+    /// blocks of gas in flight ([`charter_store::PipelineConfig::bulk`]).
     async fn send_from(
         &self,
         signer: &alloy_signer_local::PrivateKeySigner,
         jobs: Vec<Vec<Operation>>,
     ) -> Result<()> {
-        write::send_funded(
-            self.a,
-            signer,
-            &self.keys.wallet(),
-            &self.cfg.pipeline,
-            jobs,
-        )
-        .await?;
+        let cfg = match signer.address() == self.keys.bulk_address(&self.rid()) {
+            true => self.cfg.pipeline.bulk(),
+            false => self.cfg.pipeline.clone(),
+        };
+        write::send_funded(self.a, signer, &self.keys.wallet(), &cfg, jobs).await?;
         Ok(())
     }
 
@@ -322,18 +321,18 @@ impl<A: Arkiv> Push<'_, A> {
         idx: &[u64],
     ) -> Result<()> {
         let signer = self.keys.bulk(&self.rid());
-        let mut done = 0;
+        let (mut done, started) = (0, std::time::Instant::now());
         for batch in idx.chunks(self.cfg.chunk_batch.max(1)) {
             let jobs = self.chunk_jobs(path, pack_id, size, batch)?;
             self.send_from(&signer, jobs).await?;
             done += batch.len();
-            if idx.len() > batch.len() {
-                eprintln!(
-                    "chart: pack {}: {done}/{} chunks sent",
-                    &hex32(pack_id)[..12],
-                    idx.len()
-                );
-            }
+            let mb = (done * CHUNK_SIZE) as f64 / 1e6;
+            eprintln!(
+                "chart: pack {}: {done}/{} chunks sent ({:.2} MB/s)",
+                &hex32(pack_id)[..12],
+                idx.len(),
+                mb / started.elapsed().as_secs_f64().max(1e-3)
+            );
         }
         Ok(())
     }

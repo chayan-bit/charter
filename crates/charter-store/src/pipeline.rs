@@ -67,6 +67,15 @@ impl Default for PipelineConfig {
 }
 
 impl PipelineConfig {
+    /// For many large independent txs (a big upload): up to two blocks of gas may be
+    /// unconfirmed, so this sender keeps every block it can get full instead of 40 percent.
+    pub fn bulk(&self) -> Self {
+        Self {
+            pace_percent: self.pace_percent.max(200),
+            ..self.clone()
+        }
+    }
+
     /// `maxFeePerGas` at `base_fee`: twice the base fee plus the tip.
     pub fn max_fee(&self, base_fee: u128) -> u128 {
         2 * base_fee + self.tip
@@ -123,6 +132,21 @@ impl PipelineConfig {
 pub struct Landed {
     pub job: usize,
     pub receipt: Receipt,
+}
+
+/// Bytes of calldata a run landed and how long it took, for throughput reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Throughput {
+    pub txs: usize,
+    pub bytes: usize,
+    pub elapsed: Duration,
+}
+
+impl Throughput {
+    /// Landed calldata in MB (10^6 bytes) per second.
+    pub fn mb_per_s(&self) -> f64 {
+        self.bytes as f64 / self.elapsed.as_secs_f64().max(1e-9) / 1e6
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +243,23 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             .map(|ops| self.arkiv.seal_ops(ops).map(Job::Execute))
             .collect::<Result<Vec<_>, _>>()?;
         self.drive(jobs.into_iter().enumerate().collect()).await
+    }
+
+    /// [`TxPipeline::run`] for many independent jobs (a big upload), also reporting the
+    /// calldata landed per second. Pair it with [`PipelineConfig::bulk`].
+    pub async fn run_measured(
+        &mut self,
+        jobs: Vec<Vec<Operation>>,
+    ) -> Result<(Vec<Landed>, Throughput), StoreError> {
+        let bytes = jobs.iter().map(|ops| execute_calldata(ops).len()).sum();
+        let started = Instant::now();
+        let landed = self.run(jobs).await?;
+        let t = Throughput {
+            txs: landed.len(),
+            bytes,
+            elapsed: started.elapsed(),
+        };
+        Ok((landed, t))
     }
 
     /// A plain value transfer (wallet top-up).
