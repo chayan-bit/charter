@@ -8,7 +8,7 @@ use charter_core::Nid;
 use charter_store::Arkiv;
 use charter_sync::git::Git;
 use charter_sync::ids::{RemoteUrl, parse_id};
-use charter_sync::{Config, Keys, Push, Repo, Update, View, Want, listing, own_refs, sync};
+use charter_sync::{Config, HeadPush, Keys, Repo, Update, View, Want, listing, own_refs, sync};
 
 use crate::{CliError, Result};
 
@@ -148,8 +148,8 @@ impl<'a, A: Arkiv> Session<'a, A> {
             .repo
             .as_ref()
             .ok_or_else(|| CliError::Usage("repo not open".into()))?;
-        let resumed = repo.pending_path().exists();
-        let p = Push::prepare(
+        // v0.4.0 writes format v2 only (docs/p5/head-model.md); a v1 repo migrates here.
+        let p = HeadPush::prepare(
             self.a,
             repo,
             &self.cfg,
@@ -159,14 +159,9 @@ impl<'a, A: Arkiv> Session<'a, A> {
             updates,
         )?;
         // Refuse locally, before any gas is spent, a push the pinned program rejects.
-        if let Err(e) =
-            charter_sync::program::check_push(&p.view, &keys.nid(), &p.pending, repo.git())
-        {
-            p.discard(&p.pending);
-            return Err(e.into());
-        }
+        charter_sync::program::check_refs(&p.view, &keys.nid(), &p.refs_after()?, repo.git())?;
         if !self.dry_run {
-            return Ok(p.run().await?);
+            return Ok(Box::pin(p.run()).await?);
         }
         let cost = p.cost().await?;
         eprintln!(
@@ -176,9 +171,6 @@ impl<'a, A: Arkiv> Session<'a, A> {
             crate::units::fmt_glm(cost.spend),
             crate::units::fmt_glm(cost.required())
         );
-        if !resumed {
-            p.discard(&p.pending);
-        }
         Ok(())
     }
 
