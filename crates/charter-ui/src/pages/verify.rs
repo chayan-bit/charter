@@ -5,6 +5,7 @@
 //! blocks and entity keys, so they are shown as ids in mono (full value in `title`).
 
 use super::{Repo, ago, short};
+use crate::cache::RepoView;
 
 /// Panel states: `verified`, `pending` (seen, not yet synced), `unverified`, `equivocation`.
 #[derive(Debug, Clone)]
@@ -48,50 +49,9 @@ impl Verify {
         let Some(v) = &r.view else {
             return Self::unsynced(round.error.clone(), round.busy);
         };
-        let peers: Vec<PeerRow> = v
-            .peers
-            .iter()
-            .map(|p| PeerRow {
-                nid: p.nid.clone(),
-                delegate: p.delegate,
-                head: p
-                    .head
-                    .as_ref()
-                    .map(|h| (h.seq, h.anchor.clone(), h.block, h.key.clone())),
-            })
-            .collect();
-        let equivocations: Vec<EquivRow> = v
-            .equivocations
-            .iter()
-            .map(|e| EquivRow {
-                kind: e.kind.clone(),
-                nid: e.nid.clone(),
-                seq: e.seq,
-                keys: e.keys.clone(),
-            })
-            .collect();
-        let anchored = peers.iter().filter(|p| p.head.is_some()).count();
-        let (state, word, summary) = match (equivocations.len(), anchored) {
-            (n, _) if n > 0 => (
-                "equivocation",
-                "Equivocation",
-                format!("{n} conflicting heads"),
-            ),
-            (_, 0) => (
-                "unverified",
-                "Unverified",
-                "no peer has an anchored head".into(),
-            ),
-            (_, n) => (
-                "verified",
-                "Verified",
-                format!(
-                    "identity rev {}, {n} of {} peers anchored, signatures valid",
-                    v.revisions.last().map_or(0, |x| x.rev),
-                    peers.len()
-                ),
-            ),
-        };
+        let peers = peer_rows(v);
+        let equivocations = equiv_rows(v);
+        let (state, word, summary) = status(v, &peers, equivocations.len());
         Self {
             state,
             word,
@@ -135,4 +95,59 @@ impl Verify {
     pub fn short(&self, h: &str) -> String {
         short(h)
     }
+}
+
+fn peer_rows(v: &RepoView) -> Vec<PeerRow> {
+    v.peers
+        .iter()
+        .map(|p| PeerRow {
+            nid: p.nid.clone(),
+            delegate: p.delegate,
+            head: p
+                .head
+                .as_ref()
+                .map(|h| (h.seq, h.anchor.clone(), h.block, h.key.clone())),
+        })
+        .collect()
+}
+
+fn equiv_rows(v: &RepoView) -> Vec<EquivRow> {
+    v.equivocations
+        .iter()
+        .map(|e| EquivRow {
+            kind: e.kind.clone(),
+            nid: e.nid.clone(),
+            seq: e.seq,
+            keys: e.keys.clone(),
+        })
+        .collect()
+}
+
+/// `(state, word, summary)`: equivocation wins, then no anchored peer, then verified.
+fn status(
+    v: &RepoView,
+    peers: &[PeerRow],
+    equivocations: usize,
+) -> (&'static str, &'static str, String) {
+    let anchored = peers.iter().filter(|p| p.head.is_some()).count();
+    if equivocations > 0 {
+        return (
+            "equivocation",
+            "Equivocation",
+            format!("{equivocations} conflicting heads"),
+        );
+    }
+    if anchored == 0 {
+        return (
+            "unverified",
+            "Unverified",
+            "no peer has an anchored head".into(),
+        );
+    }
+    let rev = v.revisions.last().map_or(0, |x| x.rev);
+    let summary = format!(
+        "identity rev {rev}, {anchored} of {} peers anchored, signatures valid",
+        peers.len()
+    );
+    ("verified", "Verified", summary)
 }
