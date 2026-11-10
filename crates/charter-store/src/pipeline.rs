@@ -49,7 +49,7 @@ impl Default for PipelineConfig {
             gas_cap: 16_000_000,
             max_raw_bytes: MAX_RAW_TX_BYTES,
             high_base_fee: 2_000_000_000,
-            poll: Duration::from_millis(500),
+            poll: Duration::from_millis(250),
             resend_after_blocks: 30,
             max_resends: 3,
         }
@@ -191,8 +191,8 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         inflight: &mut Vec<InFlight>,
     ) -> Result<(), StoreError> {
         // Read fresh every round: the base fee can rise while we fill blocks.
-        let base_fee = self.arkiv.base_fee().await?;
-        let sent_at = self.arkiv.head().await?;
+        let (base_fee, sent_at) =
+            futures_util::future::try_join(self.arkiv.base_fee(), self.arkiv.head()).await?;
         let budget = self.cfg.pace_budget(base_fee);
         let mut unconfirmed: u64 = inflight.iter().map(|f| f.gas).sum();
         let mut covered = match self.funder {
@@ -392,11 +392,22 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         inflight: &mut Vec<InFlight>,
         done: &mut Vec<Landed>,
     ) -> Result<(), StoreError> {
-        let head = self.arkiv.head().await?;
+        // The head and every receipt are independent reads: one round trip, not 1 + n.
+        let hashes: Vec<_> = inflight.iter().map(|f| f.tx.hash()).collect();
+        let (head, receipts) = futures_util::future::try_join(
+            self.arkiv.head(),
+            futures_util::future::try_join_all(hashes.iter().map(|h| self.arkiv.receipt(*h))),
+        )
+        .await?;
+        let mut receipts = receipts.into_iter().map(Some).collect::<Vec<_>>();
         let mut i = 0;
         while i < inflight.len() {
             let f = &mut inflight[i];
-            match self.arkiv.receipt(f.tx.hash()).await? {
+            let pos = hashes
+                .iter()
+                .position(|h| *h == f.tx.hash())
+                .ok_or_else(|| StoreError::Rpc("in-flight tx without a poll slot".into()))?;
+            match receipts[pos].take().flatten() {
                 Some(r) if r.success => {
                     done.push(Landed {
                         job: f.job,

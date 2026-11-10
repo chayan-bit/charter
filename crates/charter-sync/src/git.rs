@@ -203,18 +203,64 @@ impl Git {
             .map(|_| ())
     }
 
-    /// Self-contained packs (no `--thin`) of everything reachable from `tips` and not from
-    /// `exclude`, split at 100 MiB, written as `<prefix>-<hash>.pack`. Empty packs are removed.
+    /// Packs of everything reachable from `tips` and not from `exclude`, written as
+    /// `<prefix>-<hash>.pack`. With `CHARTER_THIN_PACKS` set, one thin pack (deltas may use
+    /// objects of `exclude` as bases) when it stays under 100 MiB; otherwise self-contained
+    /// packs split at 100 MiB. Empty packs are removed.
     pub fn pack_objects(
         &self,
         tips: &[String],
         exclude: &[String],
         prefix: &Path,
     ) -> Result<Vec<PathBuf>> {
-        let mut input = tips.join("\n");
-        input.push_str("\n--not\n");
-        input.push_str(&exclude.join("\n"));
-        input.push('\n');
+        if thin_packs_enabled()
+            && let Some(packs) = self.thin_pack(tips, exclude, prefix)?
+        {
+            return Ok(packs);
+        }
+        self.full_packs(tips, exclude, prefix)
+    }
+
+    /// At most one thin pack; `None` when it would exceed the 100 MiB manifest cap.
+    fn thin_pack(
+        &self,
+        tips: &[String],
+        exclude: &[String],
+        prefix: &Path,
+    ) -> Result<Option<Vec<PathBuf>>> {
+        let input = rev_input(tips, exclude);
+        let bytes = self.run(
+            &[
+                "pack-objects",
+                "--revs",
+                "-q",
+                "--thin",
+                "--stdout",
+                "--delta-base-offset",
+            ],
+            input.as_bytes(),
+        )?;
+        if bytes.len() as u64 > MAX_PACK_BYTES {
+            return Ok(None);
+        }
+        if bytes.len() < PACK_HEADER + 20
+            || u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) == 0
+        {
+            return Ok(Some(vec![]));
+        }
+        let trailer = hex::encode(&bytes[bytes.len() - 20..]);
+        let pack = PathBuf::from(format!("{}-{trailer}.pack", prefix.to_string_lossy()));
+        std::fs::write(&pack, &bytes).map_err(|e| SyncError::io(pack.display(), e))?;
+        Ok(Some(vec![pack]))
+    }
+
+    fn full_packs(
+        &self,
+        tips: &[String],
+        exclude: &[String],
+        prefix: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        let input = rev_input(tips, exclude);
         let prefix_s = prefix.to_string_lossy().into_owned();
         let out = self.run(
             &[
@@ -246,7 +292,15 @@ impl Git {
     /// are checked afterwards by [`Git::connected`] once all packs are in).
     pub fn index_pack(&self, pack: &Path) -> Result<()> {
         self.run_with_file(
-            &["index-pack", "--stdin", "--fsck-objects", "--keep=arkiv"],
+            // `--fix-thin` completes thin packs from objects already in the cache; it is a
+            // no-op for self-contained packs.
+            &[
+                "index-pack",
+                "--stdin",
+                "--fix-thin",
+                "--fsck-objects",
+                "--keep=arkiv",
+            ],
             pack,
         )
         .map(|_| ())
@@ -319,6 +373,24 @@ impl Git {
 }
 
 /// Object count from a pack header (0 for an empty pack).
+/// Largest pack one manifest can name (1,600 chunks of 64 KiB).
+const MAX_PACK_BYTES: u64 = 100 * 1024 * 1024;
+
+/// `CHARTER_THIN_PACKS` set and not empty. Off by default: v0.2.0 readers cannot index
+/// thin packs, so writers opt in until every reader has `--fix-thin`.
+pub fn thin_packs_enabled() -> bool {
+    std::env::var_os("CHARTER_THIN_PACKS").is_some_and(|v| !v.is_empty())
+}
+
+/// `git rev-list --stdin` style input: tips, then `--not`, then exclusions.
+fn rev_input(tips: &[String], exclude: &[String]) -> String {
+    let mut input = tips.join("\n");
+    input.push_str("\n--not\n");
+    input.push_str(&exclude.join("\n"));
+    input.push('\n');
+    input
+}
+
 pub fn pack_object_count(pack: &Path) -> Result<u32> {
     use std::io::Read;
     let mut f = std::fs::File::open(pack).map_err(|e| SyncError::io(pack.display(), e))?;

@@ -85,6 +85,9 @@ async fn serve(mut conn: TcpStream, h: &(dyn Fn(&Json) -> Reply + Send + Sync), 
     log.lock()
         .unwrap_or_else(|p| p.into_inner())
         .push((head, body));
+    if status == 0 {
+        return; // Scripted connection drop: close without a response.
+    }
     let payload = reply.to_string();
     let extra: String = headers
         .iter()
@@ -170,6 +173,43 @@ async fn a_short_retry_after_is_waited_out() {
     let t = Instant::now();
     assert_eq!(rpc.head().await.expect("head"), 16);
     assert!(t.elapsed() >= Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn dropped_connections_are_retried_for_reads_but_not_for_sends() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let (rpc, seen) = client(move |b| {
+        let n = c.fetch_add(1, Ordering::SeqCst);
+        match b["method"].as_str() {
+            Some("eth_blockNumber") if n < 2 => (0, vec![], json!(null)),
+            Some("eth_blockNumber") => ok(json!("0x10")),
+            _ => (0, vec![], json!(null)),
+        }
+    })
+    .await;
+    assert_eq!(rpc.head().await.expect("head after two drops"), 16);
+    let before = seen.lock().expect("log").len();
+    let err = rpc
+        .send(signed(RABDI_CHAIN_ID, Bytes::new()))
+        .await
+        .expect_err("a dropped send surfaces");
+    assert!(matches!(err, StoreError::Rpc(_)), "{err:?}");
+    assert_eq!(seen.lock().expect("log").len(), before + 1, "sent once");
+    calls.store(0, Ordering::SeqCst);
+    let (url, _) = mock(|b| {
+        if b["method"] == "eth_chainId" {
+            ok(json!(RABDI_HEX))
+        } else {
+            (0, vec![], json!(null))
+        }
+    })
+    .await;
+    let rpc = RpcArkiv::connect(cfg(&url)).await.expect("connect");
+    assert!(
+        matches!(rpc.head().await, Err(StoreError::Rpc(_))),
+        "gives up after the retries"
+    );
 }
 
 #[tokio::test]

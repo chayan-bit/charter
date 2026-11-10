@@ -10,6 +10,7 @@ use charter_core::{
     check_requires, identity_chain, peer_key,
 };
 use charter_store::{Arkiv, Pred};
+use futures_util::future::{join_all, try_join, try_join_all};
 
 use crate::observe::{self, all, b32, by_hashes, by_seq, creators, kind};
 use crate::state::State;
@@ -58,16 +59,20 @@ pub struct Want {
 
 /// Peer key from its self-signed documents, then its bind chain for `rid`.
 pub async fn resolve_peer<A: Arkiv>(a: &A, rid: &Rid, nid: &Nid) -> Result<Option<PeerInfo>> {
-    let docs = all(a, Pred::And(vec![kind(Kind::Peer), b32("ag.nid", nid)])).await?;
-    let Some(pk) = peer_key(nid, &docs) else {
-        return Ok(None);
-    };
     let filter = Pred::And(vec![
         kind(Kind::Bind),
         b32("ag.rid", rid),
         b32("ag.nid", nid),
     ]);
-    let binds = by_seq(a, filter, "ag.seq").await?;
+    // Independent queries, sent together; the bind chain is only checked once the key is known.
+    let (docs, binds) = try_join(
+        all(a, Pred::And(vec![kind(Kind::Peer), b32("ag.nid", nid)])),
+        by_seq(a, filter, "ag.seq"),
+    )
+    .await?;
+    let Some(pk) = peer_key(nid, &docs) else {
+        return Ok(None);
+    };
     let binds = bind_chain(rid, &pk, &binds)?;
     Ok(Some(PeerInfo { pk, binds }))
 }
@@ -90,12 +95,13 @@ pub async fn identity<A: Arkiv>(
 ) -> Result<(IdentityChain, BTreeMap<Nid, PeerInfo>)> {
     let kinds = Pred::Or(vec![kind(Kind::Id), kind(Kind::IdAcc)]);
     let observed = all(a, Pred::And(vec![b32("ag.rid", rid), kinds])).await?;
-    let mut peers = BTreeMap::new();
-    for nid in signer_nids(&observed) {
-        if let Some(p) = resolve_peer(a, rid, &nid).await? {
-            peers.insert(nid, p);
-        }
-    }
+    let nids: Vec<Nid> = signer_nids(&observed).into_iter().collect();
+    let infos = try_join_all(nids.iter().map(|n| resolve_peer(a, rid, n))).await?;
+    let peers: BTreeMap<Nid, PeerInfo> = nids
+        .into_iter()
+        .zip(infos)
+        .filter_map(|(n, p)| p.map(|p| (n, p)))
+        .collect();
     let chain = identity_chain(rid, &peers, &observed, state.id_mark()?.as_ref())?;
     Ok((chain, peers))
 }
@@ -142,27 +148,32 @@ pub async fn verify_peer<A: Arkiv>(
     identity: &IdentityChain,
     state: &State,
 ) -> Result<PeerView> {
-    let mut completeness = vec![];
-    for c in info.binds.control_set() {
-        completeness.push(observe::completeness(a, &c).await?);
-    }
-    let (chain, anchors) = chain_of(a, rid, nid, &info, identity).await?;
+    // Each completeness observation stays sequential inside (nonce, count, nonce); the
+    // observations and the anchor query are independent, so they run together.
+    let control: Vec<_> = info.binds.control_set().into_iter().collect();
+    let (completeness, (chain, anchors)) = try_join(
+        try_join_all(control.iter().map(|c| observe::completeness(a, c))),
+        chain_of(a, rid, nid, &info, identity),
+    )
+    .await?;
     let applied = state.applied_manifest_set()?;
     let (refs, manifests) = match chain.head() {
         None => (vec![], vec![]),
         Some(h) => {
-            let refs = all(
-                a,
-                Pred::And(vec![kind(Kind::Refs), b32("ag.h", &h.body.refs)]),
-            )
-            .await?;
             let wanted: Vec<_> = chain
                 .links
                 .iter()
                 .flat_map(|l| l.body.manifests.iter().copied())
                 .filter(|m| !applied.contains(m))
                 .collect();
-            (refs, by_hashes(a, kind(Kind::Manifest), &wanted).await?)
+            try_join(
+                all(
+                    a,
+                    Pred::And(vec![kind(Kind::Refs), b32("ag.h", &h.body.refs)]),
+                ),
+                by_hashes(a, kind(Kind::Manifest), &wanted),
+            )
+            .await?
         }
     };
     let mark = state.peer_mark(nid)?;
@@ -196,29 +207,57 @@ pub async fn build<A: Arkiv>(a: &A, rid: &Rid, state: &State, want: &Want) -> Re
         }
         .into());
     }
-    let head_block = a.head().await?;
-    let (identity, mut resolved) = identity(a, rid, state).await?;
+    let (head_block, (identity, mut resolved)) = try_join(
+        async { a.head().await.map_err(SyncError::from) },
+        identity(a, rid, state),
+    )
+    .await?;
     let delegates: BTreeSet<Nid> = identity.head().body.delegates.iter().copied().collect();
     let must: BTreeSet<Nid> = delegates.union(&want.must).copied().collect();
-    let mut queue: Vec<Nid> = must.iter().chain(&want.extra).copied().collect();
+    let mut queue: BTreeSet<Nid> = must.iter().chain(&want.extra).copied().collect();
     let mut peers = BTreeMap::new();
-    while let Some(nid) = queue.pop() {
-        if peers.contains_key(&nid) {
-            continue;
-        }
-        let info = match resolved.get(&nid) {
-            Some(p) => Some(p.clone()),
-            None => resolve_peer(a, rid, &nid).await?,
-        };
-        let Some(info) = info else { continue };
-        resolved.insert(nid, info.clone());
-        match verify_peer(a, rid, &nid, info, &identity, state).await {
-            Ok(pv) => {
-                queue.extend(requires_of(&pv));
-                peers.insert(nid, pv);
+    // Rounds: every queued peer is resolved and verified concurrently; `requires` of the
+    // verified ones form the next round. Outcomes are handled in nid order, as before.
+    while !queue.is_empty() {
+        let round: Vec<Nid> = std::mem::take(&mut queue)
+            .into_iter()
+            .filter(|n| !peers.contains_key(n))
+            .collect();
+        let infos = try_join_all(round.iter().map(|n| {
+            let known = resolved.get(n).cloned();
+            async move {
+                match known {
+                    Some(p) => Ok(Some(p)),
+                    None => resolve_peer(a, rid, n).await,
+                }
             }
-            Err(e) if must.contains(&nid) => return Err(e),
-            Err(e) => warn(&format!("skipping peer {}: {e}", crate::ids::to_text(&nid))),
+        }))
+        .await?;
+        let found: Vec<(Nid, PeerInfo)> = round
+            .into_iter()
+            .zip(infos)
+            .filter_map(|(n, p)| p.map(|p| (n, p)))
+            .collect();
+        resolved.extend(found.iter().map(|(n, p)| (*n, p.clone())));
+        let verified = join_all(
+            found
+                .iter()
+                .map(|(n, p)| verify_peer(a, rid, n, p.clone(), &identity, state)),
+        )
+        .await;
+        for ((nid, _), r) in found.into_iter().zip(verified) {
+            match r {
+                Ok(pv) => {
+                    queue.extend(
+                        requires_of(&pv)
+                            .into_iter()
+                            .filter(|n| !peers.contains_key(n)),
+                    );
+                    peers.insert(nid, pv);
+                }
+                Err(e) if must.contains(&nid) => return Err(e),
+                Err(e) => warn(&format!("skipping peer {}: {e}", crate::ids::to_text(&nid))),
+            }
         }
     }
     check_all_requires(&peers)?;
