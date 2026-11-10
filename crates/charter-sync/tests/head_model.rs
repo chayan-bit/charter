@@ -5,6 +5,7 @@
 mod common;
 
 use charter_core::{Start, anchor_chain};
+use charter_store::Arkiv;
 use charter_sync::state::State;
 use common::*;
 
@@ -260,4 +261,143 @@ async fn a_v1_repo_migrates_on_the_first_v2_push_and_v1_readers_fail_loudly() {
     )
     .expect_err("v1 reader");
     assert_eq!(err.code().as_str(), "E_UNSUPPORTED_VERSION");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_half_done_migration_keeps_serving_the_v1_refs() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "half").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    commit(&work, &[("a", b"a")], "feat: a");
+    push(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("v1 push");
+    commit(&work, &[("b", b"b")], "feat: b");
+    let repo = alice.repo(&rid);
+    let p = Box::pin(prepare2(
+        &net,
+        &alice,
+        &repo,
+        &work,
+        &[upd("refs/heads/main")],
+    ))
+    .await
+    .expect("prepare");
+    Box::pin(p.setup())
+        .await
+        .expect("delegation lands, then the push stops");
+    drop(p);
+    drop(repo);
+    let bob = Peer::new(&net, 2);
+    let dest = tmp.path().join("dest");
+    let (view, _) = Box::pin(clone_into(&net, &bob, &rid, &dest))
+        .await
+        .expect("clone");
+    let pv = &view.peers[&alice.keys.nid()];
+    assert!(
+        pv.v2.is_some() && pv.head.is_some(),
+        "devices known, v1 head still read"
+    );
+    let refs = charter_sync::listing(&view, Some(&alice.keys.nid())).refs;
+    assert_eq!(
+        refs,
+        vec![("refs/heads/main".to_string(), rev(&work, "main~1"))]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clone_skips_a_listed_pack_no_live_ref_reaches() {
+    let net = Net::new();
+    let desk = Peer::new(&net, 1);
+    let laptop = desk.second_device(&net);
+    let rid = init(&net, &desk, "skip").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    commit(&work, &[("base", &noise(1, 50_000))], "feat: base");
+    push2(&net, &desk, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("desk snapshot");
+    git(&work, &["checkout", "-q", "-b", "topic"]);
+    commit(&work, &[("base", &noise(2, 50_000))], "feat: topic");
+    push2(&net, &laptop, &rid, &work, &["refs/heads/topic"])
+        .await
+        .expect("laptop thin pack");
+    push2(&net, &desk, &rid, &work, &[":refs/heads/topic"])
+        .await
+        .expect("delete topic");
+    // Force main onto unrelated history big enough to refresh the desk's snapshot.
+    git(&work, &["checkout", "-q", "--orphan", "fresh"]);
+    git(&work, &["rm", "-rfq", "."]);
+    commit(&work, &[("new", &noise(3, 1_200_000))], "feat: fresh");
+    let repo = desk.repo(&rid);
+    let forced = charter_sync::Update {
+        src: Some("refs/heads/fresh".into()),
+        dst: "refs/heads/main".into(),
+    };
+    let p = Box::pin(prepare2(&net, &desk, &repo, &work, &[forced]))
+        .await
+        .expect("prepare");
+    Box::pin(p.run()).await.expect("forced push");
+    drop(repo);
+    let bob = Peer::new(&net, 2);
+    let dest = tmp.path().join("dest");
+    let (view, _) = Box::pin(clone_into(&net, &bob, &rid, &dest))
+        .await
+        .expect("clone despite the dead pack");
+    let refs = charter_sync::listing(&view, Some(&desk.keys.nid())).refs;
+    assert_eq!(
+        refs,
+        vec![("refs/heads/main".to_string(), rev(&work, "fresh"))]
+    );
+    git(&dest, &["fsck", "--full"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rolled_back_or_hidden_head_fails_closed_and_refs_only_pushes_verify() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "rb").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    commit(&work, &[("a", b"a")], "feat: a");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("push");
+    git(&work, &["branch", "side"]);
+    push2(&net, &alice, &rid, &work, &["refs/heads/side"])
+        .await
+        .expect("refs-only push");
+    let bob = Peer::new(&net, 2);
+    let dest = tmp.path().join("dest");
+    let (view, _) = Box::pin(clone_into(&net, &bob, &rid, &dest))
+        .await
+        .expect("legit heads verify");
+    let dev = charter_sync::device::device_keys(alice.home.path()).expect("dev");
+    let c_d = dev.control_address(&rid);
+    let head = view.peers[&alice.keys.nid()]
+        .v2
+        .as_ref()
+        .expect("v2")
+        .device(&dev.nid())
+        .expect("dev")
+        .head
+        .clone()
+        .expect("head");
+    assert_eq!(head.body.pieces_created, 2, "a marker piece per push");
+
+    // A node whose nonce is ahead of the head it serves: the head was rolled back.
+    let real = net.mem.entity_nonce(c_d).await.expect("nonce");
+    net.mem.lie_entity_nonce(c_d, real + 1);
+    let carol = Peer::new(&net, 3);
+    let r = Box::pin(clone_into(&net, &carol, &rid, &tmp.path().join("c1"))).await;
+    assert_eq!(code(r), "E_CONTROL_NOT_LIVE");
+    net.mem.lie_entity_nonce(c_d, real);
+
+    // A node that hides the head while the device has created entities.
+    net.mem.withhold(head.key.into());
+    let dave = Peer::new(&net, 4);
+    let r = Box::pin(clone_into(&net, &dave, &rid, &tmp.path().join("c2"))).await;
+    assert_eq!(code(r), "E_CONTROL_NOT_LIVE");
 }

@@ -65,6 +65,20 @@ async fn apply_all<A: Arkiv>(
     }
     let failed = index_until_stuck(repo, todo, &mut applied);
     for (nid, e) in failed {
+        // A v2 head may list a pack whose thin bases left with a later snapshot: no live
+        // ref needs it then, and the connectivity check below decides (head-model 4.4).
+        if view
+            .peers
+            .get(&nid)
+            .is_some_and(|p| p.head.is_none() && p.v2.is_some())
+        {
+            // shortcut: such a pack is downloaded again on every fetch; record it if that shows up in cost.
+            warn(&format!(
+                "peer {}: a listed pack did not index ({e}); checking live refs",
+                to_text(&nid)
+            ));
+            continue;
+        }
         if view.peers.contains_key(&nid) {
             skip_or_fail(view, must, &nid, e)?;
         }
@@ -93,7 +107,8 @@ async fn download_peer<A: Arkiv>(
     queued: &[Download],
 ) -> Result<(Vec<Hash32>, Vec<Download>)> {
     let (mut known, mut fetched) = (vec![], vec![]);
-    if let Some(v2) = view.peers.get(nid).and_then(|p| p.v2.as_ref()) {
+    let v2 = view.peers.get(nid).and_then(|p| p.v2.as_ref());
+    if let Some(v2) = v2.filter(|v| v.heads().next().is_some()) {
         let in_cache = |id: &Hash32| {
             state.applied_packs.contains(&hex32(id))
                 || state.applied_manifests.contains(&hex32(id))

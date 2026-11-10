@@ -33,11 +33,11 @@ pub struct PeerView {
 }
 
 impl PeerView {
-    /// The peer's verified refs: the merged v2 heads, else the v1 head's refs.
+    /// The peer's verified refs: the merged v2 heads once any landed, else the v1 head's.
     pub fn refs_body(&self) -> Option<&RefsBody> {
         match &self.v2 {
-            Some(v) => v.heads().next().map(|_| &v.refs),
-            None => self.head.as_ref().map(|h| &h.refs),
+            Some(v) if v.heads().next().is_some() => Some(&v.refs),
+            _ => self.head.as_ref().map(|h| &h.refs),
         }
     }
 }
@@ -190,17 +190,39 @@ pub async fn verify_peer<A: Arkiv>(
             state,
         ))
         .await?;
-        return Ok(PeerView {
-            info,
-            chain,
-            head: None,
-            completeness,
-            anchors,
-            refs: vec![],
-            manifests: vec![],
-            v2: Some(v2),
-        });
+        // Before any device head landed (a half-done migration) the v1 chain still holds
+        // the refs, so it is verified as before (head-model 5.1).
+        if v2.heads().next().is_some() {
+            return Ok(PeerView {
+                info,
+                chain,
+                head: None,
+                completeness,
+                anchors,
+                refs: vec![],
+                manifests: vec![],
+                v2: Some(v2),
+            });
+        }
+        let mut pv = v1_head(a, rid, nid, info, chain, completeness, anchors, state).await?;
+        pv.v2 = Some(v2);
+        return Ok(pv);
     }
+    v1_head(a, rid, nid, info, chain, completeness, anchors, state).await
+}
+
+/// Refs, manifests and head acceptance of a v1 anchor chain.
+#[allow(clippy::too_many_arguments)]
+async fn v1_head<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    nid: &Nid,
+    info: PeerInfo,
+    chain: AnchorChain,
+    completeness: Vec<CompletenessObs>,
+    anchors: Vec<Observed>,
+    state: &State,
+) -> Result<PeerView> {
     let applied = state.applied_manifest_set()?;
     let (refs, manifests) = match chain.head() {
         None => (vec![], vec![]),

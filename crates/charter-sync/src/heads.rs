@@ -203,11 +203,14 @@ pub async fn landing<A: Arkiv>(
     let last = head.updated_at.min(at.saturating_add(window));
     for b in at.saturating_add(1)..=last {
         for tx in a.block_txs(b).await? {
-            let ours = tx.from.0.0 == dev.control
-                && calldata_rows(a, &tx)
-                    .iter()
-                    .any(|o| is_head_row(o, &head.h));
-            if ours {
+            // The patch must target this head (or be its create, in its creation block)
+            // and the tx must have succeeded.
+            let targets = |o: &Observed| {
+                is_head_row(o, &head.h)
+                    && (o.key == head.key || (o.key == [0; 32] && tx.block == head.created_at))
+            };
+            let ours = tx.from.0.0 == dev.control && calldata_rows(a, &tx).iter().any(targets);
+            if ours && a.receipt(tx.hash).await?.is_some_and(|r| r.success) {
                 return Ok(Some(landed(&tx)));
             }
         }
@@ -225,7 +228,8 @@ pub async fn body_at<A: Arkiv>(
     let Some(mined) = a.mined_tx(charter_store::TxHash::from(*tx)).await? else {
         return Ok(None);
     };
-    if mined.from.0.0 != dev.control {
+    let ok = a.receipt(mined.hash).await?.is_some_and(|r| r.success);
+    if mined.from.0.0 != dev.control || !ok {
         return Ok(None);
     }
     let body = calldata_rows(a, &mined).into_iter().find_map(|o| {

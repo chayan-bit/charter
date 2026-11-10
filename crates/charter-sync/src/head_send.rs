@@ -154,14 +154,21 @@ impl<A: Arkiv> HeadPush<'_, A> {
         Box::pin(self.finish(plan)).await
     }
 
-    /// The first write and device delegation if missing, then waits for `C_d` to be idle.
+    fn pending_head_path(&self) -> std::path::PathBuf {
+        self.repo.outgoing().join("head-pending")
+    }
+
+    /// The first write and device delegation if missing, then waits for `C_d` to be idle
+    /// (and so for a head tx an interrupted push left in flight).
     pub async fn setup(&self) -> Result<()> {
         let first = self.first_ops()?;
         if !first.is_empty() {
             self.send_from(&self.keys.control(&self.rid()), vec![first])
                 .await?;
         }
-        self.ensure_idle().await
+        self.ensure_idle().await?;
+        let _ = std::fs::remove_file(self.pending_head_path());
+        Ok(())
     }
 
     /// Sends what `plan` says, re-checks and commits.
@@ -384,6 +391,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 snapshot: content.snapshot.clone(),
                 packs: packs.clone(),
                 prev_tx,
+                object_hash: 1,
             };
             body.validate()?;
             let (head, h) = self.head_op(&body, key)?;
@@ -392,6 +400,10 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 .map(|p| piece_op(&rid, p))
                 .collect::<Result<Vec<_>>>()?;
             ops.push(head);
+            // Recorded before sending: a restart waits for this tx instead of forking the
+            // body chain (head-model 7.2).
+            let marker = self.pending_head_path();
+            std::fs::write(&marker, hex32(&h)).map_err(|e| SyncError::io(marker.display(), e))?;
             let landed = self.send_from(&self.dev.control(&rid), vec![ops]).await?;
             let [l] = landed.as_slice() else {
                 return Err(SyncError::coded(
@@ -514,6 +526,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
         }
         state.save(&self.repo.state_path())?;
         crate::fetch::set_namespace(self.repo, &self.nid(), &v2.refs)?;
+        let _ = std::fs::remove_file(self.pending_head_path());
         let staged = self.repo.git().refs(&staging(&self.nid()))?;
         let deletes: Vec<_> = staged
             .into_iter()
