@@ -264,6 +264,9 @@ pub fn merged_refs(rid: &Rid, merged: &Merged) -> RefsBody {
     }
 }
 
+/// One ref update of a push: `(name, new oid or None to delete, signed base)`.
+pub type EntryUpdate = (String, Option<Vec<u8>>, Vec<u8>);
+
 /// The ref entries of `me`'s next body (head-model 7.1 step 3).
 ///
 /// `prev` is this device's current entries with `stamp = 0` already resolved (or the
@@ -275,12 +278,19 @@ pub fn next_entries(
     prev: &[HeadRef],
     merged: &Merged,
     others: &BTreeSet<String>,
-    updates: &[(String, Option<Vec<u8>>, Vec<u8>)],
+    updates: &[EntryUpdate],
 ) -> Vec<HeadRef> {
     let mut out: BTreeMap<String, HeadRef> = prev
         .iter()
         .filter(|e| merged.get(&e.name).is_none_or(|w| w.device == *me))
-        .map(|e| (e.name.clone(), e.clone()))
+        // `base` only matters to the body that made the update (head-model 8).
+        .map(|e| {
+            let carried = HeadRef {
+                base: vec![],
+                ..e.clone()
+            };
+            (e.name.clone(), carried)
+        })
         .collect();
     for (name, oid, base) in updates {
         let counter = merged.get(name).map(|w| w.entry.counter).unwrap_or(0) + 1;

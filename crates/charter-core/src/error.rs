@@ -217,7 +217,9 @@ pub enum VerifyError {
     BadRefs(String),
     #[error("manifest requires anchor {anchor:02x?} of peer {nid:02x?}, not verified")]
     MissingDependency { nid: Nid, anchor: Hash32 },
-    #[error("entity {key:02x?} from a tracked control address has an unsupported version")]
+    #[error(
+        "entity {key:02x?} from a tracked control address has an unsupported version; upgrade charter"
+    )]
     UnsupportedVersion { key: Hash32 },
     #[error("node view inconsistent (entityNonce changed or count above nonce)")]
     InconsistentView,

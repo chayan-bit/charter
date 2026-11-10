@@ -27,8 +27,8 @@ pub use body::{
 pub use canonical::{CanonicalRefs, canonical_refs};
 pub use chain::{
     AcceptedHead, AnchorChain, AnchorLink, BindChain, BindLink, CompletenessObs, Device,
-    DeviceHead, Equivocation, HeadInputs, HeadNonce, IdentityChain, Merged, PeerInfo, Revision,
-    Start, VerifiedOp, Winner, accept_device_head, accept_head, anchor_chain, bind_chain,
+    DeviceHead, EntryUpdate, Equivocation, HeadInputs, HeadNonce, IdentityChain, Merged, PeerInfo,
+    Revision, Start, VerifiedOp, Winner, accept_device_head, accept_head, anchor_chain, bind_chain,
     check_completeness, check_control_set, check_head_nonce, check_requires, devices, find_refs,
     identity_chain, is_device_row, maj, merge, merged_refs, next_entries, peer_key, resolve_stamps,
     verify_ops, verify_ops_after,

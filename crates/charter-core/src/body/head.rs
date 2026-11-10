@@ -187,8 +187,14 @@ impl Body for HeadBody {
                     && e.counter >= 1
                     && (e.oid.is_empty() || e.oid.len() == len)
                     && (e.base.is_empty() || e.base.len() == len)
+                    // A copied stamp names an earlier landing, so it lies before this one.
+                    && e.stamp <= self.at
             }),
-            field("head", "refs", "invalid name, counter, oid or base length"),
+            field(
+                "head",
+                "refs",
+                "invalid name, counter, stamp, oid or base length",
+            ),
         )?;
         require(
             (self.seq == 0) == (self.prev_tx == ZERO),
