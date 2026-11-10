@@ -148,6 +148,7 @@ impl<'a, A: Arkiv> Session<'a, A> {
             .repo
             .as_ref()
             .ok_or_else(|| CliError::Usage("repo not open".into()))?;
+        discard_v1_pending(repo);
         // v0.4.0 writes format v2 only (docs/p5/head-model.md); a v1 repo migrates here.
         let p = HeadPush::prepare(
             self.a,
@@ -159,11 +160,19 @@ impl<'a, A: Arkiv> Session<'a, A> {
             updates,
         )?;
         // Refuse locally, before any gas is spent, a push the pinned program rejects.
-        charter_sync::program::check_refs(&p.view, &keys.nid(), &p.refs_after()?, repo.git())?;
+        let checked = p.refs_after().and_then(|after| {
+            charter_sync::program::check_refs(&p.view, &keys.nid(), &after, repo.git())
+        });
+        if let Err(e) = checked {
+            drop_staging(repo, &keys.nid());
+            return Err(e.into());
+        }
         if !self.dry_run {
             return Ok(Box::pin(p.run()).await?);
         }
-        let cost = p.cost().await?;
+        let cost = p.cost().await;
+        drop_staging(repo, &keys.nid());
+        let cost = cost?;
         eprintln!(
             "chart: dry run: about {} gas, {} tGLM at the current base fee, {} tGLM \
              needed up front with the in-flight reserve; nothing sent",
@@ -265,6 +274,39 @@ pub fn parse_push(spec: &str) -> Update {
         src: (!src.is_empty()).then(|| src.to_owned()),
         dst: dst.to_owned(),
     }
+}
+
+/// Staged refs of a push that will not run (refused or dry): nothing else removes them.
+fn drop_staging(repo: &Repo, nid: &Nid) {
+    let git = repo.git();
+    let staged = git
+        .refs(&charter_sync::repo::staging(nid))
+        .unwrap_or_default();
+    let deletes: Vec<_> = staged
+        .into_iter()
+        .map(|(name, old)| charter_sync::git::RefOp::Delete { name, old })
+        .collect();
+    if let Err(e) = git.update_refs(&deletes) {
+        charter_sync::warn(&format!("could not drop staged refs: {e}"));
+    }
+}
+
+/// v0.4.0 never resumes a v1 push: drop what v0.3.0 left unfinished and say so.
+fn discard_v1_pending(repo: &Repo) {
+    let path = repo.pending_path();
+    if !path.exists() {
+        return;
+    }
+    charter_sync::warn(
+        "discarding a push v0.3.0 left unfinished (its chunks on Arkiv expire unanchored); \
+         this push sends everything again",
+    );
+    if let Ok(Some(p)) = charter_sync::state::PendingPush::load(&path) {
+        for pk in &p.packs {
+            let _ = std::fs::remove_file(repo.outgoing().join(&pk.file));
+        }
+    }
+    let _ = std::fs::remove_file(&path);
 }
 
 #[cfg(test)]

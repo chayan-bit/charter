@@ -385,3 +385,42 @@ fn peer_url_fetches_a_non_delegate_peers_refs() {
     alice.git(&work, &["fetch", "-q", &format!("{url}/{bob_nid}"), "main"]);
     assert_eq!(alice.git(&work, &["rev-parse", "FETCH_HEAD"]), bobs);
 }
+
+/// A dry run (and a push the program refuses) stages refs in the cache; the helper drops
+/// them again, and says so when it discards a v0.3.0 push left unfinished.
+#[test]
+fn a_dry_run_push_leaves_no_staging_refs_and_an_old_pending_push_is_reported() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root, log) = (tmp.path(), tmp.path().join("chain.log"));
+    let alice = User::new(root, "alice", &log);
+    fund(&log, field(&alice.arkiv(&["keys", "init"]), "wallet:"));
+    let url = field(&alice.arkiv(&["init", "--name", "dry"]), "url:").to_owned();
+    let work = root.join("work");
+    alice.git(root, &["init", "-q", &work.to_string_lossy()]);
+    write(&work, "a", b"1\n");
+    alice.git(&work, &["add", "-A"]);
+    alice.git(&work, &["commit", "-q", "-m", "feat: a"]);
+    alice.git(&work, &["push", "-q", &url, "main"]);
+
+    let rid = charter_sync::ids::parse_url(url.trim_start_matches("arkiv::"))
+        .expect("url")
+        .rid;
+    let home = alice.home.join(".charter");
+    let (cache, pending) = {
+        let repo = charter_sync::Repo::open(&home, &rid).expect("repo");
+        (repo.git_dir(), repo.pending_path())
+    };
+    std::fs::write(&pending, b"{}").expect("old pending push");
+    write(&work, "a", b"2\n");
+    alice.git(&work, &["commit", "-qam", "feat: b"]);
+    let out = alice.run("git", &work, &["push", "--dry-run", &url, "main"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("v0.3.0"), "{err}");
+    assert!(!pending.exists(), "the old pending push is discarded");
+    let staged = alice.git(
+        &cache,
+        &["for-each-ref", "--format=%(refname)", "refs/arkiv/staging/"],
+    );
+    assert_eq!(staged, "", "no staging refs left behind");
+}
