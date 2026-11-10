@@ -330,6 +330,15 @@ impl Arkiv for Spy {
     async fn tx_count_mined(&self, a: Address) -> Result<u64, StoreError> {
         self.inner.tx_count_mined(a).await
     }
+    async fn mined_tx(
+        &self,
+        h: charter_store::TxHash,
+    ) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.inner.mined_tx(h).await
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        self.inner.block_txs(n).await
+    }
     async fn estimate(
         &self,
         from: Address,
