@@ -1,16 +1,18 @@
-//! Syntax highlighting with syntect's classed HTML (`sy-*` scope classes coloured by the
-//! stylesheet's eight syntax roles), one self-contained HTML fragment per line so every
-//! line can carry its own anchor. The syntax set loads once, on the first highlighted file.
+//! Syntax highlighting: syntect scopes mapped to the stylesheet's eight syntax roles and
+//! written as flat role runs, one self-contained HTML fragment per line so every line can
+//! carry its own anchor. The syntax set loads once, on the first highlighted file.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use syntect::html::{ClassStyle, line_tokens_to_classed_spans};
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 /// Lines highlighted per file; the rest is plain text (docs/p6/ui.md section 6).
 pub const HIGHLIGHT_LINES: usize = 2_000;
-const STYLE: ClassStyle = ClassStyle::SpacedPrefixed { prefix: "sy-" };
+/// Role elements are `<x-k>`, `<x-s>`, ...: autonomous custom elements, which render like
+/// `span` and need no `class` attribute, so a highlighted line stays light.
+const TAG: &str = "x-";
 
 fn syntaxes() -> &'static SyntaxSet {
     static SET: OnceLock<SyntaxSet> = OnceLock::new();
@@ -33,13 +35,84 @@ pub fn escape(s: &str) -> String {
     o
 }
 
-fn open_span(scope: &Scope) -> String {
-    let classes: Vec<String> = scope
-        .build_string()
-        .split('.')
-        .map(|a| format!("sy-{a}"))
-        .collect();
-    format!("<span class=\"{}\">", classes.join(" "))
+/// The stylesheet's syntax roles. A scope takes the role of its most specific matching
+/// entry (most atoms; a later entry wins a tie), which is how the CSS cascade coloured
+/// syntect's nested classed spans before this flattening.
+const ROLES: [(&[&str], char); 17] = [
+    (&["keyword"], 'k'),
+    (&["storage"], 'k'),
+    (&["string"], 's'),
+    (&["constant", "numeric"], 'n'),
+    (&["constant", "language"], 'n'),
+    (&["comment"], 'c'),
+    (&["entity", "name", "function"], 'f'),
+    (&["support", "function"], 'f'),
+    (&["entity", "name", "type"], 't'),
+    (&["storage", "type"], 't'),
+    (&["support", "type"], 't'),
+    (&["keyword", "operator"], 'o'),
+    (&["punctuation"], 'o'),
+    // Quotes and comment markers take their string or comment colour, not punctuation's.
+    (&["punctuation", "definition", "string"], 's'),
+    (&["punctuation", "definition", "comment"], 'c'),
+    (&["entity", "other", "attribute-name"], 'a'),
+    (&["meta", "attribute"], 'a'),
+];
+
+fn role_of(scope: Scope) -> Option<char> {
+    let name = scope.build_string();
+    let atoms: Vec<&str> = name.split('.').collect();
+    ROLES
+        .iter()
+        .enumerate()
+        .filter(|(_, (need, _))| need.iter().all(|a| atoms.contains(a)))
+        .max_by_key(|(i, (need, _))| (need.len(), *i))
+        .map(|(_, (_, r))| *r)
+}
+
+/// The colour at the top of `stack`: its innermost scope that has a role, as inherited
+/// colour works in CSS.
+fn role(stack: &ScopeStack, memo: &mut HashMap<Scope, Option<char>>) -> Option<char> {
+    stack
+        .as_slice()
+        .iter()
+        .rev()
+        .find_map(|s| *memo.entry(*s).or_insert_with(|| role_of(*s)))
+}
+
+/// One line as flat role runs: adjacent text of one role shares an element, and
+/// whitespace joins whatever run it sits in (it has no colour to keep).
+#[derive(Default)]
+struct Runs {
+    out: String,
+    role: Option<char>,
+    text: String,
+}
+
+impl Runs {
+    fn push(&mut self, role: Option<char>, text: &str) {
+        let blank = text.bytes().all(|b| b == b' ' || b == b'\t');
+        if !blank && role != self.role {
+            self.flush();
+            self.role = role;
+        }
+        self.text.push_str(&escape_text(text));
+    }
+
+    fn flush(&mut self) {
+        let text = std::mem::take(&mut self.text);
+        match self.role {
+            Some(r) if !text.is_empty() => {
+                self.out.push_str(&format!("<{TAG}{r}>{text}</{TAG}{r}>"));
+            }
+            _ => self.out.push_str(&text),
+        }
+    }
+
+    fn finish(mut self) -> String {
+        self.flush();
+        self.out
+    }
 }
 
 fn syntax_for<'a>(set: &'a SyntaxSet, name: &str, first: &str) -> Option<&'a SyntaxReference> {
@@ -60,10 +133,11 @@ pub fn lines(name: &str, text: &str, limit: usize) -> Vec<String> {
     };
     let mut state = ParseState::new(syntax);
     let mut stack = ScopeStack::new();
+    let mut memo = HashMap::new();
     let mut out = Vec::with_capacity(all.len());
     for (i, line) in all.iter().enumerate() {
         let html = (i < HIGHLIGHT_LINES)
-            .then(|| classed(set, &mut state, &mut stack, line))
+            .then(|| classed(set, &mut state, &mut stack, &mut memo, line))
             .flatten();
         out.push(html.unwrap_or_else(|| plain(line)));
     }
@@ -71,28 +145,38 @@ pub fn lines(name: &str, text: &str, limit: usize) -> Vec<String> {
 }
 
 fn plain(line: &str) -> String {
-    escape(line.trim_end_matches(['\n', '\r']))
+    escape_text(line.trim_end_matches(['\n', '\r']))
 }
 
-/// One line with the spans still open from earlier lines reopened first and every span
-/// closed at the end; `None` if syntect fails on it (the caller falls back to plain).
+/// Escaped for element content (never an attribute): only `&`, `<` and `>`.
+pub fn escape_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// One line as role runs; `None` if syntect fails on it (the caller falls back to plain).
 fn classed(
     set: &SyntaxSet,
     state: &mut ParseState,
     stack: &mut ScopeStack,
+    memo: &mut HashMap<Scope, Option<char>>,
     line: &str,
 ) -> Option<String> {
     let ops = state.parse_line(line, set).ok()?;
-    let reopen: String = stack.as_slice().iter().map(open_span).collect();
-    let depth = stack.len() as isize;
     let body = line.trim_end_matches(['\n', '\r']);
-    let ops: Vec<_> = ops
-        .into_iter()
-        .map(|(i, op)| (i.min(body.len()), op))
-        .collect();
-    let (html, delta) = line_tokens_to_classed_spans(body, &ops, STYLE, stack).ok()?;
-    let close = "</span>".repeat(usize::try_from(depth + delta).unwrap_or(0));
-    Some(format!("{reopen}{html}{close}"))
+    let mut runs = Runs::default();
+    let mut at = 0;
+    for (i, op) in ops {
+        let i = i.min(body.len());
+        if i > at {
+            runs.push(role(stack, memo), body.get(at..i)?);
+            at = i;
+        }
+        stack.apply(&op).ok()?;
+    }
+    runs.push(role(stack, memo), body.get(at..)?);
+    Some(runs.finish())
 }
 
 #[cfg(test)]
@@ -100,24 +184,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rust_is_classed_per_line_and_balanced() {
-        let src = "/* a\n b */\nfn main() { let s = \"<x>\"; }\n";
+    fn rust_is_flat_role_runs_per_line() {
+        let src = "/* a\n b */\npub fn main() { let s = \"<x>\"; }\n";
         let v = lines("main.rs", src, usize::MAX);
         assert_eq!(v.len(), 3);
+        assert_eq!(v[1], "<x-c> b */</x-c>", "the block comment carries over");
+        // `fn` is `storage.type`, so it takes the type colour, as the old cascade did.
+        let head = "<x-k>pub </x-k><x-t>fn </x-t><x-f>main</x-f><x-o>() { </x-o>";
+        assert!(v[2].starts_with(head), "{}", v[2]);
+        assert!(v[2].contains("<x-s>\"&lt;x&gt;\"</x-s>"), "{}", v[2]);
         for l in &v {
-            assert_eq!(
-                l.matches("<span").count(),
-                l.matches("</span>").count(),
-                "{l}"
-            );
+            assert_eq!(l.matches("<x-").count(), l.matches("</x-").count(), "{l}");
         }
-        assert!(
-            v[1].contains("sy-comment"),
-            "the block comment reopens: {}",
-            v[1]
-        );
-        assert!(v[2].contains("sy-keyword") || v[2].contains("sy-storage"));
-        assert!(v[2].contains("&lt;x&gt;") && !v[2].contains("<x>"));
+    }
+
+    #[test]
+    fn roles_follow_the_old_css_cascade() {
+        let r = |s: &str| role_of(Scope::new(s).expect("scope"));
+        assert_eq!(r("keyword.operator.rust"), Some('o'), "two atoms beat one");
+        assert_eq!(r("storage.type.rust"), Some('t'));
+        assert_eq!(r("storage.modifier.rust"), Some('k'));
+        assert_eq!(r("constant.numeric.integer"), Some('n'));
+        assert_eq!(r("entity.name.function.rust"), Some('f'));
+        assert_eq!(r("variable.other.rust"), None);
     }
 
     #[test]
@@ -131,7 +220,7 @@ mod tests {
         let src: String = (0..2_500).map(|i| format!("let x{i} = {i};\n")).collect();
         let v = lines("gen.rs", &src, usize::MAX);
         assert_eq!(v.len(), 2_500);
-        assert!(v[HIGHLIGHT_LINES - 1].contains("<span"));
+        assert!(v[HIGHLIGHT_LINES - 1].contains("<x-"));
         assert!(v[HIGHLIGHT_LINES..].iter().all(|l| !l.contains('<')));
         assert_eq!(lines("gen.rs", &src, 10).len(), 10);
     }

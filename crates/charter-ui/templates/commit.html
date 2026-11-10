@@ -26,7 +26,8 @@
 {% if f.binary %}<p class="dim pad">Binary file.</p>{% else %}
 <div class="scroll" tabindex="0" role="region" aria-label="{{ f.path }}">
 <table class="code diff"><tbody>
-{% for d in f.lines %}{% if d.kind == '@' %}<tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="hunk" colspan="2">{{ d.text }}</td></tr>{% else %}<tr class="{% if d.kind == '+' %}a{% else if d.kind == '-' %}d{% endif %}"><td class="ln">{% if let Some(n) = d.old %}{{ n }}{% endif %}</td><td class="ln">{% if let Some(n) = d.new %}{{ n }}{% endif %}</td><td class="sg">{{ d.kind }}</td><td class="lc">{{ d.text }}</td></tr>{% endif %}
+{#- Lean rows (optional </td> end tags left out, the sign drawn by CSS): long diffs are 2,000 rows. -#}
+{% for d in f.lines %}{% if d.kind == '@' %}<tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="hunk" colspan="2">{{ d.text }}</td></tr>{% else %}<tr{% if d.kind == '+' %} class=a{% else if d.kind == '-' %} class=d{% endif %}><td class=ln>{% if let Some(n) = d.old %}{{ n }}{% endif %}<td class=ln>{% if let Some(n) = d.new %}{{ n }}{% endif %}<td class=sg><td class=lc>{{ self.esc(d.text.as_str())|safe }}</tr>{% endif %}
 {% endfor %}
 </tbody></table>
 </div>

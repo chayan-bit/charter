@@ -69,8 +69,8 @@ async fn tree_lists_directories_first_and_walks_down() {
 async fn blob_is_highlighted_with_line_anchors_and_escaped() {
     let f = fixture();
     let h = page(&format!("/r/{}/blob/{}/src/main.rs", f.hex, f.first)).await;
-    assert!(h.contains("id=\"L2\"") && h.contains("href=\"#L2\""));
-    assert!(h.contains("sy-") && h.contains("&lt;hi&gt;") && !h.contains("<hi>"));
+    assert!(h.contains("<tr id=L2><td class=ln>"), "line anchors");
+    assert!(h.contains("<x-") && h.contains("&lt;hi&gt;") && !h.contains("<hi>"));
     assert!(h.contains(&format!("/r/{}/raw/", f.hex)), "raw link");
 }
 
@@ -78,13 +78,13 @@ async fn blob_is_highlighted_with_line_anchors_and_escaped() {
 async fn long_blob_stops_at_2000_lines_until_show_all() {
     let f = fixture();
     let h = page(&format!("/r/{}/blob/main/long.rs", f.hex)).await;
-    assert!(h.contains("id=\"L2000\"") && !h.contains("id=\"L2001\""));
+    assert!(h.contains("id=L2000>") && !h.contains("id=L2001>"));
     assert!(h.contains("500 more lines") && h.contains("?all=1"));
     let h = page(&format!("/r/{}/blob/main/long.rs?all=1", f.hex)).await;
-    assert!(h.contains("id=\"L2500\"") && !h.contains("more lines"));
-    let tail = &h[h.find("id=\"L2001\"").expect("2001")..];
+    assert!(h.contains("id=L2500>") && !h.contains("more lines"));
+    let tail = &h[h.find("id=L2001>").expect("2001")..];
     assert!(
-        !tail[..tail.find("</tr>").expect("row")].contains("sy-"),
+        !tail[..tail.find("</tr>").expect("row")].contains("<x-"),
         "plain past 2,000"
     );
 }
@@ -117,7 +117,7 @@ async fn commit_shows_message_anchors_and_collapsible_diff() {
     assert!(h.contains("fix: &#60;smaller&#62; main"));
     assert!(h.contains("<details class=\"file box\" open") && h.contains("src/main.rs"));
     assert!(
-        h.contains("class=\"a\"") && h.contains("class=\"d\""),
+        h.contains("<tr class=a>") && h.contains("<tr class=d>"),
         "added and removed lines"
     );
     assert!(

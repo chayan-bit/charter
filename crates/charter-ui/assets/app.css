@@ -189,10 +189,15 @@ p a, .dim a, .more a, .last a, .empty a, .md a, .desc a { text-decoration: under
 .code .ln { position: sticky; left: 0; width: var(--gw); min-width: var(--gw); padding: 0 var(--sp-2); text-align: right; color: var(--text-3); background: var(--s1); border-right: 1px solid var(--border); user-select: none; }
 .code .ln a { display: block; color: var(--text-3); }
 .code .ln a:hover { color: var(--text); text-decoration: none; }
-.code .lc { padding: 0 var(--sp-3) 0 var(--sp-2); }
+.code .lc, .blob td + td { padding: 0 var(--sp-3) 0 var(--sp-2); }
 .code tr:target > td { background: var(--warn-bg); }
+/* Blob line numbers are a counter (no per-line link); a click on one sets the #L anchor. */
+.blob tbody { counter-reset: ln; } .blob tr { counter-increment: ln; }
+.blob td.ln { cursor: pointer; } .blob td.ln::before { content: counter(ln); }
+.blob td.ln:hover { color: var(--text); }
 .diff .ln + .ln { left: var(--gw); }
 .diff .sg { width: 2ch; min-width: 2ch; text-align: center; user-select: none; }
+.diff tr.a .sg::before { content: "+"; } .diff tr.d .sg::before { content: "-"; }
 .diff tr.a { background: var(--add-bg); } .diff tr.a .ln { background: var(--add-gutter); color: var(--text-2); }
 .diff tr.d { background: var(--del-bg); } .diff tr.d .ln { background: var(--del-gutter); color: var(--text-2); }
 .diff tr.hunk td { background: var(--s2); color: var(--text-2); }
@@ -229,14 +234,9 @@ p a, .dim a, .more a, .last a, .empty a, .md a, .desc a { text-decoration: under
 .loc { display: block; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Syntax roles (syntect scope classes) */
-.sy-keyword, .sy-storage { color: var(--sy-keyword); }
-.sy-string { color: var(--sy-string); }
-.sy-constant.sy-numeric, .sy-constant.sy-language { color: var(--sy-number); }
-.sy-comment { color: var(--sy-comment); }
-.sy-entity.sy-name.sy-function, .sy-support.sy-function { color: var(--sy-function); }
-.sy-entity.sy-name.sy-type, .sy-storage.sy-type, .sy-support.sy-type { color: var(--sy-type); }
-.sy-keyword.sy-operator, .sy-punctuation { color: var(--sy-operator); }
-.sy-entity.sy-other.sy-attribute-name, .sy-meta.sy-attribute { color: var(--sy-attribute); }
+x-k { color: var(--sy-keyword); } x-s { color: var(--sy-string); } x-n { color: var(--sy-number); }
+x-c { color: var(--sy-comment); } x-f { color: var(--sy-function); } x-t { color: var(--sy-type); }
+x-o { color: var(--sy-operator); } x-a { color: var(--sy-attribute); }
 
 /* Help dialog */
 dialog { width: min(480px, calc(100vw - 32px)); padding: var(--sp-4); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--s1); color: var(--text); box-shadow: var(--shadow); }

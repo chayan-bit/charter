@@ -147,6 +147,11 @@ impl Commit {
     pub fn short(&self, s: &str) -> String {
         short(s)
     }
+    /// Diff text escaped for element content only (it never lands in an attribute), which
+    /// keeps quotes as one byte on long diffs.
+    pub fn esc(&self, s: &str) -> String {
+        crate::highlight::escape_text(s)
+    }
 }
 
 /// Peers whose accepted head refs reach `oid`, with the refs that do.

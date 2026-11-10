@@ -9,8 +9,9 @@
 <p class="empty pad">Binary or very large file; use <a href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a>.</p>
 {% else %}
 <div class="scroll" tabindex="0" role="region" aria-label="{{ path }}">
-<table class="code"><tbody>
-{% for line in lines %}<tr id="L{{ loop.index }}"><td class="ln"><a href="#L{{ loop.index }}" tabindex="-1">{{ loop.index }}</a></td><td class="lc">{{ line|safe }}</td></tr>
+<table class="code blob"><tbody>
+{#- Lean rows (optional </td> end tags left out): a long blob is 2,000 of them. -#}
+{% for line in lines %}<tr id=L{{ loop.index }}><td class=ln><td>{{ line|safe }}</tr>
 {% endfor %}
 </tbody></table>
 </div>

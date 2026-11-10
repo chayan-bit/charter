@@ -61,7 +61,9 @@ pub async fn post(
 }
 
 fn files(work: &std::path::Path) -> (String, String) {
-    let long: String = (0..2_500).map(|i| format!("let x{i} = {i};\n")).collect();
+    let long: String = (0..2_500)
+        .map(|i| format!("let value_{i} = compute({i}, \"line {i}\"); // generated\n"))
+        .collect();
     let first = commit(
         work,
         &[

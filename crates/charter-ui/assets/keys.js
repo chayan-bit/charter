@@ -93,7 +93,9 @@
 
   d.addEventListener("keydown", key);
   d.addEventListener("click", function (e) {
-    var t = e.target, b = t.closest && t.closest("[data-help], [data-theme-toggle], [data-copy-from]");
+    var t = e.target, ln = t.closest && t.closest(".blob td.ln");
+    if (ln) { location.hash = ln.parentNode.id; return; }
+    var b = t.closest && t.closest("[data-help], [data-theme-toggle], [data-copy-from]");
     if (t.matches && t.matches("input[readonly]")) t.select();
     if (!b) return;
     if (b.hasAttribute("data-copy-from")) copyFrom(b);
