@@ -45,6 +45,9 @@ pub struct PipelineConfig {
     /// Wait for inclusion on the backend's `newHeads` socket when it has one, polling
     /// on the `poll` timer only as the fallback.
     pub use_heads: bool,
+    /// The jobs depend on each other in order (control and COB posts): a job is never
+    /// sent again behind txs that already went out after it; the run fails instead.
+    pub ordered: bool,
 }
 
 impl Default for PipelineConfig {
@@ -62,6 +65,7 @@ impl Default for PipelineConfig {
             max_resends: 3,
             reuse_estimates: true,
             use_heads: true,
+            ordered: false,
         }
     }
 }
@@ -72,6 +76,14 @@ impl PipelineConfig {
     pub fn bulk(&self) -> Self {
         Self {
             pace_percent: self.pace_percent.max(200),
+            ..self.clone()
+        }
+    }
+
+    /// For jobs that must land in order (each may depend on the ones before it).
+    pub fn ordered(&self) -> Self {
+        Self {
+            ordered: true,
             ..self.clone()
         }
     }
@@ -573,6 +585,14 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         if !lost.is_empty() {
             return self.lost(lost, base_fee, sent_at, inflight).await;
         }
+        if let Some(n) = stolen.iter().map(|f| f.tx.nonce()).min()
+            && self.cfg.ordered
+            && above(inflight, n)
+        {
+            return Err(StoreError::InconsistentView(format!(
+                "nonce {n} was taken by another sender after later txs of this ordered run went out"
+            )));
+        }
         if stolen.is_empty() {
             self.reread = false;
             return Ok(false);
@@ -814,6 +834,10 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             Job::Execute(ops) => match self.arkiv.estimate(self.address(), ops).await {
                 Err(StoreError::Reverted { reason, .. }) => reason,
                 Err(e @ StoreError::InsufficientFunds { .. }) => return Err(e),
+                // Sent again it would land after txs that may depend on it.
+                _ if self.cfg.ordered && self.nonce.is_some_and(|n| n > f.tx.nonce() + 1) => {
+                    "status 0 (not resent: later txs of this ordered run already went out)".into()
+                }
                 _ if self
                     .retried
                     .insert((f.job, keccak256(execute_calldata(ops)))) =>

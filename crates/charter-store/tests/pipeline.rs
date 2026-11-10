@@ -186,6 +186,39 @@ async fn a_send_whose_replies_are_lost_but_reached_the_node_is_not_plugged() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_ordered_run_never_resends_a_job_behind_later_ones() {
+    let jobs = || (0..3).map(|i| vec![small("o", i, i.into())]).collect();
+    // Unordered, the failed job 0 is retried and lands after jobs 1 and 2.
+    let (fake, key) = setup();
+    let spy = Spy::new(fake.clone(), false);
+    spy.revert_nonces.lock().expect("lock").insert(0);
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default());
+    let landed = with_miner(fake.clone(), p.run(jobs())).await.expect("run");
+    let block = |j| {
+        landed
+            .iter()
+            .find(|l| l.job == j)
+            .expect("job")
+            .receipt
+            .block_number
+    };
+    assert!(block(0) > block(1), "retried behind job 1");
+    // Ordered, the run fails instead.
+    let (fake, key) = setup();
+    let spy = Spy::new(fake.clone(), false);
+    spy.revert_nonces.lock().expect("lock").insert(0);
+    let cfg = PipelineConfig::default().ordered();
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, cfg);
+    let err = with_miner(fake.clone(), p.run(jobs()))
+        .await
+        .expect_err("out of order");
+    assert!(
+        matches!(&err, StoreError::Reverted { reason, .. } if reason.contains("ordered run")),
+        "{err:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn each_half_of_a_split_job_is_retried_on_its_own() {
     let (fake, key) = setup();
     let spy = Spy::new(fake.clone(), false);
