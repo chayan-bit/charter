@@ -182,11 +182,11 @@ pub async fn attach_proof<A: Arkiv>(a: &A, cfg: &Config, x: &AttachArgs) -> Resu
     let payload = payload(&x.post)?;
     let (keys, rid) = (Keys::require(&cfg.home)?, rid_of(&x.post.repo)?);
     let posted = posted_blobs(a, &rid).await?;
-    let mut chunks = Vec::new();
+    let (mut chunks, mut ops, mut new) = (Vec::new(), Vec::new(), Vec::new());
     for c in receipt.chunks(BLOB_CHUNK) {
         let h = sha256_hex(c);
-        if !posted.contains(&h) {
-            let blob = CobOpBody {
+        if !posted.contains(&h) && !new.contains(&h) {
+            ops.push(CobOpBody {
                 rid,
                 object: ZERO,
                 type_name: BLOB_TYPE.into(),
@@ -194,17 +194,23 @@ pub async fn attach_proof<A: Arkiv>(a: &A, cfg: &Config, x: &AttachArgs) -> Resu
                 parents: vec![],
                 payload: json::to_cbor(&json!({ "data": hex::encode(c) }))?,
                 ts_ms: now_ms(),
-            };
-            let id = cob::post(a, cfg, &keys, &blob).await?;
-            eprintln!("blob {h} in op {}", hex32(&id));
+            });
+            new.push(h.clone());
         }
         chunks.push(h);
     }
     let entry = json!({
         "kind": RISC0, "receipt": sha256_hex(&receipt), "chunks": chunks, "public": public,
     });
-    let body = body(&x.post, &with_proof(payload, entry)?)?;
-    Ok(cob::post(a, cfg, &keys, &body).await?)
+    ops.push(body(&x.post, &with_proof(payload, entry)?)?);
+    // Blobs, then the op naming them: one nonce pipeline, in order, no wait per receipt.
+    let ids = cob::post_many(a, cfg, &keys, &ops).await?;
+    for (h, id) in new.iter().zip(&ids) {
+        eprintln!("blob {h} in op {}", hex32(id));
+    }
+    ids.last()
+        .copied()
+        .ok_or_else(|| CliError::Usage("no op was posted".into()))
 }
 
 async fn list<A: Arkiv>(a: &A, l: &ListArgs) -> Result<()> {

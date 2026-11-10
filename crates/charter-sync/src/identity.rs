@@ -34,14 +34,18 @@ async fn send_control<A: Arkiv>(
     rid: &Rid,
     ops: Vec<Operation>,
 ) -> Result<()> {
-    write::send_funded(
-        a,
-        &keys.control(rid),
-        &keys.wallet(),
-        &cfg.pipeline,
-        vec![ops],
-    )
-    .await?;
+    send_control_jobs(a, cfg, keys, rid, vec![ops]).await
+}
+
+/// Sends one tx per job from the control address, in order on one nonce pipeline.
+async fn send_control_jobs<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    rid: &Rid,
+    jobs: Vec<Vec<Operation>>,
+) -> Result<()> {
+    write::send_funded(a, &keys.control(rid), &keys.wallet(), &cfg.pipeline, jobs).await?;
     Ok(())
 }
 
@@ -86,6 +90,19 @@ pub(crate) async fn with_bind<A: Arkiv>(
     rid: &Rid,
     op: Operation,
 ) -> Result<()> {
+    with_bind_all(a, cfg, keys, rid, vec![op]).await
+}
+
+/// [`with_bind`] for several ops: one tx each (entities of one tx have no defined order
+/// among themselves, and a later op may name an earlier one as parent), sent back to back
+/// on one nonce pipeline so they land in order without waiting for each receipt.
+pub(crate) async fn with_bind_all<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    rid: &Rid,
+    new: Vec<Operation>,
+) -> Result<()> {
     let bound = view::resolve_peer(a, rid, &keys.nid())
         .await?
         .is_some_and(|p| !p.binds.links.is_empty());
@@ -93,8 +110,10 @@ pub(crate) async fn with_bind<A: Arkiv>(
         true => vec![],
         false => first_write_ops(keys, rid, cfg)?,
     };
-    ops.push(op);
-    send_control(a, cfg, keys, rid, ops).await
+    let mut new = new.into_iter();
+    ops.extend(new.next());
+    let jobs = std::iter::once(ops).chain(new.map(|op| vec![op])).collect();
+    send_control_jobs(a, cfg, keys, rid, jobs).await
 }
 
 /// Proposes the next revision, produced by `edit` from the current head body; returns its

@@ -170,3 +170,67 @@ async fn list_since_merged_into_a_cache_equals_a_full_list() {
         .expect("idle");
     assert!(idle.ops.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_signed_pipelines_ops_in_order_one_tx_each() {
+    use charter_store::Arkiv;
+    let net = Net::new();
+    let (alice, bob) = (Peer::new(&net, 1), Peer::new(&net, 2));
+    let rid = init(&net, &alice, "many").await;
+    let create = op(&rid, ZERO, "create", vec![], json!({"title": "review"}));
+    let create = cob::sign_op(&bob.keys, &create).expect("sign");
+    let id = create.h;
+    let approve = op(&rid, id, "approve", vec![id], json!(null));
+    let approve = cob::sign_op(&bob.keys, &approve).expect("sign");
+    let control = bob.keys.control_address(&rid);
+    let ids = cob::post_signed(&net, &bob.cfg, &bob.keys, &rid, &[create, approve])
+        .await
+        .expect("post");
+    assert_eq!(ids[0], id, "ids are content hashes, known before sending");
+    assert_eq!(
+        net.tx_count_mined(control).await.expect("n"),
+        2,
+        "peer, bind and create in one tx; approve in the next"
+    );
+    let listed: Vec<Hash32> = cob::list(&net, &rid, Some(&id), None)
+        .await
+        .expect("list")
+        .iter()
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(listed, ids);
+
+    let blobs: Vec<CobOpBody> = (0..3)
+        .map(|i| {
+            op(
+                &rid,
+                ZERO,
+                "create",
+                vec![],
+                json!({"i": i, "d": "x".repeat(50_000)}),
+            )
+        })
+        .collect();
+    let ids = cob::post_many(&net, &bob.cfg, &bob.keys, &blobs)
+        .await
+        .expect("post big");
+    assert_eq!(
+        net.tx_count_mined(control).await.expect("n"),
+        5,
+        "one tx per op"
+    );
+    let all: Vec<Hash32> = cob::list(&net, &rid, None, None)
+        .await
+        .expect("list")
+        .iter()
+        .map(|o| o.id)
+        .filter(|h| ids.contains(h))
+        .collect();
+    assert_eq!(all, ids, "in order");
+    assert!(
+        cob::post_many(&net, &bob.cfg, &bob.keys, &[])
+            .await
+            .expect("none")
+            .is_empty()
+    );
+}
