@@ -126,19 +126,16 @@ fn since_block(mut v: Value, blocks: &[u64]) -> Value {
     v
 }
 
-/// Git ancestry of commit `a` to commit `b` in `git`, or `None` if either is missing.
+/// Git ancestry of commit `a` to commit `b` in `git`, or `None` when git cannot decide
+/// (either commit, or any commit between them, is missing): a `None` keeps the fold from
+/// being checkpointed, so the verdict is taken again once the objects arrive.
 pub fn is_ancestor(git: &Git, a: &[u8], b: &[u8]) -> Option<bool> {
     let (a, b) = (hex::encode(a), hex::encode(b));
-    let has = |o: &str| {
-        git.run(&["cat-file", "-e", &format!("{o}^{{commit}}")], b"")
-            .is_ok()
-    };
-    if !has(&a) || !has(&b) {
-        return None;
+    match git.exit_code(&["merge-base", "--is-ancestor", &a, &b]) {
+        Ok(Some(0)) => Some(true),
+        Ok(Some(1)) => Some(false),
+        _ => None,
     }
-    // Exit 1 (no common ancestor) is a plain "not an ancestor".
-    let base = git.run(&["merge-base", &a, &b], b"").unwrap_or_default();
-    Some(String::from_utf8_lossy(&base).trim() == a)
 }
 
 impl Enforced {
@@ -416,6 +413,58 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn ancestry_is_undecided_while_a_commit_between_is_missing() {
+        let d = tempfile::tempdir().expect("tmp");
+        let sh = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .current_dir(d.path())
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout)
+                .expect("utf8")
+                .trim()
+                .to_owned()
+        };
+        sh(&["init", "-q"]);
+        let mut c = vec![];
+        for i in 0..3 {
+            sh(&[
+                "commit",
+                "-q",
+                "--no-verify",
+                "--allow-empty",
+                "-m",
+                &format!("chore: c{i}"),
+            ]);
+            c.push(hex::decode(sh(&["rev-parse", "HEAD"])).expect("hex"));
+        }
+        let git = Git::work(Some(d.path()));
+        assert_eq!(is_ancestor(&git, &c[0], &c[2]), Some(true));
+        assert_eq!(is_ancestor(&git, &c[2], &c[0]), Some(false));
+        assert_eq!(is_ancestor(&git, &[7; 20], &c[2]), None, "unknown commit");
+        // Objects still arriving: the middle commit is not here yet.
+        let mid = hex::encode(&c[1]);
+        std::fs::remove_file(
+            d.path()
+                .join(format!(".git/objects/{}/{}", &mid[..2], &mid[2..])),
+        )
+        .expect("remove");
+        assert_eq!(is_ancestor(&git, &c[0], &c[2]), None, "not a frozen false");
     }
 
     #[test]

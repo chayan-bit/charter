@@ -125,6 +125,18 @@ impl Git {
         Ok(out.stdout)
     }
 
+    /// The exit code of `git <args>` (no stdin, output dropped); `None` if killed by a signal.
+    pub fn exit_code(&self, args: &[&str]) -> Result<Option<i32>> {
+        let status = self
+            .command(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| SyncError::io("git", e))?;
+        Ok(status.code())
+    }
+
     /// `git <args>` with a file as stdin.
     pub fn run_with_file(&self, args: &[&str], file: &Path) -> Result<Vec<u8>> {
         let f = std::fs::File::open(file).map_err(|e| SyncError::io(file.display(), e))?;
