@@ -186,6 +186,25 @@ async fn a_send_whose_replies_are_lost_but_reached_the_node_is_not_plugged() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn each_half_of_a_split_job_is_retried_on_its_own() {
+    let (fake, key) = setup();
+    let spy = Spy::new(fake.clone(), false);
+    // One tx at a time: nonce 0 is the first half, nonce 1 its retry, nonce 2 the next half.
+    spy.revert_nonces.lock().expect("lock").extend([0, 2]);
+    let cfg = PipelineConfig {
+        window: 1,
+        ..PipelineConfig::default()
+    };
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, cfg);
+    let job = (0..3).map(|i| blob(60_000, DAY, i)).collect();
+    let landed = with_miner(fake.clone(), p.run(vec![job]))
+        .await
+        .expect("each half fails once and lands on its retry");
+    assert!(landed.len() >= 2 && landed.iter().all(|l| l.job == 0));
+    assert_eq!(fake.entity_nonce(key.address()).await.expect("n"), 3);
+}
+
+#[tokio::test(start_paused = true)]
 async fn reverts_are_decoded() {
     let (fake, key) = setup();
     let err = run(&fake, &key, vec![vec![extend_op(B256::repeat_byte(9), 10)]])

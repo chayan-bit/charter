@@ -5,7 +5,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_signer_local::PrivateKeySigner;
 use arkiv_bindings::Operation;
 
@@ -211,9 +211,10 @@ pub struct TxPipeline<'a, A: Arkiv> {
     /// Tops the sender up from this key before each window that its balance cannot cover.
     funder: Option<PrivateKeySigner>,
     estimates: Estimates,
-    /// Jobs whose failed tx did not reproduce on re-estimate; they are estimated afresh
-    /// and fail for good the second time.
-    retried: HashSet<usize>,
+    /// Jobs (index and calldata hash, so each half of a split job counts on its own)
+    /// whose failed tx did not reproduce on re-estimate; they are estimated afresh and
+    /// fail for good the second time.
+    retried: HashSet<(usize, B256)>,
     /// The latest head, its base fee and when they were read.
     seen: Option<(u64, u128, Instant)>,
     heads: Option<Heads>,
@@ -461,7 +462,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             .reuse_estimates
             .then(|| Shape::of(ops, &input))
             .flatten()
-            .filter(|_| !self.retried.contains(&job));
+            .filter(|_| !self.retried.contains(&(job, keccak256(&input))));
         let reuse = shape.as_ref().and_then(|s| self.estimates.get(s, &input));
         let gas = match reuse {
             Some(g) => g,
@@ -813,7 +814,10 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             Job::Execute(ops) => match self.arkiv.estimate(self.address(), ops).await {
                 Err(StoreError::Reverted { reason, .. }) => reason,
                 Err(e @ StoreError::InsufficientFunds { .. }) => return Err(e),
-                _ if self.retried.insert(f.job) => {
+                _ if self
+                    .retried
+                    .insert((f.job, keccak256(execute_calldata(ops)))) =>
+                {
                     if let Some(s) = &f.shape {
                         self.estimates.forget(s);
                     }
@@ -913,7 +917,6 @@ pub fn batch(items: Vec<(Operation, u64)>, limits: BatchLimits) -> Vec<Vec<Opera
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::B256;
 
     fn ext(i: u8) -> Operation {
         Operation::extend_expiry(B256::repeat_byte(i), 0, 100)
