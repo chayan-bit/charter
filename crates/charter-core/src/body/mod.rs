@@ -10,7 +10,8 @@ mod refs;
 pub use anchor::{AnchorBody, ManifestBody, Require};
 pub use cob::{CREATE, CobOpBody, MAX_ACTION, MAX_PAYLOAD, MAX_TYPE_NAME};
 pub use head::{
-    DEVICE_LAYOUT_VERSION, DeviceBody, HeadBody, HeadPack, HeadRef, MAX_HEAD_PIECES, PieceRef,
+    DEVICE_LAYOUT_VERSION, DEVICE_SEQ, DeviceBody, HeadBody, HeadPack, HeadRef, MAX_HEAD_PIECES,
+    PieceRef,
 };
 pub use id::{IdBody, ProgramPin};
 pub use peer::{BindBody, IdAccBody, PeerBody};

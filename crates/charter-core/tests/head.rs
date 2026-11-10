@@ -33,10 +33,12 @@ fn head_body(rid: Rid, seq: u64, pieces_created: u64, prev_tx: Hash32) -> HeadBo
             oid: vec![seq as u8 + 1; 20],
             counter: seq + 1,
             stamp: 0,
+            base: vec![],
         }],
         snapshot: vec![],
         packs: vec![],
         prev_tx,
+        object_hash: 1,
     }
 }
 
@@ -171,4 +173,26 @@ fn a_head_from_another_creator_or_signer_is_ignored_and_fails_closed() {
     )
     .expect_err("C_d created entities but no valid head is live");
     assert_eq!(err.code(), ErrorCode::ControlNotLive);
+}
+
+#[test]
+fn the_delegation_stays_in_every_incremental_v1_anchor_read() {
+    let w = world();
+    let (obs, _) = observe(alice(), &device_body(w.rid, &peers()[1]), CONTROL0, 30, 0);
+    assert_eq!(obs.attr("ag.seq"), Some(&AttrValue::U64(u64::MAX)));
+}
+
+#[test]
+fn oid_and_base_lengths_follow_the_object_format() {
+    let w = world();
+    let mut b = head_body(w.rid, 0, 1, ZERO);
+    assert!(b.validate().is_ok());
+    b.object_hash = 2;
+    assert!(b.validate().is_err(), "SHA-1 oid in a SHA-256 head");
+    b.object_hash = 1;
+    b.refs[0].base = vec![1; 32];
+    assert!(b.validate().is_err(), "base of the wrong length");
+    b.refs[0].base = vec![];
+    b.object_hash = 3;
+    assert!(b.validate().is_err());
 }

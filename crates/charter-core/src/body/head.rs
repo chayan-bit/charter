@@ -10,6 +10,8 @@ use charter_crypto::{Alg, PublicKey};
 
 /// Entity layout version of the device delegation: v0.3.0 stops on it (head-model 4.1).
 pub const DEVICE_LAYOUT_VERSION: u64 = 2;
+/// `ag.seq` of a device delegation.
+pub const DEVICE_SEQ: u64 = u64::MAX;
 /// Most pieces one head may list before a snapshot is due (head-model 4.4).
 pub const MAX_HEAD_PIECES: usize = 256;
 
@@ -61,13 +63,17 @@ impl Body for DeviceBody {
             Attribute::b32("ag.rid", self.rid),
             Attribute::b32("ag.nid", *signer),
             Attribute::b32("ag.h", *h),
-            Attribute::u64("ag.seq", 0),
+            // v0.3.0 reads anchors with `ag.seq >= mark`: the maximum keeps this row in every
+            // incremental read, so v0.3.0 always meets it and stops (head-model 4.1).
+            Attribute::u64("ag.seq", DEVICE_SEQ),
         ]
     }
 }
 
 /// One ref entry of a head: an empty `oid` is a tombstone; `stamp = 0` is the block the
-/// body carrying it landed in.
+/// body carrying it landed in, a nonzero stamp the writer's copy of an earlier landing.
+/// `base` is the oid this entry fast-forwards (signed claim, empty when it creates the ref
+/// or is not a fast-forward); programs decide `ff` from it (head-model 8).
 #[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
 #[cbor(array)]
 pub struct HeadRef {
@@ -79,6 +85,8 @@ pub struct HeadRef {
     pub counter: u64,
     #[n(3)]
     pub stamp: u64,
+    #[cbor(n(4), with = "minicbor::bytes")]
+    pub base: Vec<u8>,
 }
 
 impl HeadRef {
@@ -138,6 +146,9 @@ pub struct HeadBody {
     /// The tx that carried this device's previous body; zero at seq 0.
     #[cbor(n(10), with = "minicbor::bytes")]
     pub prev_tx: Hash32,
+    /// 1 = SHA-1, 2 = SHA-256: every oid and base has its length.
+    #[n(11)]
+    pub object_hash: u8,
 }
 
 impl HeadBody {
@@ -165,11 +176,19 @@ impl Body for HeadBody {
                 .all(|w| w[0].name.as_bytes() < w[1].name.as_bytes()),
             field("head", "refs", "names must be strictly ascending"),
         )?;
+        let len = match self.object_hash {
+            1 => 20,
+            2 => 32,
+            _ => return Err(field("head", "object_hash", "must be 1 or 2")),
+        };
         require(
             self.refs.iter().all(|e| {
-                ref_name_ok(&e.name) && e.counter >= 1 && matches!(e.oid.len(), 0 | 20 | 32)
+                ref_name_ok(&e.name)
+                    && e.counter >= 1
+                    && (e.oid.is_empty() || e.oid.len() == len)
+                    && (e.base.is_empty() || e.base.len() == len)
             }),
-            field("head", "refs", "invalid name, counter or oid length"),
+            field("head", "refs", "invalid name, counter, oid or base length"),
         )?;
         require(
             (self.seq == 0) == (self.prev_tx == ZERO),

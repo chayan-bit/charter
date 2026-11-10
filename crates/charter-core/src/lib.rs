@@ -20,9 +20,9 @@ mod types;
 
 pub use attrs::{AttrValue, Attribute, check_arkiv_rules, chunk_attributes};
 pub use body::{
-    AnchorBody, BindBody, Body, CREATE, CobOpBody, DEVICE_LAYOUT_VERSION, DeviceBody, HeadBody,
-    HeadPack, HeadRef, IdAccBody, IdBody, MAX_ACTION, MAX_HEAD_PIECES, MAX_PAYLOAD, MAX_TYPE_NAME,
-    ManifestBody, PeerBody, PieceRef, ProgramPin, RefEntry, RefsBody, Require,
+    AnchorBody, BindBody, Body, CREATE, CobOpBody, DEVICE_LAYOUT_VERSION, DEVICE_SEQ, DeviceBody,
+    HeadBody, HeadPack, HeadRef, IdAccBody, IdBody, MAX_ACTION, MAX_HEAD_PIECES, MAX_PAYLOAD,
+    MAX_TYPE_NAME, ManifestBody, PeerBody, PieceRef, ProgramPin, RefEntry, RefsBody, Require,
 };
 pub use canonical::{CanonicalRefs, canonical_refs};
 pub use chain::{

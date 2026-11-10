@@ -269,20 +269,20 @@ pub fn merged_refs(rid: &Rid, merged: &Merged) -> RefsBody {
 /// `prev` is this device's current entries with `stamp = 0` already resolved (or the
 /// v1 refs of a migrating identity with counter 1), `merged` the identity's merge including
 /// them, `others` every name another device head of the identity lists, and `updates` the
-/// pushed refs (`None` deletes).
+/// pushed refs (`None` deletes) with the base each fast-forwards (empty if none).
 pub fn next_entries(
     me: &Nid,
     prev: &[HeadRef],
     merged: &Merged,
     others: &BTreeSet<String>,
-    updates: &[(String, Option<Vec<u8>>)],
+    updates: &[(String, Option<Vec<u8>>, Vec<u8>)],
 ) -> Vec<HeadRef> {
     let mut out: BTreeMap<String, HeadRef> = prev
         .iter()
         .filter(|e| merged.get(&e.name).is_none_or(|w| w.device == *me))
         .map(|e| (e.name.clone(), e.clone()))
         .collect();
-    for (name, oid) in updates {
+    for (name, oid, base) in updates {
         let counter = merged.get(name).map(|w| w.entry.counter).unwrap_or(0) + 1;
         let oid = oid.clone().unwrap_or_default();
         out.insert(
@@ -292,6 +292,7 @@ pub fn next_entries(
                 oid,
                 counter,
                 stamp: 0,
+                base: base.clone(),
             },
         );
     }
@@ -319,6 +320,7 @@ mod tests {
             oid: if oid == 0 { vec![] } else { vec![oid; 20] },
             counter,
             stamp,
+            base: vec![],
         }
     }
 
@@ -334,6 +336,7 @@ mod tests {
             snapshot: vec![],
             packs: vec![],
             prev_tx: [0; 32],
+            object_hash: 1,
         }
     }
 
@@ -383,7 +386,13 @@ mod tests {
         let hb = body(vec![e("refs/heads/x", 4, 1, 50)]);
         let merged = merge(&[(b, &hb)], &BTreeMap::new()).expect("merge");
         let others = BTreeSet::from(["refs/heads/x".to_owned()]);
-        let next = next_entries(&a, &[], &merged, &others, &[("refs/heads/x".into(), None)]);
+        let next = next_entries(
+            &a,
+            &[],
+            &merged,
+            &others,
+            &[("refs/heads/x".into(), None, vec![])],
+        );
         assert_eq!(
             next,
             vec![e("refs/heads/x", 0, 2, 0)],
@@ -416,9 +425,13 @@ mod tests {
             &prev,
             &m,
             &BTreeSet::new(),
-            &[(M.into(), Some(vec![8; 20]))],
+            &[(M.into(), Some(vec![8; 20]), vec![5; 20])],
         );
-        assert_eq!(next, vec![e(M, 8, 4, 0), e("refs/tags/v1", 7, 1, 30)]);
+        let moved = HeadRef {
+            base: vec![5; 20],
+            ..e(M, 8, 4, 0)
+        };
+        assert_eq!(next, vec![moved, e("refs/tags/v1", 7, 1, 30)]);
         assert_eq!(resolve_stamps(&next, 77)[0].stamp, 77);
         assert_eq!(resolve_stamps(&next, 77)[1].stamp, 30);
     }
