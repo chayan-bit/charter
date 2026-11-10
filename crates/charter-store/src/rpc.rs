@@ -23,6 +23,11 @@ use crate::{
 /// Header carrying the optional access key.
 pub const ACCESS_KEY_HEADER: &str = "X-API-KEY";
 
+/// Extra attempts for a call whose connection drops before a full response arrives.
+/// Rabdi was measured dropping about 1 in 10 requests (2026-11-09), so a 19-call
+/// clone without retries succeeded only about 13% of the time.
+const TRANSPORT_RETRIES: u32 = 3;
+
 #[derive(Clone)]
 pub struct RpcConfig {
     pub url: String,
@@ -68,6 +73,10 @@ pub struct RpcArkiv {
     http: reqwest::Client,
     cfg: RpcConfig,
     id: AtomicU64,
+    /// The chain id `connect` verified; 0 until then. Saves one round trip per command.
+    verified_chain: AtomicU64,
+    /// `CHARTER_TRACE` set: one stderr line per call with its method, time and size.
+    trace: bool,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +116,8 @@ impl RpcArkiv {
             http,
             cfg,
             id: AtomicU64::new(1),
+            verified_chain: AtomicU64::new(0),
+            trace: std::env::var_os("CHARTER_TRACE").is_some_and(|v| !v.is_empty()),
         };
         let got = me.chain_id().await?;
         if got != me.cfg.chain_id {
@@ -115,6 +126,7 @@ impl RpcArkiv {
                 got,
             });
         }
+        me.verified_chain.store(got, Ordering::Relaxed);
         Ok(me)
     }
 
@@ -122,15 +134,27 @@ impl RpcArkiv {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let mut waited = Duration::ZERO;
+        let started = std::time::Instant::now();
+        // Sends are not retried here: the tx pipeline owns resends and nonce recovery.
+        let mut retries = if method == "eth_sendRawTransaction" {
+            0
+        } else {
+            TRANSPORT_RETRIES
+        };
         loop {
             let mut req = self.http.post(&self.cfg.url).json(&body);
             if let Some(k) = &self.cfg.access_key {
                 req = req.header(ACCESS_KEY_HEADER, k);
             }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| StoreError::Rpc(format!("{method}: {e}")))?;
+            let resp = match req.send().await {
+                Ok(resp) => resp,
+                Err(e) if retries > 0 => {
+                    retries -= 1;
+                    self.transport_backoff(method, &e, retries).await;
+                    continue;
+                }
+                Err(e) => return Err(StoreError::Rpc(format!("{method}: {e}"))),
+            };
             let status = resp.status().as_u16();
             if status == 429 {
                 let retry_after = resp
@@ -149,15 +173,27 @@ impl RpcArkiv {
                     _ => return Err(StoreError::RateLimited { retry_after }),
                 }
             }
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| StoreError::Rpc(format!("{method}: {e}")))?;
+            let text = match resp.text().await {
+                Ok(text) => text,
+                Err(e) if retries > 0 => {
+                    retries -= 1;
+                    self.transport_backoff(method, &e, retries).await;
+                    continue;
+                }
+                Err(e) => return Err(StoreError::Rpc(format!("{method}: {e}"))),
+            };
             if !(200..300).contains(&status) {
                 return Err(StoreError::Http {
                     status,
                     body: text.chars().take(300).collect(),
                 });
+            }
+            if self.trace {
+                eprintln!(
+                    "chart-trace: {method} {} ms {} B",
+                    started.elapsed().as_millis(),
+                    text.len()
+                );
             }
             let mut j: Json = serde_json::from_str(&text)
                 .map_err(|e| StoreError::Rpc(format!("{method}: {e}")))?;
@@ -167,6 +203,15 @@ impl RpcArkiv {
             return serde_json::from_value(j["result"].take())
                 .map_err(|e| StoreError::Rpc(format!("{method}: {e}")));
         }
+    }
+
+    /// Waits 200, 400, then 800 ms before re-sending a call whose connection dropped.
+    async fn transport_backoff(&self, method: &str, e: &reqwest::Error, left: u32) {
+        let wait = Duration::from_millis(200 << (TRANSPORT_RETRIES - 1 - left));
+        if self.trace {
+            eprintln!("chart-trace: {method} dropped ({e}), retrying in {wait:?}");
+        }
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -195,7 +240,10 @@ fn u64_of(v: U64) -> u64 {
 
 impl Arkiv for RpcArkiv {
     async fn chain_id(&self) -> Result<u64, StoreError> {
-        self.call::<U64>("eth_chainId", json!([])).await.map(u64_of)
+        match self.verified_chain.load(Ordering::Relaxed) {
+            0 => self.call::<U64>("eth_chainId", json!([])).await.map(u64_of),
+            known => Ok(known),
+        }
     }
 
     async fn head(&self) -> Result<u64, StoreError> {
