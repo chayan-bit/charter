@@ -61,6 +61,17 @@ pub enum Cmd {
     /// Zero-knowledge receipts for sealed patches (offline).
     #[command(subcommand)]
     Zk(crate::zk::ZkCmd),
+    /// Local read-only web UI over the repos in `$CHARTER_HOME`; prints one URL to open.
+    Ui(UiArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UiArgs {
+    /// Also sync this repo (`arkiv::<rid>` or a rid), fetching it first if it is not cached.
+    pub repo: Option<String>,
+    /// Port on 127.0.0.1 (default: a free one).
+    #[arg(long, default_value_t = 0)]
+    pub port: u16,
 }
 
 #[derive(Debug, Subcommand)]
@@ -419,6 +430,17 @@ async fn pin_cmd<A: Arkiv>(a: &A, cfg: &Config, p: &program::PinArgs) -> Result<
     Ok(())
 }
 
+async fn ui_cmd(a: backend::Backend, cfg: Config, u: &UiArgs) -> Result<()> {
+    let want = u.repo.as_deref().map(rid_of).transpose()?;
+    let opts = charter_ui::Options { port: u.port, want };
+    charter_ui::serve(std::sync::Arc::new(a), cfg, opts)
+        .await
+        .map_err(|e| match e {
+            charter_ui::UiError::Sync(e) => CliError::Sync(e),
+            other => CliError::Sync(charter_sync::SyncError::io("chart ui", other)),
+        })
+}
+
 /// Runs one parsed command.
 pub fn run(cli: &Cli) -> Result<()> {
     match &cli.cmd {
@@ -471,6 +493,7 @@ pub fn run(cli: &Cli) -> Result<()> {
                 Ok(())
             }
             Cmd::Fund(f) => fund_cmd(&a, &cfg, f).await,
+            Cmd::Ui(u) => ui_cmd(a, cfg, u).await,
             Cmd::Op(o) => for_repo!(&a, &cfg, &o.rid()?, |b| crate::op::run(b, &cfg, o).await),
             Cmd::Release(r) => {
                 for_repo!(&a, &cfg, &r.rid()?, |b| crate::release::run(b, &cfg, r)
