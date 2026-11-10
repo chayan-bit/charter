@@ -4,11 +4,9 @@
 //! Rabdi's explorer documents only `/address/` and `/tx/` paths, and these facts are
 //! blocks and entity keys, so they are shown as ids in mono (full value in `title`).
 
-use std::time::Instant;
-
 use super::{ago, short};
 use crate::cache::RepoView;
-use crate::sync_loop::Round;
+use crate::sync_loop::{Round, mins_until};
 
 /// Panel states: `verified`, `pending` (seen, not yet synced), `unverified`, `equivocation`.
 #[derive(Debug, Clone)]
@@ -106,14 +104,8 @@ impl Verify {
 
 /// "paused: RPC quota, resumes in 3 min" while background rounds wait for the quota.
 fn pause(round: &Round) -> Option<String> {
-    let s = round
-        .paused?
-        .saturating_duration_since(Instant::now())
-        .as_secs();
-    Some(format!(
-        "paused: RPC quota, resumes in {} min",
-        s.div_ceil(60).max(1)
-    ))
+    let m = mins_until(round.paused?);
+    Some(format!("paused: RPC quota, resumes in {m} min"))
 }
 
 fn peer_rows(v: &RepoView) -> Vec<PeerRow> {

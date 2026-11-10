@@ -37,6 +37,8 @@ pub struct Confirm {
     pub rows: Vec<(&'static str, String, bool)>,
     pub cost: String,
     pub short_of: Option<String>,
+    /// The RPC refused or nearly ran out of quota: Confirm is disabled until it resets.
+    pub quota: Option<String>,
     /// What will be signed, one `type action` line and its JSON payload per op.
     pub ops: Vec<(String, String)>,
 }
@@ -110,6 +112,7 @@ fn confirm_page(
         rows,
         cost: tglm(need),
         short_of,
+        quota: app.shared.quota_wait(),
         ops: signed_ops(d),
     })
 }
@@ -167,6 +170,11 @@ pub async fn confirm(
     let Ok(r) = parse_id(&rid) else {
         return error_page(&app, &theme, StatusCode::NOT_FOUND, "No such repo.");
     };
+    // A multi-tx write cut off by a 429 leaves partial state; the draft stays for later.
+    if let Some(q) = app.shared.quota_wait() {
+        let msg = format!("{q}; nothing was written, confirm again then.");
+        return error_page(&app, &theme, StatusCode::SERVICE_UNAVAILABLE, &msg);
+    }
     if !w.confirm(&r, &id) {
         let msg = "This confirmation is unknown, expired or already sent; nothing was written.";
         return error_page(&app, &theme, StatusCode::NOT_FOUND, msg);

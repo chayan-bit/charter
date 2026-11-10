@@ -18,15 +18,15 @@ use common::*;
 use serde_json::Value;
 
 fn writing_app() -> axum::Router {
+    writing_app_with(Arc::new(Shared::default()))
+}
+
+fn writing_app_with(shared: Arc<Shared>) -> axum::Router {
     let f = fixture();
     // Alice, as the fixture made her (`Peer::new(&net, 1)`).
     let keys = Keys::from_seed(charter_crypto::MasterSeed::from_bytes([1; 32]));
     let w = writes::spawn(f.net.clone(), f.alice.cfg.clone(), keys);
-    let app = App::new(
-        f.alice.home.path().to_path_buf(),
-        Arc::new(Shared::default()),
-        CSRF.into(),
-    );
+    let app = App::new(f.alice.home.path().to_path_buf(), shared, CSRF.into());
     router(
         Arc::new(app.with_writer(w)),
         Arc::new(Auth::with(PORT, TOKEN.into(), CSRF.into())),
@@ -256,6 +256,26 @@ async fn writes_are_off_without_keys_and_a_get_writes_nothing() {
         StatusCode::NOT_FOUND,
         "an unconfirmed id is no write"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exhausted_rpc_quota_disables_confirm_and_sends_nothing() {
+    let hex = &fixture().hex;
+    let shared = Arc::new(Shared::default());
+    shared.pause(Some(Instant::now() + Duration::from_secs(170)));
+    let app = writing_app_with(shared.clone());
+    let before = ops().await.len();
+    let kv = [("kind", "issue"), ("title", "while limited")];
+    let r = send(app.clone(), form(&format!("/r/{hex}/write"), &kv)).await;
+    let html = r.text();
+    assert_eq!(r.status, StatusCode::OK, "{html}");
+    assert!(html.contains("RPC quota: retry after 3 min"), "{html}");
+    assert!(html.contains("type=\"submit\" disabled"), "{html}");
+    let id = draft_id(&html);
+    let r = send(app.clone(), form(&format!("/r/{hex}/write/{id}"), &[])).await;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.text());
+    assert!(r.text().contains("RPC quota: retry after 3 min"));
+    assert_eq!(ops().await.len(), before, "nothing was sent");
 }
 
 #[tokio::test(flavor = "multi_thread")]

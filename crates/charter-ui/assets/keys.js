@@ -41,7 +41,12 @@
     var t = e.target, k = e.key;
     var send = d.querySelector("form[data-confirm]");
     // The confirm dialog: Enter on the focused Cancel cancels; only Cmd/Ctrl+Enter spends.
-    if (send && k === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send.requestSubmit(); return; }
+    // requestSubmit ignores a disabled button (an exhausted RPC quota), so check it here.
+    if (send && k === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (!send.querySelector("button[type=submit]:disabled")) send.requestSubmit();
+      return;
+    }
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     if (k === "Escape") {
       var cancel = send && send.querySelector("a.btn");

@@ -186,6 +186,12 @@ impl Shared {
         self.act(|a| a.pause)
     }
 
+    /// "RPC quota: retry after 3 min" while the quota pause lasts; writes wait for it too.
+    pub fn quota_wait(&self) -> Option<String> {
+        let t = self.paused().filter(|t| *t > Instant::now())?;
+        Some(format!("RPC quota: retry after {} min", mins_until(t)))
+    }
+
     pub fn wanted(&self, rid: &Rid) -> bool {
         self.wanted.lock().is_ok_and(|w| w.contains(rid))
     }
@@ -234,6 +240,12 @@ impl Shared {
             Err(e) => s.error = Some(e.to_string()),
         });
     }
+}
+
+/// Whole minutes until `t`, at least 1.
+pub fn mins_until(t: Instant) -> u64 {
+    let s = t.saturating_duration_since(Instant::now()).as_secs();
+    s.div_ceil(60).max(1)
 }
 
 pub fn now_ms() -> u64 {

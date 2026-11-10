@@ -93,8 +93,12 @@ pub struct Options {
 }
 
 /// Binds `127.0.0.1`, starts the sync loop, prints the session URL and serves until killed.
+///
+/// Writes go through `a`; the sync loop reads through `reads`, which should bail on a 429
+/// rather than wait (`RpcArkiv::with_max_rate_wait`).
 pub async fn serve<A: Arkiv + 'static>(
     a: Arc<A>,
+    reads: Arc<A>,
     cfg: Config,
     opts: Options,
 ) -> Result<(), UiError> {
@@ -112,7 +116,7 @@ pub async fn serve<A: Arkiv + 'static>(
     if let Some(keys) = charter_sync::Keys::load(&cfg.home)? {
         app = app.with_writer(writes::spawn(a.clone(), cfg.clone(), keys));
     }
-    sync_loop::spawn(a, cfg, shared, opts.ws)?;
+    sync_loop::spawn(reads, cfg, shared, opts.ws)?;
     let app = Arc::new(app);
     println!("{}", auth.url());
     axum::serve(listener, router(app, auth)).await?;

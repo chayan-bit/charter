@@ -4,8 +4,8 @@
 //! becomes `E_RATE_LIMITED`; the client waits out `Retry-After` only within
 //! `max_rate_wait`, and every request has a timeout, so a call never hangs.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::{Address, Bytes, TxHash, U64, U128, U256, hex};
@@ -86,8 +86,9 @@ pub struct RpcArkiv {
     verified_chain: AtomicU64,
     /// `CHARTER_TRACE` set: one stderr line per call with its method, time and size.
     trace: bool,
-    /// The latest quota reports: `[arkiv_query, every other method]` (separate budgets).
-    quota: Box<Mutex<[Option<Quota>; 2]>>, // boxed: keeps `Backend` variants close in size
+    /// The latest quota reports: `[arkiv_query, every other method]` (separate budgets),
+    /// shared with every [`RpcArkiv::with_max_rate_wait`] twin.
+    quota: Arc<Mutex<[Option<Quota>; 2]>>,
 }
 
 #[derive(Deserialize)]
@@ -121,10 +122,22 @@ impl RpcArkiv {
         &self.cfg
     }
 
-    /// Longest total `Retry-After` one call waits out before surfacing `RateLimited`;
-    /// zero for callers that reschedule themselves.
-    pub fn set_max_rate_wait(&mut self, d: Duration) {
-        self.cfg.max_rate_wait = d;
+    /// A twin that waits out at most `d` of `Retry-After` per call (zero for a caller that
+    /// reschedules itself, as `chart ui`'s sync loop does), sharing this client's
+    /// connections and quota reports. Writes stay on the original: a multi-tx write cut
+    /// off by a 429 mid-sequence leaves partial state.
+    pub fn with_max_rate_wait(&self, d: Duration) -> Self {
+        Self {
+            http: self.http.clone(),
+            cfg: RpcConfig {
+                max_rate_wait: d,
+                ..self.cfg.clone()
+            },
+            id: AtomicU64::new(1),
+            verified_chain: AtomicU64::new(self.verified_chain.load(Ordering::Relaxed)),
+            trace: self.trace,
+            quota: self.quota.clone(),
+        }
     }
 
     fn note_quota(&self, method: &str, q: Option<Quota>) {
@@ -145,7 +158,7 @@ impl RpcArkiv {
             id: AtomicU64::new(1),
             verified_chain: AtomicU64::new(0),
             trace: std::env::var_os("CHARTER_TRACE").is_some_and(|v| !v.is_empty()),
-            quota: Box::default(),
+            quota: Arc::default(),
         };
         let got = me.chain_id().await?;
         if got != me.cfg.chain_id {
