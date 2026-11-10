@@ -1,0 +1,4 @@
+<li id="op-{{ e.id }}"><div class="ophead"><b>{{ e.action }}</b> by <code title="{{ e.author }}">{{ self.short(e.author.as_str()) }}</code> <span class="dim">block <code>{{ e.block }}</code>, op <code title="{{ e.id }}">{{ self.short(e.id.as_str()) }}</code>, {{ self.ago(e.ts_ms) }} (author clock)</span>{% for (kind, ok) in e.proofs %} <span class="badge {% match ok %}{% when Some(true) %}b-verified{% when Some(false) %}b-equivocation{% else %}b-pending{% endmatch %}">{{ kind }} proof {% match ok %}{% when Some(true) %}verified{% when Some(false) %}failed{% else %}unchecked{% endmatch %}</span>{% endfor %}</div>
+{% if let Some(b) = e.body %}<div class="md">{{ b|safe }}</div>{% endif %}
+{% if !e.fields.is_empty() %}<table class="kv"><tbody>{% for (k, v) in e.fields %}<tr><th>{{ k }}</th><td><code>{{ v }}</code></td></tr>{% endfor %}</tbody></table>{% endif %}
+</li>

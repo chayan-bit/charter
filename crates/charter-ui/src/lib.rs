@@ -1,0 +1,100 @@
+//! charter-ui: the local, read-only web UI behind `chart ui` (docs/p6/ui.md, slice 1).
+//!
+//! Pages render from `$CHARTER_HOME/repos/<rid>/` only (git cache, `view.json`,
+//! `cobs.json`) and never take the repo lock; one background loop ([`sync_loop`]) keeps
+//! those files fresh from Arkiv. [`security`] guards every request.
+
+// Handlers return the error page itself as `Err(Response)`; it is built once per request.
+#![allow(clippy::result_large_err)]
+
+mod assets;
+pub mod cache;
+pub mod diff;
+pub mod fold;
+pub mod gitread;
+pub mod highlight;
+pub mod markdown;
+mod pages;
+pub mod security;
+pub mod sync_loop;
+
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+
+use axum::Router;
+use axum::routing::get;
+use charter_core::Rid;
+use charter_store::Arkiv;
+use charter_sync::{Config, SyncError};
+
+pub use pages::App;
+pub use sync_loop::Shared;
+
+#[derive(Debug, thiserror::Error)]
+pub enum UiError {
+    #[error(transparent)]
+    Sync(#[from] SyncError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("cache: {0}")]
+    Cache(String),
+}
+
+/// The router with every page, the assets and the guard.
+pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
+    use pages::{cobs, code, history, program, repos};
+    Router::new()
+        .route("/", get(repos::index))
+        .route("/r/{rid}", get(repos::home))
+        .route("/r/{rid}/tree/{rev}", get(code::tree_root))
+        .route("/r/{rid}/tree/{rev}/{*path}", get(code::tree))
+        .route("/r/{rid}/blob/{rev}/{*path}", get(code::blob))
+        .route("/r/{rid}/raw/{rev}/{*path}", get(code::raw))
+        .route("/r/{rid}/log/{rev}", get(history::log))
+        .route("/r/{rid}/commit/{sha}", get(history::commit))
+        .route("/r/{rid}/issues", get(cobs::issues))
+        .route("/r/{rid}/issues/{id}", get(cobs::issue))
+        .route("/r/{rid}/patches", get(cobs::patches))
+        .route("/r/{rid}/patches/{id}", get(cobs::patch))
+        .route("/r/{rid}/releases", get(program::releases))
+        .route("/r/{rid}/program", get(program::program))
+        .route("/assets/{name}", get(assets::serve))
+        .fallback(pages::not_found)
+        .with_state(app)
+        .layer(axum::middleware::from_fn_with_state(auth, security::guard))
+}
+
+/// What `chart ui` passes in.
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// `0` picks a free port.
+    pub port: u16,
+    /// A repo to sync first even if it is not cached yet.
+    pub want: Option<Rid>,
+}
+
+/// Binds `127.0.0.1`, starts the sync loop, prints the session URL and serves until killed.
+pub async fn serve<A: Arkiv + 'static>(
+    a: Arc<A>,
+    cfg: Config,
+    opts: Options,
+) -> Result<(), UiError> {
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, opts.port))).await?;
+    let port = listener.local_addr()?.port();
+    let auth = Arc::new(security::Auth::new(port)?);
+    let shared = Arc::new(Shared::default());
+    if let Some(rid) = opts.want {
+        shared.want(rid);
+        shared.focus(rid);
+    }
+    let app = Arc::new(App::new(
+        cfg.home.clone(),
+        shared.clone(),
+        auth.csrf.clone(),
+    ));
+    sync_loop::spawn(a, cfg, shared)?;
+    println!("{}", auth.url());
+    axum::serve(listener, router(app, auth)).await?;
+    Ok(())
+}

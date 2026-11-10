@@ -9,6 +9,7 @@ members = [
   "crates/charter-escrow",
   "crates/charter-cli",
   "crates/charter-mcp",
+  "crates/charter-ui",
   "crates/charter-program",
   "crates/charter-private",
   "crates/arkiv-git-zk-core",

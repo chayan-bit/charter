@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block main %}
+{% include "repo.html" %}
+{% if let Some(u) = up %}<a class="up" rel="up" href="{{ u }}">..</a>{% endif %}
+{% if let Some(c) = last %}<p class="last"><a href="/r/{{ r.hex }}/commit/{{ c.oid }}"><code>{{ self.short(c.oid.as_str()) }}</code></a> {{ c.subject }} <span class="dim">{{ c.author }}</span></p>{% endif %}
+{% if entries.is_empty() %}<section class="empty"><p>Empty directory.</p></section>{% else %}{% include "entries.html" %}{% endif %}
+{% endblock %}

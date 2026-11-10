@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block main %}
+{% include "repo.html" %}
+{% if let Some(u) = up %}<a class="up" rel="up" href="{{ u }}" hidden></a>{% endif %}
+<div class="filehead"><code data-copy="{{ path }}">{{ path }}</code> <span class="dim">{{ size }} B{% if !binary %}, {{ total }} lines{% endif %}</span><span class="grow"></span><a class="btn" href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a></div>
+{% if binary %}
+<section class="empty"><p>Binary or very large file; use <a href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a>.</p></section>
+{% else %}
+<table class="code"><tbody>
+{% for line in lines %}<tr id="L{{ loop.index }}"><td class="ln"><a href="#L{{ loop.index }}">{{ loop.index }}</a></td><td class="lc">{{ line|safe }}</td></tr>
+{% endfor %}
+</tbody></table>
+{% if hidden > 0 %}<p class="more">{{ hidden }} more lines. <a href="?all=1">Show all</a> (lines past 2,000 are plain text).</p>{% endif %}
+{% endif %}
+{% endblock %}

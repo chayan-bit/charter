@@ -1,0 +1,38 @@
+[package]
+name = "charter-ui"
+description = "Local read-only web UI for Charter repos (`chart ui`, docs/p6/ui.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+charter-core = { path = "../charter-core" }
+charter-private = { path = "../charter-private" }
+charter-program = { path = "../charter-program" }
+charter-store = { path = "../charter-store" }
+charter-sync = { path = "../charter-sync" }
+ammonia = "4.2"
+askama = "0.16"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query"] }
+getrandom = "0.4"
+hex = "0.4"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+
+[dev-dependencies]
+charter-crypto = { path = "../charter-crypto" }
+charter-store = { path = "../charter-store", features = ["fake"] }
+charter-sync = { path = "../charter-sync", features = ["fake"] }
+alloy-signer-local = "2.5"
+flate2 = "1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
