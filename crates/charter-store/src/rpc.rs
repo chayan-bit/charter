@@ -5,6 +5,7 @@
 //! `max_rate_wait`, and every request has a timeout, so a call never hangs.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::{Address, Bytes, TxHash, U64, U128, U256, hex};
@@ -16,8 +17,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value as Json, json};
 
 use crate::{
-    ARKIV_ADDRESS, Arkiv, MAX_RAW_TX_BYTES, Query, QueryOpts, QueryPage, RABDI_CHAIN_ID, RABDI_RPC,
-    Receipt, SignedTx, StoreError, TxInfo, decode_revert, execute_calldata,
+    ARKIV_ADDRESS, Arkiv, MAX_RAW_TX_BYTES, Query, QueryOpts, QueryPage, Quota, RABDI_CHAIN_ID,
+    RABDI_RPC, Receipt, SignedTx, StoreError, TxInfo, decode_revert, execute_calldata,
 };
 
 /// Header carrying the optional access key.
@@ -42,6 +43,14 @@ pub struct RpcConfig {
 }
 
 impl RpcConfig {
+    /// The `newHeads` socket on the same host, with the same access key.
+    pub fn ws(&self) -> crate::heads::WsConfig {
+        crate::heads::WsConfig {
+            url: crate::heads::ws_url(&self.url),
+            access_key: self.access_key.clone(),
+        }
+    }
+
     pub fn rabdi(access_key: Option<String>) -> Self {
         Self {
             url: RABDI_RPC.into(),
@@ -77,6 +86,9 @@ pub struct RpcArkiv {
     verified_chain: AtomicU64,
     /// `CHARTER_TRACE` set: one stderr line per call with its method, time and size.
     trace: bool,
+    /// The latest quota reports: `[arkiv_query, every other method]` (separate budgets),
+    /// shared with every [`RpcArkiv::with_max_rate_wait`] twin.
+    quota: Arc<Mutex<[Option<Quota>; 2]>>,
 }
 
 #[derive(Deserialize)]
@@ -106,6 +118,34 @@ struct RawBlock {
 }
 
 impl RpcArkiv {
+    pub fn config(&self) -> &RpcConfig {
+        &self.cfg
+    }
+
+    /// A twin that waits out at most `d` of `Retry-After` per call (zero for a caller that
+    /// reschedules itself, as `chart ui`'s sync loop does), sharing this client's
+    /// connections and quota reports. Writes stay on the original: a multi-tx write cut
+    /// off by a 429 mid-sequence leaves partial state.
+    pub fn with_max_rate_wait(&self, d: Duration) -> Self {
+        Self {
+            http: self.http.clone(),
+            cfg: RpcConfig {
+                max_rate_wait: d,
+                ..self.cfg.clone()
+            },
+            id: AtomicU64::new(1),
+            verified_chain: AtomicU64::new(self.verified_chain.load(Ordering::Relaxed)),
+            trace: self.trace,
+            quota: self.quota.clone(),
+        }
+    }
+
+    fn note_quota(&self, method: &str, q: Option<Quota>) {
+        if let (Some(q), Ok(mut all)) = (q, self.quota.lock()) {
+            all[usize::from(method != "arkiv_query")] = Some(q);
+        }
+    }
+
     /// Build the client and refuse to continue unless the RPC serves `cfg.chain_id`.
     pub async fn connect(cfg: RpcConfig) -> Result<Self, StoreError> {
         let http = reqwest::Client::builder()
@@ -118,6 +158,7 @@ impl RpcArkiv {
             id: AtomicU64::new(1),
             verified_chain: AtomicU64::new(0),
             trace: std::env::var_os("CHARTER_TRACE").is_some_and(|v| !v.is_empty()),
+            quota: Arc::default(),
         };
         let got = me.chain_id().await?;
         if got != me.cfg.chain_id {
@@ -156,6 +197,8 @@ impl RpcArkiv {
                 Err(e) => return Err(StoreError::Rpc(format!("{method}: {e}"))),
             };
             let status = resp.status().as_u16();
+            let now = std::time::Instant::now();
+            self.note_quota(method, Quota::from_response(status, resp.headers(), now));
             if status == 429 {
                 let retry_after = resp
                     .headers()
@@ -239,6 +282,16 @@ fn u64_of(v: U64) -> u64 {
 }
 
 impl Arkiv for RpcArkiv {
+    /// The worse of the query and the plain budget, among reports not yet past their reset.
+    fn quota(&self) -> Option<Quota> {
+        let now = std::time::Instant::now();
+        let all = self.quota.lock().ok()?.clone();
+        all.into_iter()
+            .flatten()
+            .filter(|q| now < q.until())
+            .max_by(|a, b| a.used().unwrap_or(0.0).total_cmp(&b.used().unwrap_or(0.0)))
+    }
+
     async fn chain_id(&self) -> Result<u64, StoreError> {
         match self.verified_chain.load(Ordering::Relaxed) {
             0 => self.call::<U64>("eth_chainId", json!([])).await.map(u64_of),

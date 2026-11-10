@@ -97,19 +97,26 @@ impl Repo {
     /// Creates the layout if needed and takes the repo lock (blocks while another process
     /// holds it).
     pub fn open(home: &Path, rid: &Rid) -> Result<Self> {
-        let dir = home.join("repos").join(hex32(rid));
-        for d in [dir.join("outgoing"), dir.join("tmp")] {
-            std::fs::create_dir_all(&d).map_err(|e| SyncError::io(d.display(), e))?;
-        }
-        let lock_path = dir.join("lock");
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .map_err(|e| SyncError::io(lock_path.display(), e))?;
+        let (dir, lock) = lock_file(home, rid)?;
         lock.lock()
-            .map_err(|e| SyncError::io(lock_path.display(), e))?;
+            .map_err(|e| SyncError::io(dir.join("lock").display(), e))?;
+        Self::locked(rid, dir, lock)
+    }
+
+    /// Like [`Repo::open`], but `None` instead of waiting when another process holds the
+    /// lock (the UI sync loop skips a round rather than delay a push).
+    pub fn try_open(home: &Path, rid: &Rid) -> Result<Option<Self>> {
+        let (dir, lock) = lock_file(home, rid)?;
+        match lock.try_lock() {
+            Ok(()) => Self::locked(rid, dir, lock).map(Some),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(SyncError::io(dir.join("lock").display(), e))
+            }
+        }
+    }
+
+    fn locked(rid: &Rid, dir: PathBuf, lock: std::fs::File) -> Result<Self> {
         let git = Git::init_cache(&dir.join("git"))?;
         Ok(Self {
             rid: *rid,
@@ -137,6 +144,22 @@ impl Repo {
     pub fn tmp(&self) -> PathBuf {
         self.dir.join("tmp")
     }
+}
+
+/// Creates the layout of `rid` under `home` and opens (without locking) its lock file.
+fn lock_file(home: &Path, rid: &Rid) -> Result<(PathBuf, std::fs::File)> {
+    let dir = home.join("repos").join(hex32(rid));
+    for d in [dir.join("outgoing"), dir.join("tmp")] {
+        std::fs::create_dir_all(&d).map_err(|e| SyncError::io(d.display(), e))?;
+    }
+    let lock_path = dir.join("lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| SyncError::io(lock_path.display(), e))?;
+    Ok((dir, lock))
 }
 
 /// `refs/namespaces/<nid-hex>/` (verified, anchored refs of one peer).
@@ -170,6 +193,27 @@ mod tests {
         assert_eq!(home_under(d.path()), d.path().join(".arkiv-git"));
         std::fs::create_dir(d.path().join(".charter")).expect("new");
         assert_eq!(home_under(d.path()), d.path().join(".charter"));
+    }
+
+    #[test]
+    fn try_open_is_none_while_another_repo_holds_the_lock() {
+        let d = tempfile::tempdir().expect("tmp");
+        let rid = [2u8; 32];
+        let held = Repo::open(d.path(), &rid).expect("open");
+        assert!(Repo::try_open(d.path(), &rid).expect("try").is_none());
+        drop(held);
+        // A child forked by a parallel test holds a copy of the flock until its exec
+        // closes it (CLOEXEC), so "free" can lag the drop by a moment.
+        let got = (0..50)
+            .find_map(|_| {
+                let r = Repo::try_open(d.path(), &rid).expect("try");
+                r.is_none()
+                    .then(|| std::thread::sleep(std::time::Duration::from_millis(20)));
+                r
+            })
+            .expect("free");
+        assert!(got.git_dir().join("HEAD").exists());
+        assert!(Repo::try_open(d.path(), &rid).expect("try").is_none());
     }
 
     #[test]

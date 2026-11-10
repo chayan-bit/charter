@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block main %}
+{% include "repo.html" %}
+{% if kind == "issues" && l.writes %}<div class="lh"><a class="btn primary" href="/r/{{ r.hex }}/issues/new">New issue</a></div>{% endif %}
+<div id="live" data-live="op">
+{% if threads.is_empty() %}
+<section class="empty"><p>No {{ kind }} among the verified ops.</p></section>
+{% else %}
+<div class="box"><table class="list threads" data-list><tbody>
+{% for t in threads %}<tr data-row data-copy="{{ t.id }}"><td class="st"><span class="badge s-{{ t.state }}">{{ t.state }}</span></td><td><a href="/r/{{ r.hex }}/{{ kind }}/{{ t.id }}">{{ t.title }}</a><div class="dim"><code>{{ self.short(t.id.as_str()) }}</code> by <code title="{{ t.author }}">{{ self.short(t.author.as_str()) }}</code> at block {{ t.block }}, <span class="nw">{{ t.comments() }} comment{% if t.comments() != 1 %}s{% endif %}</span>{% if t.revisions.len() > 1 %}, rev {{ t.revisions.len() }}{% endif %}{% if t.proofs() > 0 %} <span class="badge b-verified">proof</span>{% endif %}</div></td></tr>
+{% endfor %}
+</tbody></table></div>
+{% endif %}
+</div>
+{% endblock %}

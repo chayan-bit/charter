@@ -191,3 +191,20 @@ fn attributes_carry_query_keys_within_arkiv_limits() {
     assert_eq!(c1.attr("ag.rid"), Some(&AttrValue::Bytes32(RID)));
     check_arkiv_rules(&c1.attributes).expect("arkiv rules");
 }
+
+#[test]
+fn ops_after_prior_accept_follow_ups_of_known_objects_only_once() {
+    let (a, b) = (&peers()[0], &peers()[1]);
+    let (create, obj) = observe(a, &op(ZERO, "create", vec![], 1), addr(1), 10, 0);
+    let (c1, h1) = observe(b, &op(obj, "comment", vec![obj], 2), addr(2), 11, 0);
+    let prior = verify_ops(&RID, &keys(&[a, b]), &[create.clone(), c1.clone()]);
+    let (c2, h2) = observe(a, &op(obj, "close", vec![obj, h1], 3), addr(1), 12, 0);
+    let (orphan, _) = observe(a, &op([7; 32], "comment", vec![], 4), addr(1), 12, 1);
+    let got = verify_ops_after(&RID, &keys(&[a, b]), &prior, &[create, c1, orphan, c2]);
+    assert_eq!(
+        ids(&got),
+        vec![h2],
+        "prior ops are not repeated; follow-ups see them"
+    );
+    assert!(verify_ops_after(&RID, &keys(&[a]), &[], &[]).is_empty());
+}

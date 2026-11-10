@@ -26,14 +26,18 @@ alloy-consensus = { version = "2.5", features = ["k256"] }
 alloy-eips = "2.5"
 alloy-signer = "2.5"
 alloy-signer-local = "2.5"
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "sink"] }
 # Plain JSON-RPC over HTTP: alloy's transport drops response headers, and Retry-After must be read.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "brotli", "gzip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["time", "sync"] }
+# `eth_subscribe newHeads` (heads.rs); rustls with webpki roots, as reqwest already uses.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 tempfile = "3"
+# A local newHeads server for tests/heads.rs.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "net", "io-util"] }

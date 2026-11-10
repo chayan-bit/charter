@@ -82,6 +82,24 @@ impl PipelineConfig {
         self.reserve(self.window as u64, gas, base_fee)
     }
 
+    /// What a sender must hold to send one tx estimated at `gas` moving `value`: its max
+    /// fee at `base_fee` plus the value.
+    pub fn tx_reserve(&self, gas: u64, value: U256, base_fee: u128) -> U256 {
+        U256::from(self.gas_limit(gas)) * U256::from(self.max_fee(base_fee)) + value
+    }
+
+    /// The top-up a funded sender holding `have` makes before a tx needing `reserve`: one
+    /// transfer covering `slots` such txs; `None` when `have` covers this one. The send
+    /// path and `chart ui`'s confirm view both decide with this.
+    pub fn top_up(have: U256, reserve: U256, slots: u64) -> Option<U256> {
+        (have < reserve).then(|| reserve * U256::from(slots.max(1)) - have)
+    }
+
+    /// The most a top-up transfer itself costs in fees at `base_fee`.
+    pub fn top_up_fee(&self, base_fee: u128) -> U256 {
+        U256::from(TRANSFER_GAS) * U256::from(self.max_fee(base_fee))
+    }
+
     /// Max-fee reserve of one window holding `txs` txs (at most `window`) of `gas` each.
     pub fn reserve(&self, txs: u64, gas: u64, base_fee: u128) -> U256 {
         U256::from(txs.min(self.window as u64))
@@ -219,14 +237,12 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 queue.push_front((job, body));
                 break;
             }
-            let reserve = U256::from(self.cfg.gas_limit(gas))
-                * U256::from(self.cfg.max_fee(base_fee))
-                + value;
-            if let Some(have) = covered.as_mut().filter(|h| **h < reserve) {
-                // One transfer covers the rest of the window (free slots, capped at the
-                // jobs left) at this tx's size.
-                let slots = ((self.cfg.window - inflight.len()) as u64).min(1 + queue.len() as u64);
-                let amount = reserve * U256::from(slots) - *have;
+            let reserve = self.cfg.tx_reserve(gas, value, base_fee);
+            // One transfer covers the rest of the window (free slots, capped at the jobs
+            // left) at this tx's size.
+            let slots = ((self.cfg.window - inflight.len()) as u64).min(1 + queue.len() as u64);
+            let top = covered.and_then(|h| PipelineConfig::top_up(h, reserve, slots));
+            if let (Some(have), Some(amount)) = (covered.as_mut(), top) {
                 self.top_up(amount, base_fee).await?;
                 *have += amount;
             }
@@ -340,7 +356,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             return Ok(());
         };
         let max_fee = self.cfg.max_fee(base_fee);
-        let need = amount + U256::from(TRANSFER_GAS) * U256::from(max_fee);
+        let need = amount + self.cfg.top_up_fee(base_fee);
         let have = self.arkiv.balance(funder.address()).await?;
         if have < need {
             return Err(StoreError::InsufficientFunds {

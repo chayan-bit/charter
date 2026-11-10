@@ -448,3 +448,64 @@ async fn send_guards_chain_id_and_size_before_any_request() {
         "only the connect probe reached the node"
     );
 }
+
+#[tokio::test]
+async fn a_zero_wait_twin_bails_on_a_429_while_the_original_waits_and_both_see_the_quota() {
+    let refusals = Arc::new(AtomicUsize::new(2));
+    let left = refusals.clone();
+    let (rpc, _) = client(move |b| match b["method"].as_str() {
+        Some("arkiv_query") if left.load(Ordering::SeqCst) > 0 => {
+            left.fetch_sub(1, Ordering::SeqCst);
+            (
+                429,
+                vec![
+                    ("ratelimit", "limit=10000, remaining=0, reset=2035".into()),
+                    ("retry-after", "1".into()),
+                ],
+                json!({ "error": "ANON_COST_LIMITED" }),
+            )
+        }
+        Some("arkiv_query") => ok(json!({ "blockNumber": "0x9", "count": "0x0", "data": [] })),
+        _ => {
+            let (s, _, j) = ok(json!("0x10"));
+            (s, vec![("arkiv-quota-used-percent", "12".into())], j)
+        }
+    })
+    .await;
+    assert_eq!(rpc.quota(), None, "nothing reported yet");
+    rpc.head().await.expect("head");
+    assert_eq!(rpc.quota().and_then(|q| q.used()), Some(12.0));
+    // chart ui's sync loop reschedules itself, so its twin waits out no Retry-After.
+    let reads = rpc.with_max_rate_wait(Duration::ZERO);
+    let q = Query::from(Pred::eq(attr("ag.kind"), "cob"));
+    let t = Instant::now();
+    let err = reads.query(&q, &QueryOpts::count_only()).await;
+    assert_eq!(
+        err.expect_err("limited"),
+        StoreError::RateLimited {
+            retry_after: Some(Duration::from_secs(1))
+        }
+    );
+    assert!(
+        t.elapsed() < Duration::from_millis(900),
+        "no sleep inside the call"
+    );
+    let worst = rpc.quota().expect("the original sees the twin's 429");
+    assert_eq!(
+        (worst.used(), worst.remaining, worst.retry_after),
+        (Some(100.0), Some(0), Some(1))
+    );
+    rpc.head().await.expect("head");
+    assert_eq!(
+        reads.quota().and_then(|q| q.used()),
+        Some(100.0),
+        "the query budget stays the worst"
+    );
+    // Writes keep the default wait: the original sleeps out the 429 and goes through.
+    let t = Instant::now();
+    rpc.query(&q, &QueryOpts::count_only())
+        .await
+        .expect("waited out");
+    assert!(t.elapsed() >= Duration::from_secs(1));
+    assert_eq!(refusals.load(Ordering::SeqCst), 0);
+}

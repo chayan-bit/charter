@@ -28,7 +28,7 @@ pub mod op;
 pub mod program;
 pub mod release;
 pub mod timelock;
-pub mod units;
+pub use charter_sync::units;
 pub mod zk;
 
 use charter_core::ErrorCode;
@@ -46,6 +46,15 @@ pub enum CliError {
     /// `escrow audit` found violations.
     #[error("{0}")]
     Flagged(String),
+}
+
+impl From<charter_sync::release::ReleaseError> for CliError {
+    fn from(e: charter_sync::release::ReleaseError) -> Self {
+        match e {
+            charter_sync::release::ReleaseError::Usage(m) => Self::Usage(m),
+            charter_sync::release::ReleaseError::Sync(e) => Self::Sync(e),
+        }
+    }
 }
 
 impl From<StoreError> for CliError {

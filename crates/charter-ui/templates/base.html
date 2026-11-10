@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"{% if !l.theme.is_empty() %} data-theme="{{ l.theme }}"{% endif %}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyCacheSize":0}'>
+<meta name="csrf-token" content="{{ l.csrf }}">
+<title>{{ l.title }} - charter</title>
+<link rel="stylesheet" href="/assets/app.css?v={{ l.v }}">
+<script src="/assets/htmx.min.js?v={{ l.v }}" defer></script>
+<script src="/assets/keys.js?v={{ l.v }}" defer></script>
+<script src="/assets/live.js?v={{ l.v }}" defer></script>
+</head>
+<body hx-boost="true">
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="bar">
+<a class="mark" href="/" data-go="h">charter</a>
+<nav class="crumbs" aria-label="Breadcrumb">{% for (href, label) in l.crumbs %}{% if loop.index0 + 2 == l.crumbs.len() && l.crumbs.len() > 2 %}<span class="ell" aria-hidden="true">/ &hellip;</span>{% endif %}<span class="sep{% if loop.index0 + 2 < l.crumbs.len() %} skip-m{% endif %}">/</span>{% if href.is_empty() %}<span aria-current="page">{{ label }}</span>{% else %}<a{% if loop.index0 + 2 < l.crumbs.len() %} class="skip-m"{% endif %} href="{{ href }}">{{ label }}</a>{% endif %}{% endfor %}</nav>
+<span class="grow"></span>
+<button type="button" class="btn js" data-theme-toggle title="Theme: system, light, dark">theme</button>
+<button type="button" class="btn js" data-help title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
+</div></header>
+<main id="main" tabindex="-1"{% if !l.events.is_empty() %} data-events="{{ l.events }}"{% endif %}>
+{% block main %}{% endblock %}
+</main>
+<dialog id="help" aria-labelledby="help-title">
+<h2 id="help-title">Keyboard shortcuts</h2>
+<table class="keys">
+<tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>repo list</td></tr>
+<tr><td><kbd>g</kbd> <kbd>c</kbd> <kbd>l</kbd> <kbd>i</kbd> <kbd>p</kbd> <kbd>r</kbd> <kbd>v</kbd></td><td>then one of: code, log, issues, patches, releases, verification</td></tr>
+<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>move down, up</td></tr>
+<tr><td><kbd>Enter</kbd> <kbd>o</kbd></td><td>open the row</td></tr>
+<tr><td><kbd>u</kbd></td><td>up one level</td></tr>
+<tr><td><kbd>/</kbd></td><td>filter the list</td></tr>
+<tr><td><kbd>y</kbd></td><td>copy hash or path</td></tr>
+<tr><td><kbd>v</kbd></td><td>toggle verification</td></tr>
+<tr><td><kbd>x</kbd></td><td>collapse or expand a diff file</td></tr>
+<tr><td><kbd>Esc</kbd></td><td>close, blur</td></tr>
+<tr><td><kbd>?</kbd></td><td>this help</td></tr>
+</table>
+<form method="dialog"><button class="btn">Close</button></form>
+</dialog>
+</body>
+</html>

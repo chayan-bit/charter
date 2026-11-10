@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block main %}
+<h1 class="title">Repositories</h1>
+{% if repos.is_empty() %}
+<section class="empty"><p>No repos in this <code>$CHARTER_HOME</code> yet.</p><p>Clone one with <code>git clone arkiv::&lt;rid&gt;</code>, or run <code>chart ui &lt;rid&gt;</code> to fetch it here.</p></section>
+{% else %}
+<div class="box"><table class="list" data-list>
+<thead><tr><th>Name</th><th class="num">Last push</th><th class="hm">Synced</th><th>Verification</th></tr></thead>
+<tbody>
+{% for x in repos %}
+<tr data-row><td><div><a href="/r/{{ x.hex }}">{{ x.name }}</a></div>{% if !x.description.is_empty() %}<div class="dim">{{ x.description }}</div>{% endif %}</td><td class="num">{% if let Some(b) = x.last_push %}block <code>{{ b }}</code>{% else %}<span class="dim">none</span>{% endif %}</td><td class="hm">{% if let Some(p) = x.verify.pause %}{{ p }}{% else %}{{ x.verify.synced }}{% endif %}</td><td><span class="badge b-{{ x.verify.state }}">{{ x.verify.word }}</span></td></tr>
+{% endfor %}
+</tbody>
+</table></div>
+{% endif %}
+{% endblock %}

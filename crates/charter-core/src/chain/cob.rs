@@ -41,7 +41,29 @@ pub fn verify_ops(
     keys: &BTreeMap<Nid, PublicKey>,
     observed: &[Observed],
 ) -> Vec<VerifiedOp> {
+    verify_ops_after(rid, keys, &[], observed)
+}
+
+/// Like [`verify_ops`], continuing after `prior` (ops this client accepted earlier, in Arkiv
+/// order): follow-ups of their objects verify, and their ids are never returned again.
+/// Keeps an incremental op cache equal to a full [`verify_ops`] of the whole history.
+pub fn verify_ops_after(
+    rid: &Rid,
+    keys: &BTreeMap<Nid, PublicKey>,
+    prior: &[VerifiedOp],
+    observed: &[Observed],
+) -> Vec<VerifiedOp> {
     let mut objects: BTreeMap<Hash32, Object> = BTreeMap::new();
+    for p in prior {
+        objects
+            .entry(p.object())
+            .or_insert_with(|| Object {
+                type_name: p.body.type_name.clone(),
+                ops: BTreeSet::new(),
+            })
+            .ops
+            .insert(p.id);
+    }
     let mut out = vec![];
     for e in open_all::<CobOpBody>(observed).ok {
         if accept(rid, keys, &e, &mut objects) {

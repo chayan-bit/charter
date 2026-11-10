@@ -13,11 +13,13 @@ pub use arkiv_rpc_types::EntityData;
 mod error;
 #[cfg(feature = "fake")]
 pub mod fake;
+pub mod heads;
 mod ops;
 mod opts;
 pub mod paging;
 pub mod pipeline;
 mod query;
+pub mod quota;
 pub mod rpc;
 mod tx;
 
@@ -29,6 +31,7 @@ pub use query::{
     Field, MAX_AND_OR_DEPTH, MAX_LIMIT, MAX_PREDICATES, MAX_QUERY_BYTES, OrderBy, OrderType, Pred,
     Query, Value, attr,
 };
+pub use quota::Quota;
 pub use rpc::{RpcArkiv, RpcConfig};
 pub use tx::{
     ARKIV_ADDRESS, BLOCK_GAS_LIMIT, MAX_RAW_TX_BYTES, RABDI_CHAIN_ID, RABDI_RPC, Receipt, SignedTx,
@@ -65,6 +68,10 @@ pub trait Arkiv: Send + Sync {
         from: Address,
         ops: &[Operation],
     ) -> impl Future<Output = Result<u64, StoreError>> + Send;
+    /// The RPC's latest report of its rate quota; `None` when it sends none (the fake).
+    fn quota(&self) -> Option<Quota> {
+        None
+    }
     /// Submit an `execute(ops)` call or a plain transfer.
     fn send(&self, tx: SignedTx) -> impl Future<Output = Result<TxHash, StoreError>> + Send;
     fn receipt(

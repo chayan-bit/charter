@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block main %}
+{% include "repo.html" %}
+<h2>New release</h2>
+{% if l.writes %}
+<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="release"><input type="hidden" name="back" value="/r/{{ r.hex }}/releases">
+<label for="r-tag">Tag</label><input id="r-tag" name="tag" required autocomplete="off" placeholder="v1.0.0">
+<label for="r-commit">Commit</label><input id="r-commit" name="commit" required class="mono" value="{{ head }}" pattern="[0-9a-f]{40}|[0-9a-f]{64}">
+<label for="r-art">Artifacts <span class="dim">one per line: name=path-or-url[@target]; each is read and hashed here</span></label><textarea id="r-art" name="artifacts" rows="3" required class="mono"></textarea>
+<label for="r-loc">Locations <span class="dim">one per line: name=url, for artifacts given as a local path</span></label><textarea id="r-loc" name="locations" rows="3" class="mono"></textarea>
+<label for="r-notes">Notes <span class="dim">markdown</span></label><textarea id="r-notes" name="notes" rows="4"></textarea>
+<div class="acts"><a class="btn" href="/r/{{ r.hex }}/releases">Cancel</a><button class="btn primary" type="submit">Publish release</button></div>
+</form>
+{% else %}<p class="off">{{ l.off() }}</p>{% endif %}
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block main %}
+{% include "repo.html" %}
+<div id="live" data-live="push">
+{% if let Some(u) = up %}<a class="up" rel="up" href="{{ u }}" hidden>Up</a>{% endif %}
+<div class="box">
+{% if let Some(c) = last %}<div class="last"><a href="/r/{{ r.hex }}/commit/{{ c.oid }}"><code>{{ self.short(c.oid.as_str()) }}</code></a> <span>{{ c.subject }}</span> <span class="dim">{{ c.author }}</span></div>{% endif %}
+{% if entries.is_empty() && up.is_none() %}<p class="empty pad">Empty directory.</p>{% else %}
+<table class="list tree" data-list>
+<tbody>
+{% if let Some(u) = up %}<tr class="upr"><td class="ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"><path d="M1.75 3.75h4.5l1.5 1.75h6.5v7.5h-12.5z"/></svg></td><td colspan="4"><a href="{{ u }}"><code>..</code></a> <span class="dim">parent directory</span></td></tr>{% endif %}
+{% include "entries.html" %}
+</tbody>
+</table>
+{% endif %}
+</div>
+</div>
+{% endblock %}

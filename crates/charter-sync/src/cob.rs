@@ -81,3 +81,37 @@ pub(crate) async fn peer_keys_with<A: Arkiv>(
     }
     Ok(keys)
 }
+
+/// New verified ops of `rid`: what [`list_since`] found at or after a block.
+#[derive(Debug, Clone, Default)]
+pub struct Since {
+    /// Ops created at or after `from_block`, in Arkiv creation order.
+    pub ops: Vec<VerifiedOp>,
+    /// Highest creation block among all op entities seen, accepted or not.
+    pub last_block: Option<u64>,
+}
+
+/// Verified ops of `rid` created at or after `from_block`, given every op accepted before
+/// it (`prior`, in Arkiv order). Appending the result to `prior` gives the same ops in the
+/// same order as a full [`list`]: blocks are atomic, so a block is either wholly before
+/// `from_block` or wholly in this result, and `Observed.tx` ranks only ever order entities
+/// of one block within one query. Only the new ops' signers are looked up.
+///
+/// `$createdAt` is not queryable on Arkiv, so the op query itself still pages every op;
+/// the saving is in peer lookups and verification.
+pub async fn list_since<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    from_block: u64,
+    prior: &[VerifiedOp],
+) -> Result<Since> {
+    let observed = all(a, Pred::And(vec![kind(Kind::Cob), b32("ag.rid", rid)])).await?;
+    let last_block = observed.iter().map(|o| o.block).max();
+    let fresh: Vec<Observed> = observed
+        .into_iter()
+        .filter(|o| o.block >= from_block)
+        .collect();
+    let keys = peer_keys(a, &fresh).await?;
+    let ops = charter_core::verify_ops_after(rid, &keys, prior, &fresh);
+    Ok(Since { ops, last_block })
+}

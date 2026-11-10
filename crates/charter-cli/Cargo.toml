@@ -26,6 +26,7 @@ charter-escrow = { path = "../charter-escrow" }
 charter-store = { path = "../charter-store", features = ["fake"] }
 charter-sync = { path = "../charter-sync", features = ["fake"] }
 charter-timelock = { path = "../charter-timelock" }
+charter-ui = { path = "../charter-ui" }
 charter-zk = { path = "../charter-zk" }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
