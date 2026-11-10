@@ -1,0 +1,3 @@
+out/*
+!out/visual-review.md
+__pycache__/
