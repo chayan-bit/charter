@@ -103,12 +103,22 @@ post xyz.arkiv.review approve "$review" "{\"patch\":\"$patch\",\"head\":\"$head\
 mkdir -p "$root/dist"; printf 'artifact bytes\n' > "$root/dist/demo.tgz"
 chart release publish --repo "$url" --tag v0.1.0 --commit "$head" \
   --artifact "demo.tgz=$root/dist/demo.tgz@x86_64" \
-  --location "demo.tgz=https://example.com/demo.tgz" --notes "First release" >/dev/null
+  --artifact "charter-v0.1.0-x86_64-unknown-linux-gnu.tar.gz=$root/dist/demo.tgz@x86_64-unknown-linux-gnu" \
+  --location "demo.tgz=https://example.com/demo.tgz" \
+  --location "charter-v0.1.0-x86_64-unknown-linux-gnu.tar.gz=https://github.com/example-org/charter/releases/download/v0.1.0/charter-v0.1.0-x86_64-unknown-linux-gnu.tar.gz" \
+  --notes "First release" >/dev/null
 
 # Pin a program (bounty.rhai), when the CLI accepts it.
 if ! chart program pin --repo "$url" --file "$repo_root/programs/bounty.rhai" >/dev/null 2>"$root/pin.err"; then
   echo "warning: program pin failed, program page will be empty: $(head -c 200 "$root/pin.err")" >&2
 fi
+
+# A long ref name pushed after the pin (an accepted ref move, and a ref that must wrap at slashes on a phone).
+g checkout -q -b feat/chore/rename-everything-for-the-narrow-layout-stress/with-more-segments-after-it
+printf 'long ref\n' > "$work/LONGREF.md"
+g add -A && g commit -q -m "feat: a commit on a branch with a very long name"
+g push -q "$url" feat/chore/rename-everything-for-the-narrow-layout-stress/with-more-segments-after-it || echo "warning: long-ref push failed" >&2
+g checkout -q main
 
 cat > "$root/env.sh" <<ENV
 export CHART_BIN_DIR="$bin"

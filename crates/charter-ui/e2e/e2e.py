@@ -164,6 +164,40 @@ OVERFLOW_JS = """() => {
   off.sort((a, b) => b[0] - a[0]);
   return {sw: document.documentElement.scrollWidth, iw, off: off.slice(0, 4)};
 }"""
+TOKENS_JS = """() => {
+  const bad = [], re = /\\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\\d)[0-9a-f]{7,}\\b/g;
+  const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n; (n = w.nextNode());) {
+    const el = n.parentElement;
+    if (!el || /^(SCRIPT|STYLE)$/.test(el.tagName) || !/mono|menlo|consolas/i.test(getComputedStyle(el).fontFamily)) continue;
+    for (const m of n.nodeValue.matchAll(re)) {
+      const r = document.createRange(); r.setStart(n, m.index); r.setEnd(n, m.index + m[0].length);
+      const rects = [...r.getClientRects()].filter(x => x.height), tops = rects.map(x => x.top);
+      let blk = el; while (blk.parentElement && getComputedStyle(blk).display === 'inline') blk = blk.parentElement;
+      const cs = getComputedStyle(blk), room = blk.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      const width = rects.reduce((a, x) => a + x.width, 0);  // a token wider than its block has to break somewhere
+      if (tops.length && Math.max(...tops) - Math.min(...tops) > 4 && width <= room) bad.push(m[0].slice(0, 14) + ' in ' + el.tagName.toLowerCase() + '.' + el.className);
+    }
+  }
+  return bad;
+}"""
+CARD_JS = """() => {
+  const bad = [], name = e => e.tagName.toLowerCase() + (typeof e.className === 'string' && e.className ? '.' + e.className.split(' ')[0] : '');
+  const scrolls = e => { for (let a = e; a && a !== document.body; a = a.parentElement)
+    if (['auto', 'scroll'].includes(getComputedStyle(a).overflowX)) return true; return false; };
+  const cards = document.querySelectorAll('main .box, main .readme, main .ops > li, main .vp, main .art, main .clone, dialog[open]');
+  for (const c of cards) {
+    const cr = c.getBoundingClientRect();
+    for (const e of c.querySelectorAll('*')) {
+      const s = getComputedStyle(e), r = e.getBoundingClientRect();
+      if (e.tagName === 'INPUT' || s.display === 'none' || !r.width || scrolls(e) || s.textOverflow === 'ellipsis') continue;
+      const out = r.right > cr.right + 1 || r.left < cr.left - 1;
+      const clipped = s.display !== 'inline' && e.scrollWidth > e.clientWidth + 1;
+      if (out || clipped) bad.push(name(c) + ' > ' + name(e) + (out ? ' sticks out' : ' clips'));
+    }
+  }
+  return [...new Set(bad)].slice(0, 6);
+}"""
 LAYOUT_JS = """() => {
   const q = s => document.querySelector(s), r = e => e && e.getBoundingClientRect();
   const out = {};
@@ -475,6 +509,10 @@ def live_update(browser, pages):
 
 
 def layout_checks(page, name, scope, vp, rid):
+    split = page.evaluate(TOKENS_JS)
+    rec("mono hex tokens never split across lines", scope, not split, "; ".join(split[:4]))
+    over = page.evaluate(CARD_JS)
+    rec("no card child overflows or is clipped by its card", scope, not over, "; ".join(over))
     m = page.evaluate(LAYOUT_JS)
     rec("top bar: nothing clipped, height sane", scope, not m["barClipped"] and m["barH"] <= (56 if vp == "phone" else 48),
         f'height {m["barH"]}, clipped {m["barClipped"]}')
