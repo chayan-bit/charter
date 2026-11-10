@@ -71,6 +71,31 @@ fn signed_ops(d: &Draft) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The wallet-to-control-address transfers the send makes before the ops, or why none.
+fn top_up_row(e: &Estimate) -> (&'static str, String, bool) {
+    let total = e.top_ups.iter().fold(U256::ZERO, |s, a| s + a);
+    let v = match e.top_ups.len() {
+        0 => {
+            return (
+                "Wallet top-up",
+                "none needed: the control address covers this write".into(),
+                false,
+            );
+        }
+        1 => String::new(),
+        n => format!("{n} transfers, "),
+    };
+    let fee = tglm(e.top_up_fee);
+    (
+        "Wallet top-up",
+        format!(
+            "{v}{} to the control address, fee at most {fee}",
+            tglm(total)
+        ),
+        true,
+    )
+}
+
 fn confirm_page(
     app: &App,
     theme: &Theme,
@@ -90,6 +115,7 @@ fn confirm_page(
         ("Action", d.label.clone(), false),
         ("Repo", head.name.clone(), false),
         ("Transactions", e.txs.to_string(), false),
+        top_up_row(e),
         ("Entities", e.entities.to_string(), false),
         ("Estimated cost", format!("at most {}", tglm(e.cost)), true),
     ];

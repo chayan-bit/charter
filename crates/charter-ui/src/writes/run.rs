@@ -9,8 +9,8 @@ use charter_crypto::MasterSeed;
 use charter_escrow::ledger;
 use charter_escrow::ops::{self as escrow, DEPOSIT, DepositPayload};
 use charter_store::{
-    Address, Arkiv, B256, Operation, QueryOpts, QueryPage, Receipt, SignedTx, StoreError, TxHash,
-    TxInfo, TxPipeline, U256,
+    Address, Arkiv, B256, Operation, PipelineConfig, QueryOpts, QueryPage, Receipt, SignedTx,
+    StoreError, TxHash, TxInfo, TxPipeline, U256,
 };
 use charter_sync::cob::{self, json};
 use charter_sync::push_send::first_write_ops;
@@ -133,37 +133,53 @@ impl<A: Arkiv> Ctx<A> {
         let tmp = Keys::from_seed(MasterSeed::generate().map_err(err)?);
         let (mut prev, mut bind) = (ZERO, !self.bound(&d.rid).await?);
         let base_fee = self.a.base_fee().await.map_err(err)?;
-        let mut e = Estimate::default();
+        let control = self.keys.control_address(&d.rid);
+        let (w, mut have) =
+            futures_util::future::try_join(self.a.balance(self.wallet()), self.a.balance(control))
+                .await
+                .map_err(err)?;
+        let mut e = Estimate {
+            balance: w + have,
+            ..Estimate::default()
+        };
         let mut steps = Vec::with_capacity(d.steps.len());
         for step in d.steps.clone() {
             let step = Self::resolve(step).await?;
-            let gas = match &step {
+            let op = match &step {
                 Step::Deposit { amount, purpose } => {
                     let appt = ledger::load(&*self.a, &d.rid).await.map_err(|e| {
                         format!("this repo has no escrow to fund a bounty through: {e}")
                     })?;
-                    let op = deposit_step(appt.appointment.object, *amount, purpose)?;
-                    let (gas, n) = self.op_gas(&tmp, &d, &op, &mut prev, &mut bind).await?;
-                    (e.value, e.txs, e.entities) = (e.value + amount, e.txs + 1, e.entities + n);
-                    gas + TRANSFER_GAS
+                    // The escrow transfer goes from the wallet itself: never topped up.
+                    (e.value, e.txs) = (e.value + amount, e.txs + 1);
+                    e.cost += price(TRANSFER_GAS, base_fee);
+                    deposit_step(appt.appointment.object, *amount, purpose)?
                 }
-                _ => {
-                    let (gas, n) = self.op_gas(&tmp, &d, &step, &mut prev, &mut bind).await?;
-                    e.entities += n;
-                    gas
-                }
+                _ => step.clone(),
             };
-            e.txs += 1;
-            e.cost += price(gas, base_fee);
+            let (gas, n) = self.op_gas(&tmp, &d, &op, &mut prev, &mut bind).await?;
+            self.control_tx(&mut e, &mut have, gas, base_fee);
+            e.entities += n;
             steps.push(step);
         }
-        let control = self.keys.control_address(&d.rid);
-        let (w, c) =
-            futures_util::future::try_join(self.a.balance(self.wallet()), self.a.balance(control))
-                .await
-                .map_err(err)?;
-        e.balance = w + c;
         Ok((Draft { steps, ..d }, e))
+    }
+
+    /// One control-address tx of `gas`, preceded by the wallet top-up the send path makes
+    /// when `have` cannot cover it (each op is its own one-job `send_funded` run).
+    fn control_tx(&self, e: &mut Estimate, have: &mut U256, gas: u64, base_fee: u128) {
+        let pc = &self.cfg.pipeline;
+        let reserve = pc.tx_reserve(gas, U256::ZERO, base_fee);
+        if let Some(amount) = PipelineConfig::top_up(*have, reserve, 1) {
+            let fee = pc.top_up_fee(base_fee);
+            e.top_ups.push(amount);
+            (e.top_up_fee, e.cost, e.txs) = (e.top_up_fee + fee, e.cost + fee, e.txs + 1);
+            *have += amount;
+        }
+        e.txs += 1;
+        e.cost += price(gas, base_fee);
+        // What the op spends at today's base fee; the next step sees the rest.
+        *have = have.saturating_sub(U256::from(gas) * U256::from(base_fee + pc.tip));
     }
 
     async fn run(&self, tap: &Tap<A>, d: &Draft) -> Result<Vec<Hash32>, String> {

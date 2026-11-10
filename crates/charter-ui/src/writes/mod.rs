@@ -58,10 +58,15 @@ pub struct Draft {
 /// The price of a prepared draft, all in wei.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Estimate {
+    /// Every tx the send makes, top-ups included.
     pub txs: usize,
     pub entities: usize,
-    /// At most this in fees: estimated gas at the pipeline's fee cap.
+    /// At most this in fees: estimated gas at the pipeline's fee cap, top-ups included.
     pub cost: U256,
+    /// Wallet-to-control-address transfers the send makes first, by amount.
+    pub top_ups: Vec<U256>,
+    /// The top-ups' own fees at most (part of `cost`).
+    pub top_up_fee: U256,
     /// Moved besides fees (an escrow deposit).
     pub value: U256,
     /// What the wallet and the repo's control address hold now.

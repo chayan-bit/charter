@@ -258,6 +258,76 @@ async fn writes_are_off_without_keys_and_a_get_writes_nothing() {
     );
 }
 
+/// Prices and sends `kv` as `w`'s keys; returns the confirm page and the txs sent.
+async fn priced_and_sent(
+    app: &axum::Router,
+    w: &writes::Writer,
+    hex: &str,
+    kv: &[(&str, &str)],
+) -> (String, usize) {
+    let r = send(app.clone(), form(&format!("/r/{hex}/write"), kv)).await;
+    let html = r.text();
+    assert_eq!(r.status, StatusCode::OK, "{html}");
+    let id = draft_id(&html);
+    let r = send(app.clone(), form(&format!("/r/{hex}/write/{id}"), &[])).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.text());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let s = w.status(&id).expect("status");
+        assert_eq!(s.error, None);
+        if s.block.is_some() {
+            return (html, s.txs.len());
+        }
+        assert!(Instant::now() < deadline, "never confirmed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_confirm_view_counts_the_control_top_up_the_send_makes() {
+    let net = Arc::new(Net::new());
+    let alice = Peer::new(&net, 21);
+    let rid = init(&net, &alice, "topup").await;
+    // Bob has never written to the repo: his control address holds nothing.
+    let bob = Peer::new(&net, 22);
+    let r = charter_ui::sync_loop::round(&*net, &bob.cfg, &rid).await;
+    assert!(r.is_ok(), "{r:?}");
+    let keys = Keys::from_seed(charter_crypto::MasterSeed::from_bytes([22; 32]));
+    let control = keys.control_address(&rid);
+    let w = writes::spawn(net.clone(), bob.cfg.clone(), keys);
+    let app = App::new(
+        bob.home.path().to_path_buf(),
+        Arc::new(Shared::default()),
+        CSRF.into(),
+    );
+    let app = router(
+        Arc::new(app.with_writer(w.clone())),
+        Arc::new(Auth::with(PORT, TOKEN.into(), CSRF.into())),
+    );
+    let hex = hex32(&rid);
+    let kv = [("kind", "issue"), ("title", "needs a top-up")];
+    let (html, sent) = priced_and_sent(&app, &w, &hex, &kv).await;
+    assert!(html.contains("<dt>Transactions</dt><dd>2</dd>"), "{html}");
+    assert!(
+        html.contains("<dt>Wallet top-up</dt><dd class=\"mono\">"),
+        "{html}"
+    );
+    assert!(
+        html.contains("to the control address, fee at most"),
+        "{html}"
+    );
+    assert_eq!(sent, 2, "the top-up, then the op");
+    net.fund(control);
+    let kv = [("kind", "issue"), ("title", "covered")];
+    let (html, sent) = priced_and_sent(&app, &w, &hex, &kv).await;
+    assert!(html.contains("<dt>Transactions</dt><dd>1</dd>"), "{html}");
+    assert!(
+        html.contains("<dt>Wallet top-up</dt><dd>none needed"),
+        "{html}"
+    );
+    assert_eq!(sent, 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_exhausted_rpc_quota_disables_confirm_and_sends_nothing() {
     let hex = &fixture().hex;
