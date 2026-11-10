@@ -174,8 +174,26 @@ The chunk phase alone, taken as the big push minus the small-push median, runs a
 A 2 MiB push burned about 0.085 to 0.095 tGLM of gas on both sides (summed per address), so the speedup costs no gas; the bulk address now holds a larger float between pushes (up to about 0.06 tGLM).
 10 MiB was not run because its gas (about 0.43 tGLM, DERIVED) exceeded the bench budget; at the measured chunk rate it would take about 145 s (ESTIMATE).
 
-What still limits big pushes: the bulk address is topped up once per window and waits for that top-up before sending, which in the 4 MiB push meant a top-up every 2 to 4 blocks.
-About 11 chunks of 64 KiB fit in a 30M-gas block (DERIVED), about 0.36 MB/s, so the pipeline still runs at about a quarter of block capacity; funding the whole upload in one top-up is the next step.
+In those runs the bulk address was topped up once per window and waited for each top-up to land: the 4 MiB push sent 16 chunks over 2 blocks, then left 3 to 5 blocks idle, so its chunks used 25 percent of the gas of the blocks they spanned.
+
+Follow-up on the same branch (2026-11-11, MEASURED):
+
+- One top-up funds the whole run: one window at the max fee (what the node checks before admitting txs) plus the expected burn of every later job, `gas x (base fee + tip)`.
+  If the base fee outgrows that, or the funder cannot spare the whole amount, the per-window top-up still runs as before.
+- A send that still fails after its retries, or a tx dropped after every resend, no longer strands the txs above its nonce: the gap is plugged with a zero-value transfer to self priced to replace it, everything in flight lands, and then the run fails with the original error.
+
+| Push (same repo and bulk address) | per-window top-ups | one top-up per run | Speedup |
+|---|---|---|---|
+| 2 MiB random blob (n=1) | 45.23 s, 0.046 MB/s | 32.70 s, 0.064 MB/s | 1.38x |
+| 3 MiB random blob (n=1) | not run | 39.36 s, 0.080 MB/s | - |
+| 4 MiB random blob (n=1) | 70.46 s, 0.060 MB/s | not run (budget) | - |
+| chunk span, 2 MiB | 12 blocks, 24 percent of their gas | 5 blocks, 58 percent | |
+| chunk span, 3 or 4 MiB | 23 blocks, 25 percent (4 MiB) | 8 blocks, 54 percent (3 MiB) | |
+
+The 2 MiB chunks landed in 4 blocks, about 0.26 MB/s while they were landing; the rest of the 32.7 s is the push's fixed reads and control txs.
+In the 3 MiB push our txs filled blocks to 90 to 99 percent, the base fee rose from 1.00 to 1.37 gwei within 5 blocks, and that rise triggered the one fallback top-up, which cost one idle block.
+The step from 2 to 3 MiB added 6.7 s for 1.05 MB (about 0.16 MB/s), so a 10 MiB push would now take about 85 s instead of about 145 s (ESTIMATE).
+About 11 chunks of 64 KiB fit in a 30M-gas block (DERIVED), so the pipeline now alternates full and half-full blocks: the per-sender limit of 16 pending txs and the round trip between a receipt and the next send leave the second block of each pair partly empty.
 
 Op batching was not measured on chain; with N ops on one pipeline a post waits about one confirmation round instead of N (ESTIMATE).
 
