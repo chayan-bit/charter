@@ -4,7 +4,8 @@
 //! - The printed URL carries a random token; `?token=` is exchanged once for an
 //!   `HttpOnly; SameSite=Strict` cookie and a redirect that drops it from the address bar.
 //! - Every request needs that cookie; every non-GET request also needs the session's CSRF
-//!   token in `x-csrf-token` (slice 2 writes; slice 1 has no write routes).
+//!   token, in `x-csrf-token` (htmx) or as the `csrf` field of a urlencoded form (plain
+//!   form posts), and an `Origin`, if sent, of this server.
 //! - Every response gets a strict CSP and the usual hardening headers.
 
 use axum::body::Body;
@@ -109,19 +110,64 @@ fn check(auth: &Auth, req: &Request) -> Result<(), Response> {
             "open the URL that `chart ui` printed\n",
         ));
     }
-    let safe = matches!(*req.method(), Method::GET | Method::HEAD);
-    let csrf = req.headers().get(CSRF_HEADER).and_then(|v| v.to_str().ok());
-    if !safe && !csrf.is_some_and(|c| same(c, &auth.csrf)) {
+    Ok(())
+}
+
+/// The largest form body accepted (a release form with notes stays far below).
+const FORM_LIMIT: usize = 1 << 20;
+
+fn is_form(req: &Request) -> bool {
+    req.headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|c| c.starts_with("application/x-www-form-urlencoded"))
+}
+
+/// Lets a write through only with the session's CSRF token and no foreign `Origin`; a
+/// form body read to find the token is put back for the handler.
+async fn csrf(auth: &Auth, req: Request) -> Result<Request, Response> {
+    if matches!(*req.method(), Method::GET | Method::HEAD) {
+        return Ok(req);
+    }
+    let h = req.headers();
+    let host = h.get(header::HOST).and_then(|v| v.to_str().ok());
+    let origin = h.get(header::ORIGIN).map(|v| v.to_str().unwrap_or(""));
+    if origin.is_some_and(|o| host.is_none_or(|h| o != format!("http://{h}"))) {
+        return Err(deny(StatusCode::FORBIDDEN, "cross-origin write\n"));
+    }
+    let header_ok = h
+        .get(CSRF_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|c| same(c, &auth.csrf));
+    if header_ok {
+        return Ok(req);
+    }
+    if !is_form(&req) {
         return Err(deny(StatusCode::FORBIDDEN, "missing CSRF token\n"));
     }
-    Ok(())
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, FORM_LIMIT)
+        .await
+        .map_err(|_| deny(StatusCode::PAYLOAD_TOO_LARGE, "form too large\n"))?;
+    let fields: Vec<(String, String)> = serde_urlencoded::from_bytes(&bytes).unwrap_or_default();
+    if !fields
+        .iter()
+        .any(|(k, v)| k == "csrf" && same(v, &auth.csrf))
+    {
+        return Err(deny(StatusCode::FORBIDDEN, "missing CSRF token\n"));
+    }
+    Ok(Request::from_parts(parts, Body::from(bytes)))
 }
 
 /// The middleware: [`check`], then the handler, then the hardening headers on whatever
 /// response goes out (denials included).
 pub async fn guard(State(auth): State<std::sync::Arc<Auth>>, req: Request, next: Next) -> Response {
-    let mut resp = match check(&auth, &req) {
-        Ok(()) => next.run(req).await,
+    let checked = match check(&auth, &req) {
+        Ok(()) => csrf(&auth, req).await,
+        Err(r) => Err(r),
+    };
+    let mut resp = match checked {
+        Ok(req) => next.run(req).await,
         Err(r) => r,
     };
     let h = resp.headers_mut();

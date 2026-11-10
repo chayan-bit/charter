@@ -96,6 +96,35 @@ async fn writes_need_the_csrf_token() {
     );
 }
 
+fn form(body: &str, origin: Option<&str>) -> Request<Body> {
+    let mut b = Request::post("/")
+        .header(header::HOST, HOST)
+        .header(header::COOKIE, format!("charter_ui={TOKEN}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    if let Some(o) = origin {
+        b = b.header(header::ORIGIN, o);
+    }
+    b.body(Body::from(body.to_owned())).expect("request")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_form_posts_carry_the_csrf_token_as_a_field_from_this_origin() {
+    let past = StatusCode::METHOD_NOT_ALLOWED;
+    let ok = format!("a=1&csrf={CSRF}&b=2");
+    assert_eq!(send(app(), form(&ok, None)).await.status, past);
+    let here = format!("http://{HOST}");
+    assert_eq!(send(app(), form(&ok, Some(&here))).await.status, past);
+    for (body, origin) in [
+        ("csrf=wrong", None),
+        ("a=1", None),
+        (ok.as_str(), Some("http://evil.example")),
+        (ok.as_str(), Some("null")),
+    ] {
+        let r = send(app(), form(body, origin)).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{body} {origin:?}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn responses_carry_a_strict_csp_and_hardening_headers() {
     for r in [

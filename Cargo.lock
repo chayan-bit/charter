@@ -2104,6 +2104,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "syntect",
  "tempfile",
  "thiserror 2.0.21",
