@@ -28,7 +28,7 @@ pub mod op;
 pub mod program;
 pub mod release;
 pub mod timelock;
-pub mod units;
+pub use charter_sync::units;
 pub mod zk;
 
 use charter_core::ErrorCode;

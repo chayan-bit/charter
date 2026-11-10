@@ -1,7 +1,7 @@
 //! Durations in blocks (`90d`, `12h`, `300`) and amounts in tGLM (18 decimals).
 
+use crate::repo::BLOCKS_PER_DAY;
 use charter_store::U256;
-use charter_sync::repo::BLOCKS_PER_DAY;
 
 const DECIMALS: usize = 18;
 
