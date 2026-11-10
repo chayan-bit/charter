@@ -102,7 +102,7 @@ pub async fn download_pieces<A: Arkiv>(
     let mut bytes = vec![];
     for p in &pack.pieces {
         let tx = if p.tx == ZERO { *here } else { p.tx };
-        if !by_tx.contains_key(&tx) {
+        if let std::collections::btree_map::Entry::Vacant(slot) = by_tx.entry(tx) {
             let mined = a.mined_tx(TxHash::from(tx)).await?;
             let found = mined
                 .filter(|m| senders.contains(&m.from.0.0))
@@ -113,7 +113,7 @@ pub async fn download_pieces<A: Arkiv>(
                         .collect()
                 })
                 .unwrap_or_default();
-            by_tx.insert(tx, found);
+            slot.insert(found);
         }
         let piece = by_tx[&tx]
             .iter()
@@ -179,7 +179,7 @@ pub async fn download_v2<A: Arkiv>(
     repo: &crate::repo::Repo,
     rid: &Rid,
     v2: &V2,
-    in_cache: &dyn Fn(&Hash32) -> bool,
+    in_cache: &(dyn Fn(&Hash32) -> bool + Sync),
 ) -> Result<Vec<(Hash32, Hash32, std::path::PathBuf)>> {
     let mut out: Vec<(Hash32, Hash32, std::path::PathBuf)> = vec![];
     let fresh = |id: &Hash32, out: &[(Hash32, Hash32, std::path::PathBuf)]| {

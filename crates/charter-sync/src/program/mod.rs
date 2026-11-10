@@ -4,11 +4,11 @@
 //! at the pin. Fetch lists the program's accepted heads; the helper refuses a push the
 //! program would reject.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use charter_core::{
-    AttrValue, Body, Envelope, ErrorCode, Hash32, IdentityChain, Kind, Nid, ProgramPin, RefsBody,
-    Revision, VerifiedOp, canonical_refs, find_refs, verify_ops,
+    AttrValue, Body, Envelope, ErrorCode, Hash32, IdentityChain, Kind, Merged, Nid, ProgramPin,
+    RefsBody, Revision, VerifiedOp, canonical_refs, find_refs, verify_ops,
 };
 use charter_program::{Checkpoint, Event, Outcome, Program, ProgramOp, RefUpdate, RepoInfo};
 use charter_store::{Arkiv, Pred};
@@ -20,6 +20,7 @@ use crate::state::{PendingPush, unhex};
 use crate::view::View;
 use crate::{Result, SyncError, cob};
 
+pub mod heads;
 pub mod proofs;
 mod publish;
 
@@ -180,6 +181,7 @@ pub fn ref_updates(
             old: before.get(n).cloned().unwrap_or_default(),
             new: after.get(n).cloned().unwrap_or_default(),
             arkiv_order: order,
+            signed_base: false,
         })
         .collect()
 }
@@ -247,28 +249,95 @@ fn pin_revision(chain: &IdentityChain) -> &Revision {
         .unwrap_or_else(|| chain.head())
 }
 
-/// Seed votes and post-pin ref updates of every delegate, from its verified anchor chain.
+/// One state of a delegate's refs: at Arkiv order `order`, with the signed `base` of each
+/// ref for format v2 (`None` for v1 links, whose `old` is the previous refs).
+struct RefState {
+    order: u64,
+    refs: BTreeMap<String, Vec<u8>>,
+    bases: Option<BTreeMap<String, Vec<u8>>>,
+}
+
+fn refs_map(r: &RefsBody) -> BTreeMap<String, Vec<u8>> {
+    r.refs
+        .iter()
+        .map(|e| (e.name.clone(), e.oid.clone()))
+        .collect()
+}
+
+/// Ref moves from `before` to `after` by `author` at `after.order`; a v2 move's `old` is
+/// the signed base, so `ff` never depends on objects a client may lack (head-model 8).
+fn diff(author: Nid, before: Option<&RefState>, after: &RefState) -> Vec<RefUpdate> {
+    let empty = BTreeMap::new();
+    let b = before.map(|s| &s.refs).unwrap_or(&empty);
+    let names: BTreeSet<&String> = b.keys().chain(after.refs.keys()).collect();
+    names
+        .into_iter()
+        .filter(|n| b.get(*n) != after.refs.get(*n))
+        .map(|n| {
+            let new = after.refs.get(n).cloned().unwrap_or_default();
+            let new_empty = new.is_empty();
+            let old = match (&after.bases, new.is_empty()) {
+                (Some(bases), false) => bases.get(n).cloned().unwrap_or_default(),
+                _ => b.get(n).cloned().unwrap_or_default(),
+            };
+            RefUpdate {
+                author,
+                name: n.clone(),
+                old,
+                new,
+                arkiv_order: after.order,
+                signed_base: after.bases.is_some() && !new_empty,
+            }
+        })
+        .collect()
+}
+
+/// Seed votes and post-pin ref updates of every delegate: v1 anchor links, then format v2
+/// merges per landing block (`v2` holds each delegate's timeline with its orders).
 async fn ref_events<A: Arkiv>(
     a: &A,
     view: &View,
     rank: &HashMap<Hash32, u64>,
     pin_order: u64,
+    v2: &BTreeMap<Nid, Vec<(u64, Merged)>>,
 ) -> Result<(BTreeMap<Nid, RefsBody>, Vec<RefUpdate>)> {
     let (mut votes, mut updates) = (BTreeMap::new(), vec![]);
     for nid in view.delegates() {
         let Some(pv) = view.peers.get(nid) else {
             continue;
         };
+        let mut states: Vec<RefState> = v2
+            .get(nid)
+            .into_iter()
+            .flatten()
+            .map(|(order, m)| {
+                let live = heads::live_with_base(m);
+                RefState {
+                    order: *order,
+                    refs: live
+                        .iter()
+                        .map(|(n, (o, _))| (n.clone(), o.clone()))
+                        .collect(),
+                    bases: Some(live.into_iter().map(|(n, (_, b))| (n, b)).collect()),
+                }
+            })
+            .collect();
+        let v2_seed = states.iter().any(|s| s.order < pin_order);
         let links = &pv.chain.links;
         let orders = links
             .iter()
             .map(|l| order(rank, &l.position.key))
             .collect::<Result<Vec<_>>>()?;
         // Only the last pre-pin push (the seed vote) and later ones need their refs.
-        let from = orders.iter().rposition(|o| *o < pin_order).unwrap_or(0);
+        let from = match v2_seed {
+            true => orders
+                .iter()
+                .position(|o| *o >= pin_order)
+                .unwrap_or(orders.len()),
+            false => orders.iter().rposition(|o| *o < pin_order).unwrap_or(0),
+        };
         let hashes: Vec<Hash32> = links[from..].iter().map(|l| l.body.refs).collect();
         let observed = by_hashes(a, kind(Kind::Refs), &hashes).await?;
-        let mut prev: Option<RefsBody> = None;
         for (link, ord) in links.iter().zip(&orders).skip(from) {
             let refs =
                 find_refs(&view.rid, &pv.info, &observed, &link.body.refs).ok_or_else(|| {
@@ -278,14 +347,63 @@ async fn ref_events<A: Arkiv>(
                         format!("refs {h} after the program pin"),
                     )
                 })?;
-            match *ord < pin_order {
-                true => _ = votes.insert(*nid, refs.clone()),
-                false => updates.extend(ref_updates(*nid, prev.as_ref(), &refs, *ord)),
+            states.push(RefState {
+                order: *ord,
+                refs: refs_map(&refs),
+                bases: None,
+            });
+        }
+        states.sort_by_key(|s| s.order);
+        let mut prev: Option<&RefState> = None;
+        for s in &states {
+            match s.order < pin_order {
+                true => {
+                    let refs = RefsBody {
+                        rid: view.rid,
+                        object_hash: 1,
+                        refs: s
+                            .refs
+                            .iter()
+                            .map(|(name, oid)| charter_core::RefEntry {
+                                name: name.clone(),
+                                oid: oid.clone(),
+                            })
+                            .collect(),
+                    };
+                    votes.insert(*nid, refs);
+                }
+                false => updates.extend(diff(*nid, prev, s)),
             }
-            prev = Some(refs);
+            prev = Some(s);
         }
     }
     Ok((votes, updates))
+}
+
+/// Each delegate's v2 timeline (landing block, merge), bounded at the pin's block.
+async fn v2_timelines<A: Arkiv>(
+    a: &A,
+    view: &View,
+    stop: u64,
+    git: &Git,
+) -> Result<BTreeMap<Nid, Vec<(u64, Merged)>>> {
+    let path = git.dir().map(|d| d.join("arkiv-head-bodies.json"));
+    let mut cache = path
+        .as_deref()
+        .map(heads::BodyCache::load)
+        .unwrap_or_default();
+    let mut out = BTreeMap::new();
+    for nid in view.delegates() {
+        let Some(v2) = view.peers.get(nid).and_then(|p| p.v2.as_ref()) else {
+            continue;
+        };
+        let bodies = heads::identity_bodies(a, &view.rid, v2, stop, &mut cache).await?;
+        out.insert(*nid, heads::timeline(&bodies));
+    }
+    if let Some(p) = &path {
+        cache.save(p)?;
+    }
+    Ok(out)
 }
 
 fn kind_is(o: &charter_core::Observed, k: Kind) -> bool {
@@ -304,18 +422,37 @@ pub async fn enforce<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<E
     let kinds = [Kind::Cob, Kind::Anchor, Kind::Id, Kind::IdAcc].map(kind);
     let filter = Pred::And(vec![b32("ag.rid", &view.rid), Pred::Or(kinds.to_vec())]);
     let observed = all(a, filter).await?;
-    let blocks: Vec<u64> = observed.iter().map(|o| o.block).collect();
-    let rank: HashMap<Hash32, u64> = (0u64..).zip(&observed).map(|(i, o)| (o.key, i)).collect();
+    let pin_rev = pin_revision(&view.identity);
+    let timelines = Box::pin(v2_timelines(a, view, pin_rev.effective.block, git)).await?;
+    // Arkiv order: entities in creation order; a block's v2 merges right after its entities.
+    let v2_blocks: BTreeSet<u64> = timelines.values().flatten().map(|(b, _)| *b).collect();
+    let mut keys_in_order: Vec<(u64, u8, usize)> = (0..observed.len())
+        .map(|i| (observed[i].block, 0, i))
+        .chain(v2_blocks.iter().map(|b| (*b, 1, 0)))
+        .collect();
+    keys_in_order.sort();
+    let blocks: Vec<u64> = keys_in_order.iter().map(|k| k.0).collect();
+    let mut rank: HashMap<Hash32, u64> = HashMap::new();
+    let mut block_rank: BTreeMap<u64, u64> = BTreeMap::new();
+    for (r, (b, tag, i)) in (0u64..).zip(&keys_in_order) {
+        match tag {
+            0 => _ = rank.insert(observed[*i].key, r),
+            _ => _ = block_rank.insert(*b, r),
+        }
+    }
+    let v2_orders: BTreeMap<Nid, Vec<(u64, Merged)>> = timelines
+        .into_iter()
+        .map(|(n, t)| (n, t.into_iter().map(|(b, m)| (block_rank[&b], m)).collect()))
+        .collect();
     let cobs: Vec<_> = observed
         .into_iter()
         .filter(|o| kind_is(o, Kind::Cob))
         .collect();
-    let pin_rev = pin_revision(&view.identity);
     let pin_order = order(&rank, &pin_rev.effective.key)?;
     // Author keys and the delegates' refs are independent reads: fetch them together.
     let (keys, (votes, pushes)) = futures_util::future::try_join(
         cob::peer_keys_with(a, &cobs, &view.resolved),
-        ref_events(a, view, &rank, pin_order),
+        ref_events(a, view, &rank, pin_order, &v2_orders),
     )
     .await?;
     let ops = verify_ops(&view.rid, &keys, &cobs);
@@ -381,19 +518,23 @@ pub async fn enforce<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<E
 /// Refuses `pending` with `E_PROGRAM_REJECTED` if `view` enforces a program, `nid` is a
 /// delegate, and the program rejects one of the ref moves the push signs.
 pub fn check_push(view: &View, nid: &Nid, pending: &PendingPush, git: &Git) -> Result<()> {
+    if view.program.is_none() || !view.delegates().contains(nid) {
+        return Ok(());
+    }
+    let new = RefsBody::decode(&Envelope::decode(&unhex(&pending.refs)?)?.body)?;
+    check_refs(view, nid, &new, git)
+}
+
+/// Like [`check_push`] for a push that would leave `nid`'s refs at `new` (format v2).
+pub fn check_refs(view: &View, nid: &Nid, new: &RefsBody, git: &Git) -> Result<()> {
     let Some(e) = &view.program else {
         return Ok(());
     };
     if !view.delegates().contains(nid) {
         return Ok(());
     }
-    let new = RefsBody::decode(&Envelope::decode(&unhex(&pending.refs)?)?.body)?;
-    let old = view
-        .peers
-        .get(nid)
-        .and_then(|p| p.head.as_ref())
-        .map(|h| &h.refs);
-    e.check(ref_updates(*nid, old, &new, PENDING_ORDER), git)
+    let old = view.peers.get(nid).and_then(|p| p.refs_body());
+    e.check(ref_updates(*nid, old, new, PENDING_ORDER), git)
 }
 
 #[cfg(test)]

@@ -246,7 +246,7 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             .iter()
             .map(|(n, o)| Ok((n.clone(), o.as_deref().map(oid_bytes).transpose()?)))
             .collect::<Result<Vec<_>>>()?;
-        let with_base: Vec<(String, Option<Vec<u8>>, Vec<u8>)> = updates
+        let with_base: Vec<charter_core::EntryUpdate> = updates
             .iter()
             .map(|(n, o)| (n.clone(), o.clone(), self.base(&merged, n, o.as_deref())))
             .collect();
@@ -288,17 +288,26 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
         })
     }
 
-    /// The signed `base` of an update: the merged oid it fast-forwards, by git ancestry in
-    /// the cache (which holds every live ref's objects), else empty.
+    /// The signed `base` of an update (head-model 8): the pinned program's accepted head
+    /// if `new` fast-forwards it, else the merged oid if `new` fast-forwards that, by git
+    /// ancestry in the cache (which holds both), else empty.
     fn base(&self, merged: &Merged, name: &str, new: Option<&[u8]>) -> Vec<u8> {
-        let (Some(w), Some(new)) = (merged.get(name), new) else {
-            return vec![];
-        };
-        if w.entry.is_tombstone() {
-            return vec![];
-        }
-        let ff = crate::program::is_ancestor(self.repo.git(), &w.entry.oid, new) == Some(true);
-        if ff { w.entry.oid.clone() } else { vec![] }
+        let Some(new) = new else { return vec![] };
+        let accepted = self
+            .view
+            .program
+            .as_ref()
+            .and_then(|e| e.outcome.heads.get(name));
+        let winner = merged
+            .get(name)
+            .filter(|w| !w.entry.is_tombstone())
+            .map(|w| &w.entry.oid);
+        [accepted, winner]
+            .into_iter()
+            .flatten()
+            .find(|old| crate::program::is_ancestor(self.repo.git(), old, new) == Some(true))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Head-model 4.4: piece bytes over max(1 MiB, 25% of the snapshot), 64 packs, or

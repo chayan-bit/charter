@@ -55,6 +55,14 @@ pub fn entity_op<B: Body>(bytes: &[u8], lifetime: u64) -> Result<Operation> {
     Ok(create_op(&wire(&attrs), lifetime, random_salt())?)
 }
 
+/// A patch of entity `key` to the signed entity `bytes` (what a head push sends).
+pub fn entity_patch_op<B: Body>(key: Hash32, bytes: &[u8]) -> Result<Operation> {
+    let env = Envelope::decode(bytes)?;
+    let body = B::decode(&env.body)?;
+    let attrs = entity_attributes(&env, bytes, &body);
+    Ok(charter_store::patch_op(key.into(), &wire(&attrs))?)
+}
+
 pub fn chunk_op(
     rid: &Rid,
     pack_id: &Hash32,

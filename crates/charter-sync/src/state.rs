@@ -226,7 +226,7 @@ pub fn unhex(s: &str) -> Result<Vec<u8>> {
     hex::decode(s).map_err(|e| SyncError::io("pending.json", e))
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     match std::fs::read(path) {
         Ok(b) => serde_json::from_slice(&b)
             .map(Some)

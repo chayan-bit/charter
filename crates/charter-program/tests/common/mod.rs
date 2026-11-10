@@ -52,6 +52,7 @@ pub fn push(order: u64, author: u8, name: &str, old: Option<u8>, new: u8) -> Eve
         old: old.map(oid).unwrap_or_default(),
         new: oid(new),
         arkiv_order: order,
+        signed_base: false,
     })
 }
 

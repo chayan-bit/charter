@@ -109,7 +109,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
             if self.a.tx_count(c).await? == self.a.tx_count_mined(c).await? {
                 return Ok(());
             }
-            tokio_sleep(self.cfg.pipeline.poll.max(Duration::from_millis(500))).await;
+            tokio_sleep(self.cfg.pipeline.poll * 2).await;
         }
         Err(SyncError::coded(
             ErrorCode::ConcurrentPush,
@@ -200,7 +200,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
             std::fs::write(&file, &plan.thin).map_err(|e| SyncError::io(file.display(), e))?;
             files.push((file, pack_id));
             let pieces: Vec<&[u8]> = plan.thin.chunks(PIECE_SIZE).collect();
-            let refs = match plan.thin.len() <= INLINE_MAX {
+            let refs = match plan.thin.len() <= INLINE_MAX && inline_fits(plan) {
                 true => {
                     inline.push(plan.thin.clone());
                     vec![PieceRef {
@@ -540,4 +540,14 @@ impl<A: Arkiv> HeadPush<'_, A> {
 /// resolve in seconds, so blocking briefly is fine and keeps tokio out of this crate.
 async fn tokio_sleep(d: Duration) {
     std::thread::sleep(d);
+}
+
+/// Upper bound of the head body's bytes plus 16 KiB of inline pieces stays inside one tx
+/// (head-model 4.2); otherwise the pack goes as bulk pieces.
+fn inline_fits(plan: &Plan) -> bool {
+    let refs: usize = plan.refs.iter().map(|e| e.name.len() + 2 * 32 + 32).sum();
+    let pieces: usize = plan.carried.iter().map(|p| p.pieces.len() * 72 + 40).sum();
+    let body = 512 + refs + pieces + charter_core::ENVELOPE_OVERHEAD + 3_373;
+    // Attribute and ABI framing of the head and the piece ops, generously.
+    body + body / 4 + INLINE_MAX + 8_192 <= charter_store::MAX_RAW_TX_BYTES
 }
