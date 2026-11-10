@@ -201,6 +201,8 @@ Clients also keep the highest seq and body hash seen per device (section 5.2, ru
 5. First write of this device to this repo: one `C_N` transaction with the P1 `peer` and `bind_0` if missing and the device delegation, waited for.
 6. Snapshot chunks and manifests, or bulk pieces, from `B_d`, through the pipeline; every receipt must succeed.
 7. The head transaction from `C_d`: `[create head]` the first time, `[patch head]` afterwards, plus the inline pieces or the marker; `at` and `entityNonce(C_d)` are read just before signing, and only once the pending nonce of `C_d` equals its mined nonce (no earlier head tx of this device is still in flight).
+   It also requires `entityNonce(C_d)` to equal what its previous body accounts for (`pieces_created + 1`, or 0 before the first head), else it stops with `E_CONCURRENT_PUSH`: another writer of this device seed would otherwise fork the body chain.
+   When nothing was sent and no earlier head tx had to land since the `list for-push` sync, the writer plans from the heads that sync verified instead of reading them again; `C_d` is topped up for four head txs at a time, so most pushes send no top-up first.
    Before sending, the writer records the outgoing head under `outgoing/head-pending`; the next push first waits until `C_d` is idle, so a crash after sending never lets a second body be built on the same `prev_tx`.
 8. Re-check (7.3), then commit locally: index the packs, move staging refs into the namespace, store the device mark and the tx hash and block of the body.
 
