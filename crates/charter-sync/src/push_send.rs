@@ -175,7 +175,8 @@ impl<A: Arkiv> Push<'_, A> {
             .collect()
     }
 
-    /// Step 6: the one up-front check; the sends then top up per window from the wallet.
+    /// Step 6: the one up-front check; each send run then tops its sender up from the
+    /// wallet once for the whole run, and again per window only if the base fee outgrows it.
     async fn fund(&self) -> Result<()> {
         let c = self.cost().await?;
         let spenders = [
@@ -191,9 +192,10 @@ impl<A: Arkiv> Push<'_, A> {
         .await
     }
 
-    /// Sends `jobs` from `signer`, topped up from the wallet per window. The bulk address
-    /// only sends independent data txs (chunks, manifests, refs), so it keeps up to two
-    /// blocks of gas in flight ([`charter_store::PipelineConfig::bulk`]).
+    /// Sends `jobs` from `signer`, topped up from the wallet. The bulk address only sends
+    /// independent data txs (chunks, manifests, refs), so it keeps up to two blocks of gas
+    /// in flight ([`charter_store::PipelineConfig::bulk`]); the control address sends txs
+    /// that build on each other, so its runs are ordered.
     async fn send_from(
         &self,
         signer: &alloy_signer_local::PrivateKeySigner,
@@ -201,7 +203,7 @@ impl<A: Arkiv> Push<'_, A> {
     ) -> Result<()> {
         let cfg = match signer.address() == self.keys.bulk_address(&self.rid()) {
             true => self.cfg.pipeline.bulk(),
-            false => self.cfg.pipeline.clone(),
+            false => self.cfg.pipeline.ordered(),
         };
         write::send_funded(self.a, signer, &self.keys.wallet(), &cfg, jobs).await?;
         Ok(())

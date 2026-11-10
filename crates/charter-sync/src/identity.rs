@@ -37,7 +37,8 @@ async fn send_control<A: Arkiv>(
     send_control_jobs(a, cfg, keys, rid, vec![ops]).await
 }
 
-/// Sends one tx per job from the control address, in order on one nonce pipeline.
+/// Sends one tx per job from the control address, in order on one nonce pipeline; a job
+/// that fails is never resent behind later ones (they may depend on it).
 async fn send_control_jobs<A: Arkiv>(
     a: &A,
     cfg: &Config,
@@ -45,7 +46,8 @@ async fn send_control_jobs<A: Arkiv>(
     rid: &Rid,
     jobs: Vec<Vec<Operation>>,
 ) -> Result<()> {
-    write::send_funded(a, &keys.control(rid), &keys.wallet(), &cfg.pipeline, jobs).await?;
+    let pipeline = cfg.pipeline.ordered();
+    write::send_funded(a, &keys.control(rid), &keys.wallet(), &pipeline, jobs).await?;
     Ok(())
 }
 
