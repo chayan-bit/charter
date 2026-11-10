@@ -214,6 +214,33 @@ impl<A: Arkiv> HeadPush<'_, A> {
         self.commit(&v2, &content, landed, &mut state)
     }
 
+    /// `refs` limited to what the cache holds: a ref another device moved to objects this
+    /// cache has not fetched keeps its cached value until the next fetch brings them.
+    fn cached_refs(&self, refs: &charter_core::RefsBody) -> Result<charter_core::RefsBody> {
+        let git = self.repo.git();
+        let oids: Vec<String> = refs.refs.iter().map(|e| hex::encode(&e.oid)).collect();
+        let have: BTreeSet<String> = git.present(&oids)?.into_iter().collect();
+        let ns = crate::repo::namespace(&self.nid());
+        let cached: std::collections::BTreeMap<String, String> =
+            git.refs(&ns)?.into_iter().collect();
+        let mut out = refs.clone();
+        out.refs = refs
+            .refs
+            .iter()
+            .filter_map(|e| match have.contains(&hex::encode(&e.oid)) {
+                true => Some(e.clone()),
+                false => cached
+                    .get(&format!("{ns}{}", e.name))
+                    .and_then(|o| hex::decode(o).ok())
+                    .map(|oid| charter_core::RefEntry {
+                        name: e.name.clone(),
+                        oid,
+                    }),
+            })
+            .collect();
+        Ok(out)
+    }
+
     async fn content(&self, plan: &Plan) -> Result<Content> {
         if plan.snapshot {
             return self.snapshot(plan).await;
@@ -572,7 +599,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
             state.set_device_mark(&self.me(), &mark);
         }
         state.save(&self.repo.state_path())?;
-        crate::fetch::set_namespace(self.repo, &self.nid(), &v2.refs)?;
+        crate::fetch::set_namespace(self.repo, &self.nid(), &self.cached_refs(&v2.refs)?)?;
         let _ = std::fs::remove_file(self.pending_head_path());
         let staged = self.repo.git().refs(&staging(&self.nid()))?;
         let deletes: Vec<_> = staged

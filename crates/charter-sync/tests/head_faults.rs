@@ -219,3 +219,54 @@ async fn a_copied_device_seed_cannot_fork_the_body_chain() {
     let d = device_view(&net, &alice, &rid).await;
     assert_eq!(d.head.expect("head").body.seq, 1, "alice's body stands");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_device_pushes_while_another_device_lands_a_branch_it_never_fetched() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "race-branch").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    pushed(&net, &alice, &rid, tmp.path(), 1).await;
+    let laptop = alice.second_device(&net);
+    let dest = tmp.path().join("laptop");
+    Box::pin(clone_into(&net, &laptop, &rid, &dest))
+        .await
+        .expect("clone");
+    git(&dest, &["checkout", "-q", "-b", "two"]);
+    commit(&dest, &[("two", b"laptop")], "feat: two");
+    let rl = laptop.repo(&rid);
+    let t = Box::pin(prepare2(
+        &net,
+        &laptop,
+        &rl,
+        &dest,
+        &[upd("refs/heads/two")],
+    ))
+    .await
+    .expect("prepare");
+
+    // Meanwhile the first device lands a branch the laptop's cache never saw.
+    let work = tmp.path().join("work");
+    git(&work, &["checkout", "-q", "-b", "one"]);
+    commit(&work, &[("one", b"desk")], "feat: one");
+    push2(&net, &alice, &rid, &work, &["refs/heads/one"])
+        .await
+        .expect("desk push");
+
+    Box::pin(t.run())
+        .await
+        .expect("the laptop's first push lands");
+    drop(rl);
+    let view = Box::pin(charter_sync::sync(&net, &alice.repo(&rid), &alice.want()))
+        .await
+        .expect("sync");
+    let refs = view.peers[&alice.keys.nid()]
+        .refs_body()
+        .expect("refs")
+        .clone();
+    let names: Vec<&str> = refs.refs.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["refs/heads/main", "refs/heads/one", "refs/heads/two"]
+    );
+}
