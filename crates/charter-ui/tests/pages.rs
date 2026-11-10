@@ -136,7 +136,7 @@ async fn commit_shows_message_anchors_and_collapsible_diff() {
         "added and removed lines"
     );
     assert!(
-        h.contains("Reachable from") && h.contains("<code>refs/heads/main</code>"),
+        h.contains("Reachable from") && h.contains("refs/<wbr>heads/<wbr>main"),
         "anchored by alice's head"
     );
     assert!(h.contains("unsigned"), "no git signature");

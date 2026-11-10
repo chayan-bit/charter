@@ -64,6 +64,10 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 400 var(--fs-
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 code, kbd, pre, .mono { font-family: var(--font-mono); font-size: var(--fs-mono); font-variant-ligatures: none; }
+/* Inline code is a token (hash, flag, command): it never breaks; free text and refs opt out. */
+code { white-space: nowrap; }
+pre code { white-space: inherit; }
+code.ref, .md code, .kv code, ul.mono code { white-space: normal; overflow-wrap: break-word; }
 pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 h1, h2, h3 { font-weight: 600; letter-spacing: -0.01em; margin: var(--sp-5) 0 var(--sp-2); }
 h1 { font-size: var(--fs-repo); line-height: 28px; margin-top: 0; }
@@ -133,7 +137,7 @@ p a, .dim a, .more a, .last a, .empty a, .md a, .desc a { text-decoration: under
 .facts th { width: 12em; text-align: left; vertical-align: baseline; font-weight: 500; color: var(--text-2); }
 .facts th, .facts td { padding: 4px var(--sp-3) 3px; border-top: 1px solid var(--border); vertical-align: baseline; overflow-wrap: anywhere; }
 .facts tr:first-child > * { border-top: 0; }
-.chips code { display: inline-block; margin: 0 var(--sp-1) 0 0; padding: 0 6px; background: var(--s2); border-radius: var(--radius); white-space: nowrap; }
+.chips code { display: inline-block; max-width: 100%; margin: 0 var(--sp-1) 0 0; padding: 0 6px; background: var(--s2); border-radius: var(--radius); }
 
 /* Lists and tables */
 .list { width: 100%; border-collapse: collapse; font-size: var(--fs-dense); }
@@ -234,6 +238,7 @@ p a, .dim a, .more a, .last a, .empty a, .md a, .desc a { text-decoration: under
 .art > p { margin: var(--sp-1) 0 0; }
 .art > .md { margin: var(--sp-2) 0; }
 .hash { display: inline-block; max-width: 13ch; overflow: hidden; vertical-align: bottom; text-overflow: ellipsis; white-space: nowrap; }
+.fn, .locs { min-width: 0; overflow-wrap: anywhere; }
 .loc { display: block; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Syntax roles (syntect scope classes) */
@@ -313,12 +318,13 @@ html.has-js .nojs { display: none; }
   .facts td { display: block; border-top: 0; padding-top: 0; }
   .filehead .dim { display: none; }
   .art thead { display: none; }
-  .art tr, .art td { display: block; }
+  .art table, .art tbody, .art tr, .art td { display: block; }
   .art td { display: flex; align-items: baseline; gap: var(--sp-2); padding: 0 var(--sp-3); border: 0; text-align: left; }
   .art td::before { content: attr(data-l); flex: none; width: 7ch; text-align: left; color: var(--text-3); font-size: var(--fs-label); text-transform: uppercase; }
   .art tbody tr { padding: var(--sp-2) 0; border-top: 1px solid var(--border); }
   .art tbody tr:first-child { border-top: 0; }
   .art td:first-child { font-weight: 500; }
+  .art td > .fn, .art td > .locs { flex: 1; }
   .loc { max-width: 100%; }
   .last .dim { display: none; }
   .code { --gw: calc(4ch + var(--sp-3)); }

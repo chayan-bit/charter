@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "macros.html" as u %}
 {% block main %}
 {% include "repo.html" %}
 {% if let Some(p) = p %}
@@ -20,13 +21,13 @@
 {% if !self.rejected().is_empty() %}
 <h2>Rejected</h2>
 <div class="box"><table class="list"><thead><tr><th>Ref</th><th>New</th><th>By</th><th>Reason</th></tr></thead><tbody>
-{% for m in self.rejected() %}<tr class="bad"><td><code>{{ m.name }}</code></td><td><code title="{{ m.new }}">{{ self.short(m.new.as_str()) }}</code></td><td><code title="{{ m.author }}">{{ self.short(m.author.as_str()) }}</code></td><td>{% if let Some(why) = m.reason %}{{ why }}{% endif %}</td></tr>{% endfor %}
+{% for m in self.rejected() %}<tr class="bad"><td><code class="ref">{{ u::refname(m.name) }}</code></td><td><code title="{{ m.new }}">{{ self.short(m.new.as_str()) }}</code></td><td><code title="{{ m.author }}">{{ self.short(m.author.as_str()) }}</code></td><td>{% if let Some(why) = m.reason %}{{ why }}{% endif %}</td></tr>{% endfor %}
 </tbody></table></div>
 {% endif %}
 {% if !self.accepted().is_empty() %}
 <h2>Accepted</h2>
 <div class="box"><table class="list"><thead><tr><th>Ref</th><th>New</th><th>By</th></tr></thead><tbody>
-{% for m in self.accepted() %}<tr><td><code>{{ m.name }}</code></td><td><a href="/r/{{ r.hex }}/commit/{{ m.new }}"><code title="{{ m.new }}">{{ self.short(m.new.as_str()) }}</code></a></td><td><code title="{{ m.author }}">{{ self.short(m.author.as_str()) }}</code></td></tr>{% endfor %}
+{% for m in self.accepted() %}<tr><td><code class="ref">{{ u::refname(m.name) }}</code></td><td><a href="/r/{{ r.hex }}/commit/{{ m.new }}"><code title="{{ m.new }}">{{ self.short(m.new.as_str()) }}</code></a></td><td><code title="{{ m.author }}">{{ self.short(m.author.as_str()) }}</code></td></tr>{% endfor %}
 </tbody></table></div>
 {% endif %}
 <h2>State</h2>
