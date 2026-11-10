@@ -181,20 +181,51 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 /// Temp file, fsync, rename: a crash leaves the old or the new file, never a torn one.
 pub fn write_json<T: Serialize>(path: &Path, v: &T) -> Result<()> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // One temp file per write (process id and a per-process counter), so concurrent
+    // writers never rename each other's half-written file into place.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let err = |e: std::io::Error| SyncError::io(path.display(), e);
-    let tmp = path.with_extension("json.tmp");
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
     let bytes = serde_json::to_vec_pretty(v).map_err(|e| SyncError::io(path.display(), e))?;
-    let mut f = std::fs::File::create(&tmp).map_err(err)?;
-    f.write_all(&bytes)
-        .and_then(|()| f.sync_all())
-        .map_err(err)?;
-    std::fs::rename(&tmp, path).map_err(err)
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.map_err(err)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use charter_core::Kind;
+
+    #[test]
+    fn concurrent_writes_to_one_file_all_land_whole() {
+        let d = tempfile::tempdir().expect("tmp");
+        let p = d.path().join("cache.json");
+        let big: Vec<u64> = (0..20_000).collect();
+        std::thread::scope(|s| {
+            for t in 0..8u64 {
+                let (p, big) = (&p, &big);
+                s.spawn(move || {
+                    for i in 0..40 {
+                        write_json(p, &(t, i, big)).expect("write");
+                    }
+                });
+            }
+        });
+        let back: (u64, u64, Vec<u64>) =
+            serde_json::from_slice(&std::fs::read(&p).expect("read")).expect("whole json");
+        assert_eq!(back.2, big);
+        let left = std::fs::read_dir(d.path()).expect("dir").count();
+        assert_eq!(left, 1, "no temp files left behind");
+    }
 
     #[test]
     fn state_round_trips_and_marks_convert() {
