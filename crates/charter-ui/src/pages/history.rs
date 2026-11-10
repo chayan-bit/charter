@@ -82,8 +82,7 @@ fn log_page(app: &App, theme: &Theme, r: &Repo, rev: &str, page: usize) -> Respo
         );
     };
     let page = page.max(1);
-    let mut rows =
-        gitread::log(&r.git, &commit, (page - 1) * PAGE, PAGE + 1, None).unwrap_or_default();
+    let mut rows = gitread::log(&r.git, &commit, (page - 1) * PAGE, PAGE + 1);
     let next = rows.len() > PAGE;
     rows.truncate(PAGE);
     let (mut l, head) = frame(app, theme, r, "log", "Commits");
@@ -179,7 +178,7 @@ fn commit_page(app: &App, theme: &Theme, r: &Repo, sha: &str, all: bool) -> Resp
     let found = gitread::is_oid(sha)
         .then(|| gitread::resolve(&r.git, None, sha))
         .flatten()
-        .and_then(|oid| gitread::commit(&r.git, &oid).ok());
+        .and_then(|oid| gitread::commit(&r.git, &oid));
     let Some(c) = found else {
         return error_page(
             app,
@@ -189,7 +188,7 @@ fn commit_page(app: &App, theme: &Theme, r: &Repo, sha: &str, all: bool) -> Resp
         );
     };
     let limit = if all { usize::MAX } else { HIGHLIGHT_LINES };
-    let (files, hidden) = diff::parse(&gitread::diff(&r.git, &c.oid).unwrap_or_default(), limit);
+    let (files, hidden) = diff::parse(&diff::of_commit(&r.git, &c.oid).unwrap_or_default(), limit);
     let (subject, body) = c.message.split_once('\n').unwrap_or((&c.message, ""));
     let (subject, body) = (subject.to_owned(), body.trim().to_owned());
     let (mut l, head) = frame(app, theme, r, "log", &subject);

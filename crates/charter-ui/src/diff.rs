@@ -1,4 +1,12 @@
-//! Unified diff (`git diff-tree -p`) to per-file line lists for the commit page.
+//! The commit page's diff: gix writes it as unified text (the shape of `git diff-tree -p
+//! -M --root` against the first parent), and [`parse`] turns that into per-file line lists.
+
+use gix::bstr::{BStr, ByteSlice};
+use gix::diff::blob::unified_diff::{ConsumeBinaryHunk, ContextSize};
+use gix::diff::blob::{Algorithm, Diff, InternedInput, UnifiedDiff};
+use gix::object::tree::diff::ChangeDetached as Change;
+
+use crate::gitread::Git;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
@@ -118,6 +126,132 @@ pub fn parse(diff: &str, limit: usize) -> (Vec<FileDiff>, usize) {
         }
     }
     (p.files, p.hidden)
+}
+
+/// One side of a changed file: path and blob id.
+type Side<'a> = Option<(&'a BStr, gix::ObjectId)>;
+
+/// `(old, new, renamed)`, or `None` for a tree entry (its files come as their own changes).
+fn sides(c: &Change) -> Option<(Side<'_>, Side<'_>, bool)> {
+    let s = match c {
+        Change::Addition {
+            location,
+            entry_mode,
+            id,
+            ..
+        } if !entry_mode.is_tree() => (None, Some((location.as_bstr(), *id)), false),
+        Change::Deletion {
+            location,
+            entry_mode,
+            id,
+            ..
+        } if !entry_mode.is_tree() => (Some((location.as_bstr(), *id)), None, false),
+        Change::Modification {
+            location,
+            previous_id,
+            entry_mode,
+            id,
+            ..
+        } if !entry_mode.is_tree() => (
+            Some((location.as_bstr(), *previous_id)),
+            Some((location.as_bstr(), *id)),
+            false,
+        ),
+        Change::Rewrite {
+            source_location,
+            source_id,
+            location,
+            entry_mode,
+            id,
+            copy,
+            ..
+        } if !entry_mode.is_tree() => {
+            let (old, new) = (source_location.as_bstr(), location.as_bstr());
+            (Some((old, *source_id)), Some((new, *id)), !copy)
+        }
+        _ => return None,
+    };
+    Some(s)
+}
+
+/// Blob bytes; a submodule commit or a missing object reads as empty.
+fn data(git: &Git, side: Side<'_>) -> Vec<u8> {
+    side.and_then(|(_, id)| git.find_blob(id).ok())
+        .map(|b| b.detach().data)
+        .unwrap_or_default()
+}
+
+/// Git's binary test: a NUL in the first 8000 bytes.
+fn binary(b: &[u8]) -> bool {
+    b.iter().take(8_000).any(|c| *c == 0)
+}
+
+fn hunks(old: &[u8], new: &[u8]) -> String {
+    let (a, b) = (old.to_str_lossy(), new.to_str_lossy());
+    let input = InternedInput::new(a.as_ref(), b.as_ref());
+    let mut d = Diff::compute(Algorithm::Histogram, &input);
+    d.postprocess_lines(&input);
+    let sink = ConsumeBinaryHunk::new(String::new(), "\n");
+    UnifiedDiff::new(&d, &input, sink, ContextSize::symmetrical(3))
+        .consume()
+        .unwrap_or_default()
+}
+
+/// Appends one file in `git diff` form.
+fn file(git: &Git, c: &Change, out: &mut String) {
+    let Some((old, new, renamed)) = sides(c) else {
+        return;
+    };
+    let name = |s: Side<'_>| s.map(|(p, _)| p.to_str_lossy().into_owned());
+    let (a, b) = (name(old), name(new));
+    let (pa, pb) = (a.clone().or(b.clone()), b.clone().or(a.clone()));
+    out.push_str(&format!(
+        "diff --git a/{} b/{}\n",
+        pa.unwrap_or_default(),
+        pb.unwrap_or_default()
+    ));
+    if let (true, Some(a), Some(b)) = (renamed, &a, &b) {
+        out.push_str(&format!("rename from {a}\nrename to {b}\n"));
+    }
+    let (x, y) = (data(git, old), data(git, new));
+    if x == y {
+        return;
+    }
+    let path = |p: &Option<String>, side: &str| {
+        p.as_ref()
+            .map_or("/dev/null".into(), |p| format!("{side}/{p}"))
+    };
+    if binary(&x) || binary(&y) {
+        out.push_str(&format!(
+            "Binary files {} and {} differ\n",
+            path(&a, "a"),
+            path(&b, "b")
+        ));
+        return;
+    }
+    out.push_str(&format!("--- {}\n+++ {}\n", path(&a, "a"), path(&b, "b")));
+    out.push_str(&hunks(&x, &y));
+}
+
+/// Unified diff of `oid` against its first parent (the empty tree for a root commit),
+/// with renames detected at git's default 50% similarity.
+pub fn of_commit(git: &Git, oid: &str) -> Option<String> {
+    let c = git
+        .find_commit(gix::ObjectId::from_hex(oid.as_bytes()).ok()?)
+        .ok()?;
+    let new = c.tree().ok()?;
+    let old = match c.parent_ids().next() {
+        Some(p) => Some(git.find_commit(p).ok()?.tree().ok()?),
+        None => None,
+    };
+    let opts = gix::diff::Options::default().with_rewrites(Some(Default::default()));
+    let mut changes = git.diff_tree_to_tree(old.as_ref(), Some(&new), opts).ok()?;
+    changes.sort_by(|x, y| x.location().cmp(y.location()));
+    let mut out = String::new();
+    for ch in &changes {
+        file(git, ch, &mut out);
+    }
+    Some(out)
 }
 
 #[cfg(test)]

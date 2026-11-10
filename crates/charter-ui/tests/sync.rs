@@ -88,3 +88,33 @@ async fn rounds_keep_the_op_cache_equal_to_a_full_list() {
     assert_eq!(cached, full);
     assert_eq!(cached.len(), 3);
 }
+
+/// The UI keeps one gix handle per repo; after a round brings a new push, the same router
+/// shows it (the handle is reopened, not stale).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_push_shows_after_the_next_round() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 5);
+    let rid = init(&net, &alice, "fresh").await;
+    let dir = tempfile::tempdir().expect("work");
+    let work = work_repo(dir.path(), "w");
+    let one = commit(&work, &[("a.txt", b"1\n")], "one");
+    push(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("push");
+    round(&net, &alice.cfg, &rid).await.expect("round");
+    let app = app_for(alice.home.path());
+    let log = format!("/r/{}/log/main", charter_sync::ids::hex32(&rid));
+    let first = send(app.clone(), req(&log)).await.text();
+    assert!(first.contains(&one[..7]), "{first}");
+    let two = commit(&work, &[("a.txt", b"2\n")], "two");
+    push(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("push");
+    round(&net, &alice.cfg, &rid).await.expect("round");
+    let again = send(app.clone(), req(&log)).await.text();
+    assert!(
+        again.contains(&two[..7]) && again.contains(&one[..7]),
+        "{again}"
+    );
+}

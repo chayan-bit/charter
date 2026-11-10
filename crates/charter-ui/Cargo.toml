@@ -20,11 +20,12 @@ ammonia = "4.2"
 askama = "0.16"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query"] }
 getrandom = "0.4"
+gix = { version = "0.90", default-features = false, features = ["revision", "blob-diff", "sha1", "parallel"] }
 hex = "0.4"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+syntect = { version = "5.3", default-features = false, features = ["default-onig"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 

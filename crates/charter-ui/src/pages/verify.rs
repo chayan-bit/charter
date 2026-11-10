@@ -4,8 +4,9 @@
 //! Rabdi's explorer documents only `/address/` and `/tx/` paths, and these facts are
 //! blocks and entity keys, so they are shown as ids in mono (full value in `title`).
 
-use super::{Repo, ago, short};
+use super::{ago, short};
 use crate::cache::RepoView;
+use crate::sync_loop::Round;
 
 /// Panel states: `verified`, `pending` (seen, not yet synced), `unverified`, `equivocation`.
 #[derive(Debug, Clone)]
@@ -44,9 +45,8 @@ pub struct EquivRow {
 }
 
 impl Verify {
-    pub fn new(r: &Repo) -> Self {
-        let round = &r.round;
-        let Some(v) = &r.view else {
+    pub fn new(view: Option<&RepoView>, round: &Round) -> Self {
+        let Some(v) = view else {
             return Self::unsynced(round.error.clone(), round.busy);
         };
         let peers = peer_rows(v);

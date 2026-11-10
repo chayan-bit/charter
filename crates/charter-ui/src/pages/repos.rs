@@ -33,29 +33,21 @@ fn row(app: &App, rid: charter_core::Rid) -> RepoRow {
     let hex = hex32(&rid);
     let dir = app.home.join("repos").join(&hex);
     let view: Option<cache::RepoView> = cache::read(&dir.join(cache::VIEW)).ok().flatten();
-    let r = Repo {
-        rid,
-        git: gitread::cache(&dir),
-        round: app.shared.round(&rid),
-        view,
-        hex,
-        dir,
-    };
-    let last_push = r
-        .view
+    let last_push = view
         .iter()
         .flat_map(|v| &v.peers)
         .filter_map(|p| p.head.as_ref().map(|h| h.block))
         .max();
     RepoRow {
-        name: r.name(),
-        description: r
-            .view
+        name: view
+            .as_ref()
+            .map_or_else(|| short(&hex), |v| v.name.clone()),
+        description: view
             .as_ref()
             .map(|v| v.description.clone())
             .unwrap_or_default(),
-        verify: Verify::new(&r),
-        hex: r.hex,
+        verify: Verify::new(view.as_ref(), &app.shared.round(&rid)),
+        hex,
         last_push,
     }
 }
@@ -118,12 +110,19 @@ fn readme(r: &Repo, commit: &str, entries: &[Entry]) -> Option<String> {
     let e = entries
         .iter()
         .find(|e| e.kind == "blob" && e.name.to_ascii_lowercase().starts_with("readme"))?;
-    let bytes = gitread::blob(&r.git, commit, &e.name).ok()?;
+    let bytes = gitread::blob(&r.git, commit, &e.name)?;
     let text = String::from_utf8_lossy(&bytes);
     let lower = e.name.to_ascii_lowercase();
     Some(
         match lower.ends_with(".md") || lower.ends_with(".markdown") {
-            true => markdown::render(&text),
+            true => markdown::render_in(
+                &text,
+                &markdown::Links {
+                    rid: &r.hex,
+                    rev: &seg(&r.default_ref()),
+                    dir: "",
+                },
+            ),
             false => format!("<pre>{}</pre>", crate::highlight::escape(&text)),
         },
     )
@@ -135,7 +134,7 @@ pub fn home_page(app: &App, theme: &Theme, r: &Repo) -> Response {
     let commit = gitread::resolve(&r.git, r.view.as_ref(), &default);
     let entries = commit
         .as_deref()
-        .and_then(|c| gitread::tree(&r.git, c, "").ok())
+        .and_then(|c| gitread::tree(&r.git, c, ""))
         .unwrap_or_default();
     let readme = commit.as_deref().and_then(|c| readme(r, c, &entries));
     let view = r.view.as_ref();

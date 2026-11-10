@@ -8,8 +8,9 @@ pub mod program;
 pub mod repos;
 mod verify;
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use askama::Template;
 use axum::extract::FromRequestParts;
@@ -17,26 +18,45 @@ use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use charter_core::{Rid, VerifiedOp};
-use charter_sync::git::Git;
 use charter_sync::ids::{hex32, parse_id};
 
 use crate::cache::{self, Cobs, RepoView};
+use crate::gitread::{self, Git};
 use crate::sync_loop::{Round, Shared};
-use crate::{assets, fold, gitread};
+use crate::{assets, fold};
 
 pub use verify::Verify;
 
 /// Shared by every handler.
-#[derive(Debug)]
 pub struct App {
     pub home: PathBuf,
     pub shared: Arc<Shared>,
     pub csrf: String,
+    /// One gix handle per repo, keyed by the `synced_ms` of the view it was opened under.
+    repos: Mutex<HashMap<Rid, (u64, gix::ThreadSafeRepository)>>,
 }
 
 impl App {
     pub fn new(home: PathBuf, shared: Arc<Shared>, csrf: String) -> Self {
-        Self { home, shared, csrf }
+        Self {
+            home,
+            shared,
+            csrf,
+            repos: Mutex::default(),
+        }
+    }
+
+    /// The repo's handle, opened once and reopened after each sync round so new refs and
+    /// packs show.
+    fn git(&self, rid: Rid, dir: &Path, synced: u64) -> Option<Git> {
+        let mut m = self.repos.lock().ok()?;
+        if let Some((_, ts)) = m.get(&rid).filter(|(s, _)| *s == synced) {
+            return Some(gitread::local(ts));
+        }
+        let ts = gitread::open(dir)?;
+        let g = gitread::local(&ts);
+        m.insert(rid, (synced, ts));
+        Some(g)
     }
 }
 
@@ -150,10 +170,21 @@ pub fn open(app: &App, theme: &Theme, rid: &str) -> Result<Repo, Response> {
         return Err(gone());
     }
     app.shared.focus(rid);
+    let view: Option<RepoView> = cache::read(&dir.join(cache::VIEW)).ok().flatten();
+    let synced = view.as_ref().map_or(0, |v| v.synced_ms);
+    let Some(git) = app.git(rid, &dir, synced) else {
+        let msg = "The git cache of this repo cannot be opened.";
+        return Err(error_page(
+            app,
+            theme,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            msg,
+        ));
+    };
     Ok(Repo {
         rid,
-        view: cache::read(&dir.join(cache::VIEW)).ok().flatten(),
-        git: gitread::cache(&dir),
+        view,
+        git,
         round: app.shared.round(&rid),
         hex,
         dir,
@@ -192,7 +223,7 @@ impl Head {
             tab,
             issues: count(fold::ISSUE),
             patches: count(fold::PATCH),
-            verify: Verify::new(r),
+            verify: Verify::new(r.view.as_ref(), &r.round),
         }
     }
 }

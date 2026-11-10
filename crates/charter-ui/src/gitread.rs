@@ -1,20 +1,37 @@
-//! Read-only git plumbing over a repo's bare cache, through charter-sync's `Git` wrapper
-//! (no lock: git readers are safe next to a writer). Every ref and path from a URL is
-//! validated here and reaches git as one argument after a resolved oid, never via a shell.
+//! Read-only git over a repo's bare cache, in process with gix (docs/p6/ui.md 4.1): no
+//! subprocess and no lock on the request path. Every ref and path from a URL is validated
+//! here; refs resolve only through the verified canonical refs or a full oid.
 
 use std::path::Path;
 
-use charter_sync::git::Git;
+use gix::ObjectId;
+use gix::bstr::ByteSlice;
 
 use crate::cache::RepoView;
 
-pub fn cache(repo_dir: &Path) -> Git {
-    Git::cache(&repo_dir.join("git"))
+/// A thread-local handle on one repo's cache.
+pub type Git = gix::Repository;
+
+/// Opens `<repo_dir>/git`, ignoring global and system git config.
+pub fn open(repo_dir: &Path) -> Option<gix::ThreadSafeRepository> {
+    let opts = gix::open::Options::isolated();
+    gix::ThreadSafeRepository::open_opts(repo_dir.join("git"), opts).ok()
+}
+
+/// A handle for this thread, with an object cache for walks that revisit commits.
+pub fn local(ts: &gix::ThreadSafeRepository) -> Git {
+    let mut g = ts.to_thread_local();
+    g.object_cache_size_if_unset(4 << 20);
+    g
 }
 
 /// 40 or 64 lowercase hex digits.
 pub fn is_oid(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn oid(s: &str) -> Option<ObjectId> {
+    is_oid(s).then(|| ObjectId::from_hex(s.as_bytes()).ok())?
 }
 
 /// A repo-relative path with no empty, `.` or `..` segment and no control bytes; `""` is
@@ -43,70 +60,80 @@ pub fn resolve(git: &Git, view: Option<&RepoView>, r: &str) -> Option<String> {
             .find_map(|n| refs.iter().find(|(name, _)| name == n))
             .map(|(_, o)| o.clone())?
     };
-    let spec = format!("{candidate}^{{commit}}");
-    let out = git
-        .run(
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                "--end-of-options",
-                &spec,
-            ],
-            b"",
-        )
+    let c = git
+        .find_object(oid(&candidate)?)
+        .ok()?
+        .peel_to_commit()
         .ok()?;
-    let oid = String::from_utf8_lossy(&out).trim().to_owned();
-    is_oid(&oid).then_some(oid)
+    Some(c.id.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
-    pub mode: String,
     /// `blob`, `tree` or `commit` (a submodule).
-    pub kind: String,
+    pub kind: &'static str,
     pub oid: String,
     pub size: Option<u64>,
     pub name: String,
 }
 
-/// Object type of `<commit>:<path>` (`tree`, `blob`), `None` if it does not exist.
-pub fn kind_at(git: &Git, commit: &str, path: &str) -> Option<String> {
-    let out = git
-        .run(&["cat-file", "-t", &format!("{commit}:{path}")], b"")
-        .ok()?;
-    Some(String::from_utf8_lossy(&out).trim().to_owned())
+/// The tree object at `<commit>:<path>`, `None` if it is missing or not a tree.
+fn tree_at<'r>(git: &'r Git, commit: &str, path: &str) -> Option<gix::Tree<'r>> {
+    let root = git.find_commit(oid(commit)?).ok()?.tree().ok()?;
+    if path.is_empty() {
+        return Some(root);
+    }
+    let e = root.lookup_entry_by_path(path).ok()??;
+    e.mode()
+        .is_tree()
+        .then(|| git.find_tree(e.object_id()).ok())?
 }
 
-/// Entries of the tree at `<commit>:<path>`, directories first, then by name.
-pub fn tree(git: &Git, commit: &str, path: &str) -> charter_sync::Result<Vec<Entry>> {
-    let out = git.run(
-        &["ls-tree", "-z", "--long", &format!("{commit}:{path}")],
-        b"",
-    )?;
-    let mut v: Vec<Entry> = out
-        .split(|b| *b == 0)
-        .filter_map(|rec| {
-            let rec = std::str::from_utf8(rec).ok()?;
-            let (meta, name) = rec.split_once('\t')?;
-            let mut f = meta.split_whitespace();
-            let (mode, kind, oid) = (f.next()?, f.next()?, f.next()?);
-            Some(Entry {
-                mode: mode.into(),
-                kind: kind.into(),
-                oid: oid.into(),
-                size: f.next().and_then(|s| s.parse().ok()),
-                name: name.into(),
-            })
+/// The id of whatever is at `<commit>:<path>`.
+fn id_at(git: &Git, commit: ObjectId, path: &str) -> Option<ObjectId> {
+    let root = git.find_commit(commit).ok()?.tree().ok()?;
+    Some(root.lookup_entry_by_path(path).ok()??.object_id())
+}
+
+/// Entries of the tree at `<commit>:<path>`, directories first, then by name; `None` if
+/// there is no directory there.
+pub fn tree(git: &Git, commit: &str, path: &str) -> Option<Vec<Entry>> {
+    let t = tree_at(git, commit, path)?;
+    let mut v: Vec<Entry> = t
+        .decode()
+        .ok()?
+        .entries
+        .iter()
+        .map(|e| {
+            let kind = match e.mode {
+                m if m.is_tree() => "tree",
+                m if m.is_commit() => "commit",
+                _ => "blob",
+            };
+            let size = (kind == "blob")
+                .then(|| git.find_header(e.oid).ok().map(|h| h.size()))
+                .flatten();
+            Entry {
+                kind,
+                oid: e.oid.to_string(),
+                size,
+                name: e.filename.to_str_lossy().into_owned(),
+            }
         })
         .collect();
     v.sort_by(|a, b| (a.kind != "tree", &a.name).cmp(&(b.kind != "tree", &b.name)));
-    Ok(v)
+    Some(v)
 }
 
 /// Bytes of the blob at `<commit>:<path>`.
-pub fn blob(git: &Git, commit: &str, path: &str) -> charter_sync::Result<Vec<u8>> {
-    git.run(&["cat-file", "blob", &format!("{commit}:{path}")], b"")
+pub fn blob(git: &Git, commit: &str, path: &str) -> Option<Vec<u8>> {
+    let root = git.find_commit(oid(commit)?).ok()?.tree().ok()?;
+    let e = root.lookup_entry_by_path(path).ok()??;
+    let blob = e
+        .mode()
+        .is_blob_or_symlink()
+        .then(|| git.find_blob(e.object_id()).ok())??;
+    Some(blob.detach().data)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,44 +144,63 @@ pub struct CommitRow {
     pub subject: String,
 }
 
-const LOG_FORMAT: &str = "--format=%H%x00%an%x00%at%x00%s%x1e";
+fn row(git: &Git, id: ObjectId) -> Option<CommitRow> {
+    let c = git.find_commit(id).ok()?;
+    let a = c.author().ok()?;
+    Some(CommitRow {
+        oid: id.to_string(),
+        author: a.name.trim().to_str_lossy().into_owned(),
+        time: a.seconds(),
+        subject: c.message().ok()?.summary().to_str_lossy().into_owned(),
+    })
+}
 
-fn rows(out: &[u8]) -> Vec<CommitRow> {
-    String::from_utf8_lossy(out)
-        .split('\x1e')
-        .filter_map(|r| {
-            let mut f = r.trim_start_matches('\n').split('\0');
-            Some(CommitRow {
-                oid: f.next().filter(|o| is_oid(o))?.into(),
-                author: f.next()?.into(),
-                time: f.next()?.parse().ok()?,
-                subject: f.next()?.into(),
-            })
-        })
+/// Commits reachable from `commit`, newest commit time first (as `git log` orders them).
+fn walk<'r>(
+    git: &'r Git,
+    commit: &str,
+) -> Option<impl Iterator<Item = gix::revision::walk::Info<'r>> + use<'r>> {
+    use gix::revision::walk::Sorting;
+    let w = git
+        .rev_walk([oid(commit)?])
+        .sorting(Sorting::ByCommitTime(Default::default()))
+        .all()
+        .ok()?;
+    Some(w.filter_map(Result::ok))
+}
+
+/// Up to `n` commits from `commit` after skipping `skip`, newest first.
+pub fn log(git: &Git, commit: &str, skip: usize, n: usize) -> Vec<CommitRow> {
+    let Some(w) = walk(git, commit) else {
+        return vec![];
+    };
+    w.skip(skip)
+        .take(n)
+        .filter_map(|i| row(git, i.id))
         .collect()
 }
 
-/// Up to `n` commits from `commit` after skipping `skip`, newest first; with `path`, only
-/// commits touching it.
-pub fn log(
-    git: &Git,
-    commit: &str,
-    skip: usize,
-    n: usize,
-    path: Option<&str>,
-) -> charter_sync::Result<Vec<CommitRow>> {
-    let (skip, n) = (format!("--skip={skip}"), format!("--max-count={n}"));
-    let mut args = vec![
-        "log",
-        LOG_FORMAT,
-        &skip,
-        &n,
-        "--end-of-options",
-        commit,
-        "--",
-    ];
-    args.extend(path.filter(|p| !p.is_empty()));
-    Ok(rows(&git.run(&args, b"")?))
+/// The newest commit from `commit` that changed `path` (all of it for `""`): its entry
+/// differs from that of every parent.
+// shortcut: no history simplification, so a side-branch change that a merge dropped can
+// show; switch to gix's path-filtered walk if it lands.
+pub fn last_change(git: &Git, commit: &str, path: &str) -> Option<CommitRow> {
+    for info in walk(git, commit)? {
+        if path.is_empty() {
+            return row(git, info.id);
+        }
+        let mine = id_at(git, info.id, path);
+        let parents = &info.parent_ids;
+        let changed = if parents.is_empty() {
+            mine.is_some()
+        } else {
+            parents.iter().all(|p| id_at(git, *p, path) != mine)
+        };
+        if changed {
+            return row(git, info.id);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,60 +215,39 @@ pub struct CommitInfo {
     pub git_signed: bool,
 }
 
-pub fn commit(git: &Git, oid: &str) -> charter_sync::Result<CommitInfo> {
-    let raw = git.run(&["cat-file", "commit", oid], b"")?;
-    let text = String::from_utf8_lossy(&raw);
-    let (head, message) = text.split_once("\n\n").unwrap_or((&text, ""));
-    let field = |k: &str| -> Vec<String> {
-        head.lines()
-            .filter_map(|l| l.strip_prefix(k)?.strip_prefix(' '))
-            .map(str::to_owned)
-            .collect()
-    };
-    let person = |k: &str| field(k).into_iter().next().unwrap_or_default();
-    let (author, time) = split_person(&person("author"));
-    Ok(CommitInfo {
-        oid: oid.to_owned(),
-        parents: field("parent"),
-        author,
-        author_time: time,
-        committer: split_person(&person("committer")).0,
-        message: message.to_owned(),
-        git_signed: !field("gpgsig").is_empty(),
+/// `Name <mail>`.
+fn person(s: &gix::actor::SignatureRef<'_>) -> String {
+    format!(
+        "{} <{}>",
+        s.name.trim().to_str_lossy(),
+        s.email.to_str_lossy()
+    )
+}
+
+pub fn commit(git: &Git, oid_hex: &str) -> Option<CommitInfo> {
+    let c = git.find_commit(oid(oid_hex)?).ok()?;
+    let d = c.decode().ok()?;
+    let (author, committer) = (d.author().ok()?, d.committer().ok()?);
+    Some(CommitInfo {
+        oid: c.id.to_string(),
+        parents: c.parent_ids().map(|p| p.to_string()).collect(),
+        author: person(&author),
+        author_time: author.seconds(),
+        committer: person(&committer),
+        message: d.message.to_str_lossy().into_owned(),
+        git_signed: d.extra_headers().pgp_signature().is_some(),
     })
-}
-
-/// `Name <mail> 1700000000 +0000` to (`Name <mail>`, time).
-fn split_person(p: &str) -> (String, i64) {
-    let mut it = p.rsplitn(3, ' ');
-    let (_tz, time, who) = (it.next(), it.next(), it.next());
-    match (who, time.and_then(|t| t.parse().ok())) {
-        (Some(w), Some(t)) => (w.to_owned(), t),
-        _ => (p.to_owned(), 0),
-    }
-}
-
-/// Unified diff of `oid` against its first parent (or the empty tree for a root commit).
-pub fn diff(git: &Git, oid: &str) -> charter_sync::Result<String> {
-    let out = git.run(
-        &[
-            "diff-tree",
-            "-p",
-            "-M",
-            "--root",
-            "--no-color",
-            "--no-commit-id",
-            "--diff-merges=first-parent",
-            oid,
-        ],
-        b"",
-    )?;
-    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Whether `a` is an ancestor of (or equal to) `b`.
 pub fn is_ancestor(git: &Git, a: &str, b: &str) -> bool {
-    git.run(&["merge-base", "--is-ancestor", a, b], b"").is_ok()
+    let (Some(a), Some(b)) = (oid(a), oid(b)) else {
+        return false;
+    };
+    git.merge_base(a, b)
+        .ok()
+        .flatten()
+        .is_some_and(|m| m.detach() == a)
 }
 
 #[cfg(test)]
@@ -237,9 +262,5 @@ mod tests {
             assert_eq!(clean_path(bad), None, "{bad:?}");
         }
         assert!(is_oid(&"a".repeat(40)) && !is_oid(&"A".repeat(40)) && !is_oid("--all"));
-        assert_eq!(
-            split_person("A B <a@b> 1700000000 +0200"),
-            ("A B <a@b>".into(), 1_700_000_000)
-        );
     }
 }

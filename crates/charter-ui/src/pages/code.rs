@@ -103,13 +103,10 @@ fn tree_page(app: &App, theme: &Theme, r: &Repo, rev: &str, path: &str) -> Respo
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    if gitread::kind_at(&r.git, &at.commit, &at.path).as_deref() != Some("tree") {
+    let Some(entries) = gitread::tree(&r.git, &at.commit, &at.path) else {
         return error_page(app, theme, StatusCode::NOT_FOUND, "No such directory.");
-    }
-    let entries = gitread::tree(&r.git, &at.commit, &at.path).unwrap_or_default();
-    let last = gitread::log(&r.git, &at.commit, 0, 1, Some(&at.path))
-        .ok()
-        .and_then(|v| v.into_iter().next());
+    };
+    let last = gitread::last_change(&r.git, &at.commit, &at.path);
     let (mut l, head) = frame(app, theme, r, "code", "Tree");
     crumbs(&mut l, r, &at);
     html(&Tree {
@@ -173,7 +170,7 @@ fn blob_page(app: &App, theme: &Theme, r: &Repo, rev: &str, path: &str, all: boo
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    let Ok(bytes) = gitread::blob(&r.git, &at.commit, &at.path) else {
+    let Some(bytes) = gitread::blob(&r.git, &at.commit, &at.path) else {
         return error_page(app, theme, StatusCode::NOT_FOUND, "No such file.");
     };
     let binary = is_binary(&bytes) || bytes.len() > MAX_VIEW_BYTES;
@@ -253,8 +250,8 @@ pub async fn raw(
             Err(e) => return e,
         };
         match gitread::blob(&r.git, &at.commit, &at.path) {
-            Ok(b) => raw_response(at.path.rsplit('/').next().unwrap_or(""), b),
-            Err(_) => error_page(&app, &theme, StatusCode::NOT_FOUND, "No such file."),
+            Some(b) => raw_response(at.path.rsplit('/').next().unwrap_or(""), b),
+            None => error_page(&app, &theme, StatusCode::NOT_FOUND, "No such file."),
         }
     })
     .await

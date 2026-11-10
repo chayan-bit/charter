@@ -115,13 +115,13 @@ async fn commit_shows_message_anchors_and_collapsible_diff() {
     let f = fixture();
     let h = page(&format!("/r/{}/commit/{}", f.hex, f.main)).await;
     assert!(h.contains("fix: &#60;smaller&#62; main"));
-    assert!(h.contains("<details class=\"file\" open") && h.contains("src/main.rs"));
+    assert!(h.contains("<details class=\"file box\" open") && h.contains("src/main.rs"));
     assert!(
         h.contains("class=\"a\"") && h.contains("class=\"d\""),
         "added and removed lines"
     );
     assert!(
-        h.contains("via <code>refs/heads/main</code>"),
+        h.contains("Reachable from") && h.contains("<code>refs/heads/main</code>"),
         "anchored by alice's head"
     );
     assert!(h.contains("unsigned"), "no git signature");
@@ -134,10 +134,10 @@ async fn issues_fold_into_a_closed_thread_with_sanitized_bodies() {
     let f = fixture();
     let h = page(&format!("/r/{}/issues", f.hex)).await;
     assert!(h.contains("Crash on &#60;b&#62;start&#60;/b&#62;") && h.contains("s-closed"));
-    assert!(h.contains("1 comments"));
+    assert!(h.contains("1 comment"));
     let h = page(&format!("/r/{}/issues/{}", f.hex, f.issue)).await;
     assert!(h.contains("<strong>crashes</strong>") && !h.contains("<script>x()"));
-    assert!(h.contains("seen it too") && h.contains("<b>close</b>"));
+    assert!(h.contains("seen it too") && h.contains("<b>closed</b>"));
     assert!(
         h.contains("bounty") && h.contains("reason"),
         "other payload fields"
@@ -153,7 +153,7 @@ async fn patches_show_revisions_and_reviews() {
     assert!(h.contains("Fix the crash") && h.contains("s-open"));
     let h = page(&format!("/r/{}/patches/{}", f.hex, f.patch)).await;
     assert!(h.contains("rev 1") && h.contains(short(&f.main)));
-    assert!(h.contains("Reviews") && h.contains("<b>approve</b>"));
+    assert!(h.contains("Reviews") && h.contains("<b>approved</b>"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -212,4 +212,50 @@ async fn a_cached_repo_before_its_first_ui_sync_is_pending() {
     );
     let r = send(app_for(d.path()), req(&format!("/r/{hex}/issues"))).await;
     assert!(r.text().contains("No issues among the verified ops."));
+}
+
+/// Regression for the repo-home p99 spike: a page never waits on the lock a sync round or
+/// push holds, and never sees a torn `view.json` or `cobs.json` while they are rewritten.
+#[tokio::test(flavor = "multi_thread")]
+async fn pages_render_while_a_round_holds_the_lock_and_rewrites_the_caches() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let f = fixture();
+    let held = f.alice.repo(&f.rid);
+    let dir = held.dir.clone();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let writer = std::thread::spawn(move || {
+        let view: charter_ui::cache::RepoView = charter_ui::cache::read(&dir.join("view.json"))
+            .expect("read")
+            .expect("view");
+        let cobs: charter_ui::cache::Cobs = charter_ui::cache::read(&dir.join("cobs.json"))
+            .expect("read")
+            .expect("cobs");
+        while !stop2.load(Ordering::Relaxed) {
+            charter_ui::cache::write(&dir.join("view.json"), &view).expect("view");
+            charter_ui::cache::write(&dir.join("cobs.json"), &cobs).expect("cobs");
+        }
+    });
+    let app = app();
+    let paths = [
+        (format!("/r/{}", f.hex), "<h1>Demo</h1>"),
+        (format!("/r/{}/tree/main/src", f.hex), "deep/"),
+        (format!("/r/{}/blob/main/src/main.rs", f.hex), "main"),
+        (format!("/r/{}/commit/{}", f.hex, f.main), "smaller"),
+        (format!("/r/{}/issues", f.hex), "Crash on"),
+    ];
+    for _ in 0..10 {
+        for (p, want) in &paths {
+            let call = send(app.clone(), req(p));
+            let r = tokio::time::timeout(std::time::Duration::from_secs(10), call)
+                .await
+                .expect("a page must not wait on the repo lock");
+            assert_eq!(r.status, StatusCode::OK, "{p}");
+            let t = r.text();
+            assert!(t.contains(want) && t.contains("vp-verified"), "{p}: {t}");
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().expect("writer");
+    drop(held);
 }
