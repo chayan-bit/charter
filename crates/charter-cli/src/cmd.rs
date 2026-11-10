@@ -61,7 +61,7 @@ pub enum Cmd {
     /// Zero-knowledge receipts for sealed patches (offline).
     #[command(subcommand)]
     Zk(crate::zk::ZkCmd),
-    /// Local read-only web UI over the repos in `$CHARTER_HOME`; prints one URL to open.
+    /// Local web UI over the repos in `$CHARTER_HOME`: reads what the last sync verified, writes only after a confirm dialog; prints one URL to open.
     Ui(UiArgs),
 }
 
