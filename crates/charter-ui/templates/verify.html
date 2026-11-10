@@ -6,11 +6,11 @@
 <tr><th>Delegates</th><td>{% for d in r.verify.delegates %}<code title="{{ d }}" data-copy="{{ d }}">{{ r.verify.short(d.as_str()) }}</code> {% endfor %}threshold {{ r.verify.threshold }}</td></tr>
 {% endif %}
 {% for p in r.verify.peers %}
-<tr><th>{% if p.delegate %}Delegate{% else %}Peer{% endif %} <code title="{{ p.nid }}">{{ r.verify.short(p.nid.as_str()) }}</code></th><td>{% if let Some((seq, h, block, key)) = p.head %}head seq {{ seq }}, anchor <code title="{{ h }}">{{ r.verify.short(h.as_str()) }}</code> at block <code>{{ block }}</code>, entity <code title="{{ key }}">{{ r.verify.short(key.as_str()) }}</code>; <span class="ok">ML-DSA-65 + Ed25519 valid</span>{% else %}<span class="dim">no anchored head</span>{% endif %}</td></tr>
+<tr><th>{% if p.delegate %}Delegate{% else %}Peer{% endif %} <code title="{{ p.nid }}">{{ r.verify.short(p.nid.as_str()) }}</code></th><td>{% if let Some((seq, h, block, key)) = p.head %}head seq {{ seq }}, body <code title="{{ h }}">{{ r.verify.short(h.as_str()) }}</code> at block <code>{{ block }}</code>, entity <code title="{{ key }}">{{ r.verify.short(key.as_str()) }}</code>; <span class="ok">ML-DSA-65 + Ed25519 valid</span>{% else %}<span class="dim">no anchored head</span>{% endif %}</td></tr>
 {% endfor %}
 {% for e in r.verify.equivocations %}
 <tr class="bad"><th>Equivocation</th><td>{{ e.kind }} of peer <code title="{{ e.nid }}">{{ r.verify.short(e.nid.as_str()) }}</code> at seq {{ e.seq }}: entity <code title="{{ e.keys[0] }}">{{ r.verify.short(e.keys[0].as_str()) }}</code> vs <code title="{{ e.keys[1] }}">{{ r.verify.short(e.keys[1].as_str()) }}</code></td></tr>
 {% endfor %}
-<tr><th>Last sync</th><td>{{ r.verify.synced }}{% if let Some(p) = r.verify.pause %}; {{ p }}{% endif %}{% if r.verify.head_block > 0 %}, chain head block <code>{{ r.verify.head_block }}</code>{% endif %}{% if r.verify.busy > 0 %}; {{ r.verify.busy }} rounds skipped while a push held the lock{% endif %}{% if let Some(e) = r.verify.error %}<br><span class="bad">last round failed: {{ e }}</span>{% endif %}</td></tr>
+<tr><th>Last sync</th><td>{{ r.verify.synced }}{% if let Some(p) = r.verify.pause %}; {{ p }}{% endif %}{% if r.verify.head_block > 0 %}, chain head block <code>{{ r.verify.head_block }}</code>{% endif %}{% if r.verify.busy > 0 %}; {{ r.verify.busy }} round{% if r.verify.busy != 1 %}s{% endif %} skipped while a push held the lock{% endif %}{% if let Some(e) = r.verify.error %}<br><span class="bad">last round failed: {{ e }}</span>{% endif %}</td></tr>
 </table>
 </details>
