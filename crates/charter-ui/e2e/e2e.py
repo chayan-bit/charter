@@ -132,7 +132,7 @@ document.addEventListener('securitypolicyviolation',
   e => window.__csp.push(e.violatedDirective + ' ' + e.blockedURI), true);
 """
 FOCUSABLES_JS = """() => {
-  const sel = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),' +
+  const sel = 'a[href]:not([tabindex="-1"]),button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),' +
     'textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])';
   const vis = e => { const r = e.getClientRects(); if (!r.length) return false;
     const s = getComputedStyle(e); return s.visibility === 'visible' && r[0].width > 0 && r[0].height > 0; };
@@ -156,6 +156,34 @@ OVERFLOW_JS = """() => {
   }
   off.sort((a, b) => b[0] - a[0]);
   return {sw: document.documentElement.scrollWidth, iw, off: off.slice(0, 4)};
+}"""
+LAYOUT_JS = """() => {
+  const q = s => document.querySelector(s), r = e => e && e.getBoundingClientRect();
+  const out = {};
+  const bar = q('.bar'), main = q('main'), br = r(bar), mr = r(main);
+  out.barH = Math.round(br.height);
+  out.barClipped = [...bar.children].filter(c => { const x = r(c);
+    return x.height && (x.top < br.top - 0.5 || x.bottom > br.bottom + 0.5); }).map(c => c.className || c.tagName);
+  const btns = [...bar.querySelectorAll('.btn')].filter(b => r(b).width);
+  out.left = [Math.round(r(q('.mark')).left), Math.round(mr.left + parseFloat(getComputedStyle(main).paddingLeft))];
+  out.right = btns.length ? [Math.round(r(btns[btns.length - 1]).right),
+    Math.round(mr.right - parseFloat(getComputedStyle(main).paddingRight))] : null;
+  const tabs = q('.tabs');
+  if (tabs) {
+    const links = [...tabs.querySelectorAll('a')].filter(a => r(a).width);
+    out.tabTops = [...new Set(links.map(a => Math.round(r(a).top)))];
+    out.tabScrollbar = tabs.offsetHeight - tabs.clientHeight;
+    out.repoBottom = Math.round(r(q('.repo')).bottom);
+    const vs = q('.vp > summary'); out.vpH = vs ? Math.round(r(vs).height) : null;
+    out.vpChev = vs ? getComputedStyle(vs, '::after').content !== 'none' : null;
+  }
+  out.gutters = [...document.querySelectorAll('.diff')].map(t => {
+    const row = t.querySelector('tr:not(.hunk)'); const lc = row && row.querySelector('.lc');
+    return row ? [Math.round(r(lc).left - r(t).left), Math.round(r(row.querySelector('.ln')).width)] : null; });
+  out.imgs = [...document.querySelectorAll('.readme img')].map(i => [i.getAttribute('src'), i.naturalWidth]);
+  out.links = [...document.querySelectorAll('.readme a')].map(a => a.getAttribute('href'));
+  out.sticky = [...document.querySelectorAll('td.ln')].slice(0, 1).map(td => getComputedStyle(td).position);
+  return out;
 }"""
 DOM_SAFETY_JS = """() => ({
   scripts: [...document.querySelectorAll('main script, article script')].length,
@@ -225,7 +253,7 @@ def shot(page, name, theme, vp, kind="", full=True, clip_h=None):
     return fn
 
 
-def visit_all(browser, pages, axe_src, cookie):
+def visit_all(browser, pages, axe_src, cookie, rid_hex):
     for theme in THEMES:
         for vp, (w, h) in VIEWPORTS.items():
             ctx = browser.new_context(
@@ -260,6 +288,7 @@ def visit_all(browser, pages, axe_src, cookie):
                 safe = page.evaluate(DOM_SAFETY_JS)
                 rec("DOM has no script/handlers/javascript: urls from content", scope,
                     not safe["scripts"] and not safe["handlers"] and not safe["pwned"] and not safe["jsurls"], json.dumps(safe))
+                layout_checks(page, name, scope, vp, rid_hex)
                 shot(page, name, theme, vp)
                 extra(page, name, theme, vp)
                 if vp == "desktop":
@@ -280,6 +309,30 @@ def visit_all(browser, pages, axe_src, cookie):
             ctx.close()
 
 
+def layout_checks(page, name, scope, vp, rid):
+    m = page.evaluate(LAYOUT_JS)
+    rec("top bar: nothing clipped, height sane", scope, not m["barClipped"] and m["barH"] <= (56 if vp == "phone" else 48),
+        f'height {m["barH"]}, clipped {m["barClipped"]}')
+    if vp == "desktop":
+        rec("top bar and content share left and right edges", scope,
+            m["left"][0] == m["left"][1] and (m["right"] is None or abs(m["right"][0] - m["right"][1]) <= 1), f'left {m["left"]}, right {m["right"]}')
+    if "tabTops" in m:
+        rec("repo tabs sit on one row, no scrollbar artifact", scope, len(m["tabTops"]) == 1 and m["tabScrollbar"] == 0,
+            f'rows at {m["tabTops"]}, scrollbar {m["tabScrollbar"]}px')
+        rec("verification summary is one line and shows a chevron", scope, m["vpH"] is not None and m["vpH"] <= 40 and m["vpChev"],
+            f'height {m["vpH"]}, chevron {m["vpChev"]}')
+        if vp == "phone":
+            rec("phone: content starts in the first 300 px", scope, m["repoBottom"] <= 300, f'repo header ends at y={m["repoBottom"]}')
+    if name == "repo":
+        rec("README images resolve to /raw/ and load", scope,
+            any(f"/r/{rid}/raw/main/docs/diagram.png" == s and w > 0 for s, w in m["imgs"]), str(m["imgs"]))
+        rec("README relative link resolves to /blob/", scope, f"/r/{rid}/blob/main/docs/guide.md" in m["links"], str(m["links"]))
+    if name.startswith("commit") and len(m["gutters"]) > 1:
+        rec("diff gutters and code start align across files", scope, len({tuple(g) for g in m["gutters"] if g}) == 1, str(m["gutters"]))
+    if name.startswith("blob") and name != "blob-wide":
+        rec("blob line numbers stay put while code scrolls", scope, m["sticky"] == ["sticky"], str(m["sticky"]))
+
+
 def extra(page, name, theme, vp):
     """Extra states worth a screenshot."""
     if name == "blob-long":
@@ -295,6 +348,51 @@ def extra(page, name, theme, vp):
         page.wait_for_timeout(100)
         shot(page, name, theme, vp, "help-dialog", full=False)
         page.keyboard.press("Escape")
+        scope = f"{name}/{theme}/{vp}"
+        rec("help dialog closes on Escape", scope, not page.evaluate("document.getElementById('help').open"), "")
+        page.keyboard.press("Shift+?")
+        page.wait_for_timeout(50)
+        opened = page.evaluate("document.getElementById('help').open")
+        rec("? opens the help dialog", scope, opened, "")
+        page.keyboard.press("Escape")
+        theme_toggle(page, scope, name, theme, vp)
+    if name in ("tree", "log", "issues"):
+        cursor_check(page, name, theme, vp)
+
+
+def theme_toggle(page, scope, name, theme, vp):
+    """system -> light -> dark -> system, each step with its attribute, cookie and a screenshot."""
+    seen = []
+    for _ in range(3):
+        page.locator("[data-theme-toggle]").click()
+        page.wait_for_timeout(60)
+        seen.append(page.evaluate("document.documentElement.getAttribute('data-theme')"))
+        ck = page.evaluate("document.cookie")
+        seen.append("cookie" if "theme=" in ck else "nocookie")
+        if seen[-2] in ("light", "dark"):
+            shot(page, name, theme, vp, f"toggled-{seen[-2]}", full=False)
+    rec("theme toggle cycles light, dark, system and sets the cookie", scope,
+        seen == ["light", "cookie", "dark", "cookie", None, "cookie"], str(seen))
+    page.evaluate("document.cookie = 'theme=; Path=/; Max-Age=0'")
+
+
+def cursor_check(page, name, theme, vp):
+    """j/k move the row cursor (.cur) and keep it in view."""
+    scope = f"{name}/{theme}/{vp}"
+    rows = page.locator("[data-list] [data-row]")
+    n = rows.count()
+    if n < 2:
+        return
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    for k in ("j", "j", "j", "k"):
+        page.keyboard.press(k)
+    cur = page.evaluate("[...document.querySelectorAll('[data-list] [data-row]')].map((r, i) => r.classList.contains('cur') ? i : -1).filter(i => i >= 0)")
+    rec("j/k move the row cursor", scope, cur == [min(1, n - 1)] if n > 2 else cur == [0], f"cursor at {cur} of {n} rows")
+    bg = page.evaluate("(() => { const r = document.querySelector('[data-list] .cur'); const s = getComputedStyle(r);"
+                       " return s.backgroundColor + ' ' + s.boxShadow; })()")
+    rec("row cursor is visibly tinted with the accent bar", scope, "rgba(0, 0, 0, 0)" not in bg.split(" rgb")[0] and "inset" in bg, bg)
+    shot(page, name, theme, vp, "cursor", full=False)
+    page.evaluate("document.querySelector('[data-list] .cur').classList.remove('cur')")
 
 
 def nojs(browser, pages):
@@ -414,7 +512,7 @@ def main():
         except Exception:  # nix-provided browsers, if the system Chrome is missing
             browser = p.chromium.launch(headless=True)
         nojs(browser, pages)
-        visit_all(browser, pages, axe_src, cookie)
+        visit_all(browser, pages, axe_src, cookie, rid)
         browser.close()
     write_reports(first)
     fails = [c for c in CHECKS if c["status"] == "fail"]

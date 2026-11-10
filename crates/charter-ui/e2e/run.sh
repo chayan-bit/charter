@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # E2E + accessibility harness for `chart ui`.
 #   ./run.sh                 build, make a fixture, start `chart ui`, run e2e.py, stop the server
-# Env: NO_BUILD=1 reuse target/debug; KEEP=1 keep the temp fixture dir; E2E_WORK=<dir> use (and keep) a fixture dir;
+# Env: E2E_OUT=<dir> write screenshots and reports there (default e2e/out); NO_BUILD=1 reuse target/debug; KEEP=1 keep the temp fixture dir; E2E_WORK=<dir> use (and keep) a fixture dir;
 #      REUSE_FIXTURE=1 with E2E_WORK skip fixture creation; CHART_BIN_DIR=<dir> binaries to use.
 set -euo pipefail
 
@@ -37,7 +37,8 @@ source "$work/fx/env.sh"
 export PATH="$CHART_BIN_DIR:$PATH"
 
 now() { if [[ -n "${EPOCHREALTIME:-}" ]]; then echo "${EPOCHREALTIME/,/.}"; else python3 -c 'import time; print(time.time())'; fi; }
-mkdir -p "$here/out"; rm -f "$here/out/first-page.json"
+out="${E2E_OUT:-$here/out}"
+mkdir -p "$out"; rm -f "$out/first-page.json"
 t0="$(now)"
 chart ui "$RID" >"$work/server.out" 2>"$work/server.err" &
 server_pid=$!
@@ -50,9 +51,9 @@ url="$(head -n1 "$work/server.out")"
 [[ "$url" == http://127.0.0.1:*/\?token=* ]] || { echo "unexpected URL line: $url"; exit 1; }
 
 status=0
-export E2E_URL="$url" E2E_T0="$t0" E2E_OUT="$here/out" CHART_BIN_DIR
+export E2E_URL="$url" E2E_T0="$t0" E2E_OUT="$out" CHART_BIN_DIR
 python3 "$here/e2e.py" first-page || true   # time to the first verified repo page, before any browser starts
-E2E_URL="$url" E2E_T0="$t0" E2E_OUT="$here/out" E2E_WORK="$work" \
+E2E_URL="$url" E2E_T0="$t0" E2E_OUT="$out" E2E_WORK="$work" \
   python3 "$here/e2e.py" || status=$?
 echo "server stderr (tail):"; tail -n 5 "$work/server.err" || true
 exit "$status"

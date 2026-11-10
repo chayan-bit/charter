@@ -57,10 +57,14 @@ printf 'fn main() {\n    println!("<hi> & \\"bye\\"");\n}\n' > "$work/src/main.r
 printf 'pub fn add(a: i32, b: i32) -> i32 { a + b }\n' > "$work/src/lib.rs"
 printf 'deep file\n' > "$work/src/deep/er/est/leaf.txt"
 printf '# Guide\n\nSome docs.\n' > "$work/docs/guide.md"
-# 1x1 PNG, referenced from the README with a relative path.
-base64 -d > "$work/docs/diagram.png" <<'B64'
-iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==
-B64
+# A 480x160 gradient PNG (stdlib only), referenced from the README with a relative path.
+python3 - "$work/docs/diagram.png" <<'PY'
+import struct, sys, zlib
+w, h = 480, 160
+rows = b"".join(b"\0" + bytes(v for x in range(w) for v in (40 + x * 200 // w, 90 + y * 120 // h, 200 - x * 100 // w)) for y in range(h))
+def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+open(sys.argv[1], "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+PY
 g add -A && g commit -q -m "feat: initial import" -m "The first commit, with a body paragraph that explains why."
 
 # Commit 2: a long file (3,000+ lines, past the 2,000-line highlight cap).
