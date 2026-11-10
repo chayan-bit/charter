@@ -724,7 +724,7 @@ def write_reports(first):
         b = s.get("browser", {})
         L.append(f'| {pg} | {s.get("p50_ms")} | {s.get("max_ms")} | {s.get("html_bytes")} | {s.get("html_css_gz_bytes")} | '
                  f'{b.get("ttfb")} | {b.get("load")} |')
-    (OUT / "report.md").write_text("\n".join(L).replace("—", "-") + "\n")
+    (OUT / "report.md").write_text("\n".join(L).replace("\u2014", "-") + "\n")
     print(f'pass {summary["pass"]}  warn {summary["warn"]}  fail {summary["fail"]}  -> {OUT}/report.md')
 
 
