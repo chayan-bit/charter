@@ -64,6 +64,7 @@ An error, including running out of operations or a payload that does not convert
 `head` is the new oid; Rhai reserves the word `new`, so the key is `head` even though the Rust and JSON field is `new`.
 `ff` is true when the ref has no accepted head, when `head` is empty (a delete) or equals the accepted head, or when the accepted head is a git ancestor of `head`.
 Ancestry comes from a host callback (`Program::fold_with`); when the host cannot tell (objects missing, or `fold` and `fold_from`, which pass no callback), `ff` falls back to whether the pusher's claimed `old` equals the accepted head.
+For a push from a format v2 head (`docs/p5/head-model.md` section 8) the host never uses ancestry: `ff` is whether the accepted head equals the `base` the pusher signed for that ref (the program's accepted head or the merged value its push fast-forwards), so a fresh clone missing old objects and a long-lived client always reach the same verdict.
 It returns `()` to allow a fast-forward, `true` to allow the push even if it is not a fast-forward, `false` or a string to reject, where the string is the reason.
 An error, including running out of operations, rejects the push (fail closed).
 Without `check_push` every fast-forward is allowed.

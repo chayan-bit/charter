@@ -5,6 +5,9 @@ Date: 2026-11-06.
 Inputs: `docs/p0/README.md`, `docs/p0/arkiv-limits.md`, `docs/p0/heartwood-reuse.md`, `docs/p0/openmls-xwing.md`, `spike/arkiv-measure/`, Arkiv node source at `2a3526dd861bf01c284d232d8ea4f880e24fd526` (v1.0.1), heartwood at `e6fe5207`.
 Labels as in P0: MEASURED (observed on Rabdi), SOURCE-VERIFIED (read in code), DERIVED (computed), ASSUMED (must be checked by a P1 test).
 
+Since v0.4.0 git data moves in format v2 (`docs/p5/head-model.md`): per-device mutable heads, a kept-alive snapshot and short-lived pieces read back from block history.
+This spec stays the reference for identity, binds, completeness, collaboration ops and the v1 anchors that v0.4.0 still reads; sections 3.6, 4.2 and 4.3 describe format v1, which v0.4.0 no longer writes.
+
 ## 0. Scope, gate and fixed decisions
 
 P1 delivers a `git-remote-arkiv` helper, a `chart` CLI and a Rust client library.
@@ -378,6 +381,8 @@ Key rotation:
 
 ### 3.6 Anchor chain and acceptance
 
+Format v1; a peer with a device delegation (`ag.v = 2` anchor, head-model 4.1) reads its refs from its device heads instead once one has landed.
+
 An anchor entity `e` is valid for `(R, N)` if and only if all of these hold:
 
 1. `ag.kind = 'anchor'`, `ag.v = 1`, `ag.body` decodes as a canonical envelope with `v = 1`, `kind = 6`, `enc = 0`, `signer = N`.
@@ -499,6 +504,8 @@ Protocol exchange (stdin from git, stdout to git, diagnostics on stderr):
 
 ### 4.2 Push flow
 
+Format v1, replaced in v0.4.0 by head-model section 7.
+
 Preconditions: the repo lock is held, `list for-push` has just run the fetch sync (so the cache, the identity head and the signer's own anchor head are current and verified), and the signer has a valid bind for the repo or this push creates it.
 
 1. Stage objects: `git push --no-verify <cache>/git <src>:refs/arkiv/staging/<nid>/<dst>` for each update; deletions stage nothing.
@@ -530,6 +537,8 @@ Preconditions: the repo lock is held, `list for-push` has just run the fetch syn
 Data is always written before the anchor, so an anchor never points at data that did not land, and a crash before step 13 leaves only orphaned refs, manifests and chunks, which expire after 30 days unextended (no delete, since deletion refunds nothing).
 
 ### 4.3 Fetch and clone flow
+
+Format v1 peers; v2 peers follow head-model section 5.5.
 
 `git clone arkiv://<rid>` invokes the helper with an empty cache; `git fetch` reuses the cache.
 

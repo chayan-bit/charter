@@ -48,8 +48,9 @@ DeviceBody = {
 ```
 
 - Signed by the identity key (envelope `signer = N`, envelope kind code 11, signature context `arkiv-git/device/v1`); the device nid is `H("nid", u16be(alg) || pk)`.
-- Stored as `ag.kind = 'anchor'` with `ag.v = 2`, plus `ag.rid`, `ag.nid = N`, `ag.h = H("device", envelope)` and `ag.seq = 0`, created by the identity's control address `C_N` with the maximum lifetime and kept alive like every control-plane entity.
+- Stored as `ag.kind = 'anchor'` with `ag.v = 2`, plus `ag.rid`, `ag.nid = N`, `ag.h = H("device", envelope)` and `ag.seq = 2^64 - 1`, created by the identity's control address `C_N` with the maximum lifetime and kept alive like every control-plane entity.
 - `ag.kind = 'anchor'` with `ag.v = 2` is deliberate: an unmodified v0.3.0 client reads every anchor of a tracked control address, meets an entity layout version it does not know, and stops with `E_UNSUPPORTED_VERSION` instead of showing stale refs (section 10).
+- `ag.seq` is the maximum because v0.3.0 reads anchors incrementally with `ag.seq >= mark`: any smaller value would drop out of a long-lived v0.3.0 clone's read once its mark passed it, and that clone would keep showing its old refs.
 - Because `C_N` creates it, deleting it or letting it expire trips N's P1 completeness check (`E_CONTROL_NOT_LIVE`), so a device cannot be hidden.
 - A device delegation is valid if it opens with layout version 2, its signature verifies under N's key, `body.rid = R`, and its creator is one of N's bind control addresses under the P1 creator rule.
 - A device is not revocable on its own: it holds the same identity seed as every other device, so a lost device is a lost identity key, removed by an identity revision exactly as in P1 section 3.5.
@@ -64,21 +65,29 @@ HeadBody = {
   4: bstr .size 32,          ; id_head = h of the identity revision the writer verified
   5: uint,                   ; at = latest block seen just before signing
   6: uint,                   ; pieces_created = entityNonce(C_d) after this tx, minus 1
-  7: [* RefEntry],           ; the identity's full ref list as this device wrote it
+  7: [* RefEntry],           ; the refs this device wrote (its own writes, section 5.3)
   8: [* bstr .size 32],      ; snapshot: h of each snapshot manifest
   9: [* Pack],               ; packs since the snapshot, in apply order
   10: bstr .size 32,         ; prev_tx = tx that carried this device's previous body, zero at seq 0
+  11: uint,                  ; object format: 1 = sha1 (20 B oids), 2 = sha256 (32 B oids)
 }
-RefEntry = [name: tstr, oid: bstr, counter: uint, stamp: uint]   ; empty oid = tombstone
+RefEntry = [name: tstr, oid: bstr, counter: uint, stamp: uint, base: bstr]   ; empty oid = tombstone
 Pack = [pack_id: bstr .size 32, pieces: [* [tx: bstr .size 32, sha256: bstr .size 32]]]   ; zero tx = this tx
 ```
 
 - Signed by the device key (envelope `signer = d`, envelope kind code 12, context `arkiv-git/head/v1`).
 - Stored with `ag.kind = 'head'`, `ag.v = 1`, `ag.rid`, `ag.nid = N`, `ag.dev = d`, `ag.h = H("head", envelope)`, created once by `C_d` with flags `permissionlessExtension` only (not read-only) and the maximum lifetime, then patched by every push (`ag.body`, `ag.h`).
 - Anyone may extend it (keepalive, delegates, mirrors); extends do not change what a reader trusts, because nothing reads `$updatedAt`.
-- Ref names follow `refs` (P1 2.2); entries are strictly ascending by name; `counter >= 1`; `stamp = 0` means "the block this body landed in", otherwise it is a block number.
+- Ref names follow `refs` (P1 2.2); entries are strictly ascending by name; `counter >= 1`; every non-empty `oid` and `base` has the length field 11 names.
+- `stamp = 0` means "the block this body landed in"; a nonzero stamp is the landing block of an earlier body of the same device, copied forward by the writer, and must be at most `at`, so it always lies before this body's own landing.
+- Stamps are a claim of the device, not checked against block history: every reader and the program fold use the same stamps, so they cannot make clients disagree, and a device that lies about them can only reorder ties among its own identity's writes, which its key already allows.
+- `base` is the merged oid this entry fast-forwards, signed by the writer, or empty when the entry creates the ref, deletes it or is not a fast-forward (section 8).
+- The head body has the byte cap of every signed body (`max_body_len`: 65,536 B minus the 3,417 B envelope, so 62,119 B), which its refs and piece list share.
+  With sha1 oids and 20-byte names an entry is about 60 B (about 81 B for an entry updated by this body, which carries a base) and a piece about 70 B, so one device can list about 550 refs next to a full 256-piece list and about 900 with few pieces (DERIVED); the v1 refs entity held about 1,100 under the same cap.
+  A push past it fails with `E_REFS_TOO_LARGE` and writes nothing; moving an oversized ref list into a piece is not implemented (section 11).
+- The writer sends a pack inline only when an upper bound of the body plus the 16 KiB of inline bytes fits one transaction (131,030 B); otherwise the pack goes as bulk pieces, so a large head never makes the head transaction too big.
 - `pack_id = SHA-256(pack bytes)`; a pack is the concatenation of its pieces in order; each piece is at most 65,536 B.
-- Body size (DERIVED): about 200 B of fixed fields, about 55 B per ref, 34 B per snapshot manifest, about 70 B per piece, plus the 3,417 B envelope (44 B framing and the 3,373 B signature); a small repo's head is about 3.8 KiB.
+- Body size (DERIVED): about 200 B of fixed fields, about 55 B per ref (about 77 B with a base), 34 B per snapshot manifest, about 70 B per piece, plus the 3,417 B envelope (44 B framing and the 3,373 B signature); a small repo's head is about 3.8 KiB.
 - The head is not padded: a growing body pays storage for the added bytes over its remaining lifetime (about 6,500 gas for 64 B with 170 days left, DERIVED), which costs less than shipping zero padding on every push (3.8).
 
 ### 4.3 Pieces (`piece`)
@@ -90,18 +99,23 @@ Pack = [pack_id: bstr .size 32, pieces: [* [tx: bstr .size 32, sha256: bstr .siz
 
 ### 4.4 Snapshot
 
-- A snapshot is the self-contained pack (or packs, split at 100 MiB) of every object reachable from the live refs of the new head, written with today's `manifest` and `chunk` entities from `B_d`, signed by the device key, 30-day lifetime, kept alive by keepalive.
+- A snapshot is the self-contained pack (or packs, split at 100 MiB) of every object reachable from every live ref of the identity's merged view after this push (all devices, not only this device's own writes), written with today's `manifest` and `chunk` entities from `B_d`, signed by the device key, 30-day lifetime, kept alive by keepalive.
 - The head names its snapshot manifests by `h`; superseded snapshots are simply not extended any more and expire.
 - A device writes a fresh snapshot when the identity has no snapshot yet in this repo (a new repo or a migration), when the piece bytes since its last snapshot plus this push would exceed `max(1 MiB, 25 percent of the snapshot)`, when this would be its 64th push since the snapshot, or when the pieces list would exceed 256 entries; otherwise the push goes as pieces.
 - On a snapshot push the push's own objects are in the snapshot, so it carries only the marker piece.
+- Keepalive extends the snapshot manifests and chunks named by every accepted head of every peer it follows, so a device that stops pushing never lets the objects its head names expire while another device still relies on them.
+- Objects another device's snapshot covered can still vanish when that device refreshes onto a smaller set; a clone therefore downloads every listed pack of every accepted head and skips only packs that no live ref of the merged view reaches (they belong to refs deleted since).
 
 ## 5. Reading
 
 ### 5.1 Discovery, one round of queries
 
 Per synced peer N: the P1 peer document and bind chain, the anchor query (which now returns v1 anchors and device delegations, split by `ag.v`), and `ag.kind = 'head' AND ag.rid = R AND ag.nid = N`.
-A peer with at least one valid device delegation is a v2 peer: its refs come only from its device heads, and its v1 anchors only count in its P1 completeness check.
-A peer without one is read exactly as in P1.
+A peer with at least one valid device delegation is a v2 peer.
+Once at least one of its devices has an accepted head, its refs come only from its device heads, and its v1 anchors only count in its P1 completeness check.
+A v2 peer whose devices have no accepted head yet (a half-done migration: the delegation landed, the head did not) keeps being read from its v1 anchor chain; an empty merge is never taken as "every ref deleted".
+A peer without a delegation is read exactly as in P1.
+The head query also filters on `$creator = C_d`, so heads from other creators never reach the client.
 
 ### 5.2 Accepting one device head
 
@@ -118,6 +132,7 @@ More than one valid head from one `C_d` fails the rollback check, because only o
 
 ### 5.3 Merging device heads into the identity's refs
 
+- A head lists only the device's own writes: every ref it ever set or deleted, with tombstones dropped once no other device lists the name; refs another device wrote are never copied, so one device can never repeat a stale value of another's ref.
 - Every entry of every accepted head of N competes for its name.
 - Precedence, highest first: the larger `counter`; on a tie, the earlier landing block (`stamp`, with `stamp = 0` resolved to the block the body landed in); on a tie, the smaller device nid.
 - The winner of each name is N's value for that ref; a winning tombstone means the ref does not exist.
@@ -128,15 +143,17 @@ More than one valid head from one `C_d` fails the rollback check, because only o
 
 ### 5.4 Finding the transaction of a body
 
-The landing block of the current body and its tx hash are needed only to resolve `stamp = 0` in a tie and to read inline pieces after they expired.
-The reader fetches blocks `at + 1, at + 2, ...` with full transactions until it finds the transaction from `C_d` whose create or patch of this head carries exactly this `ag.body`; usually that is the first block.
+The landing block of the current body and its tx hash are needed only to resolve `stamp = 0` in a tie and to read inline pieces after they expired, so readers search only when a merge tie needs it or a piece is missing.
+The reader fetches blocks `at + 1, at + 2, ...` with full transactions until it finds the transaction from `C_d` with a successful receipt whose patch targets this head's entity key (or whose create made it, in its creation block) and carries exactly this `ag.h`; usually that is the first block.
+Because the search starts at `at + 1`, the v1 rule `at < landing` holds by construction.
 The search stops at `min($updatedAt, at + 64)`, and a body not found there is unreadable (`E_NOT_LIVE`).
 The writer keeps that window: it reads `at` immediately before signing, and if its receipt lands later than `at + 64` it sends a follow-up head at once that carries concrete stamps and tx hashes.
 The next body of the same device replaces every `stamp = 0` and every zero piece tx with the concrete block and tx hash, so only the current body ever needs the search.
 
 ### 5.5 Clone and fetch
 
-- Download, for every accepted head of every synced peer: the snapshot manifests (query by `ag.h`, creator `B_d`) and their chunks (P1 chunk paging, creator `B_d`), then the pieces of every pack not yet applied.
+- Download, for every accepted head of every synced peer: the snapshot manifests (query by `ag.h`, creator `B_d`) and their chunks (P1 chunk paging, creator `B_d`), then the pieces of every pack not yet applied that a live ref of the merged view reaches.
+- A pack no live ref reaches is skipped with a warning when it cannot be indexed (its bases may have expired with an older snapshot); it is fetched again on the next fetch, a known waste for repos that delete many refs.
 - Bulk pieces are fetched by `eth_getTransactionByHash`, inline pieces through the body transaction (section 5.4); every piece must match its sha256 in the signed head and every pack its `pack_id`.
 - Snapshots are indexed first, then packs with `index-pack --fix-thin`, retried in rounds while progress is made (thin packs only use bases of the same identity, section 7.2).
 - The connectivity check, the canonical-ref quorum and the program fold run on the merged refs exactly as on P1 refs.
@@ -150,7 +167,7 @@ Rules for the device control address `C_d`:
 - Every head transaction creates at least one entity from `C_d`.
 - `body.pieces_created = entityNonce(C_d) after the transaction - 1` (the 1 is the head itself).
 
-Check, run on every fetch for every device of every v2 peer: read `n1 = entityNonce(C_d)`, then the heads, then `n2 = entityNonce(C_d)`; retry up to 3 times while `n1 != n2`; then require `head.pieces_created + 1 = n1`, else fail closed with `E_CONTROL_NOT_LIVE`.
+Check, run on every fetch for every device of every v2 peer: read `n1 = entityNonce(C_d)`, then the heads, then `n2 = entityNonce(C_d)`; retry up to 4 times while `n1 != n2`; then require `head.pieces_created + 1 = n1`, else fail closed with `E_CONTROL_NOT_LIVE`.
 This is the coordinator's invariant `live control-plane entities of C_d + pieces_created = entityNonce(C_d)` with the head as the only control-plane entity of `C_d`, checked at the latest block, because Rabdi cannot answer for older blocks (section 2).
 
 Why a rollback is caught by a fresh client with no checkpoint and no local state:
@@ -179,11 +196,12 @@ Clients also keep the highest seq and body hash seen per device (section 5.2, ru
 
 1. `list for-push` runs the fetch sync, so the base is the verified merged view of the own identity, and git refuses a non-fast-forward against it exactly as today.
 2. Stage objects in the cache as today.
-3. New entries: the base winners, plus each update with `counter = base counter + 1` (or 1) and `stamp = 0`; every `stamp = 0` of the device's previous body becomes its landing block; tombstones are kept only while another device head of N still lists that name as a live ref with lower precedence.
-4. Pack: one thin pack of the objects reachable from the updated tips, excluding every object named by any head of the own identity; or a snapshot (section 4.4).
+3. New entries: the device's previous entries that still win their name (with `base` cleared, since it only matters to the body that made the update), plus each update with `counter = merged counter + 1` (or 1), `stamp = 0` and the signed `base`; every `stamp = 0` of the device's previous body becomes its landing block; tombstones are kept only while another device head of N still lists that name.
+4. Pack: one thin pack of the objects reachable from the updated tips, excluding every object reachable from the identity's merged live refs before the push; or a snapshot (section 4.4).
 5. First write of this device to this repo: one `C_N` transaction with the P1 `peer` and `bind_0` if missing and the device delegation, waited for.
 6. Snapshot chunks and manifests, or bulk pieces, from `B_d`, through the pipeline; every receipt must succeed.
-7. The head transaction from `C_d`: `[create head]` the first time, `[patch head]` afterwards, plus the inline pieces or the marker; `at` and `entityNonce(C_d)` are read just before signing.
+7. The head transaction from `C_d`: `[create head]` the first time, `[patch head]` afterwards, plus the inline pieces or the marker; `at` and `entityNonce(C_d)` are read just before signing, and only once the pending nonce of `C_d` equals its mined nonce (no earlier head tx of this device is still in flight).
+   Before sending, the writer records the outgoing head under `outgoing/head-pending`; the next push first waits until `C_d` is idle, so a crash after sending never lets a second body be built on the same `prev_tx`.
 8. Re-check (7.3), then commit locally: index the packs, move staging refs into the namespace, store the device mark and the tx hash and block of the body.
 
 A small push is one transaction and one block after the staging, whatever the repo's history.
@@ -202,14 +220,20 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
 
 - One device, two processes: serialised by the repo lock, as today.
 - Two devices: never the same head, so a blind write can never overwrite another device; conflicts are decided by section 5.3 and reported by 7.3.
-- A copied `CHARTER_HOME` (two machines sharing one device seed) is the only way to get two writers of one head; the later patch overwrites the earlier body, the earlier writer's re-check fails with `E_LOST_RACE`, and the rollback check stays sound because every patch adds creates.
+- A copied `CHARTER_HOME` (two machines sharing one device seed) is the only way to get two writers of one head.
+  Both sign from `C_d`, so two concurrent head transactions share one account nonce and only one can land; a later push reads the landed head first and continues its chain.
+  If a body still forks (two bodies naming the same `prev_tx`), readers follow only the current head back along `prev_tx`, so the discarded body never enters the merge or the fold, and the rollback check stays sound because every head transaction adds creates.
 
 ## 8. Programs, releases, CI
 
 - `charter-program` folds the same events as before: verified ops in Arkiv order, and every delegate's ref updates after the pin.
-- For a v2 delegate, the ref updates come from its head bodies: the reader walks each device's bodies back through `prev_tx` (block history) to the first body before the pin, orders all bodies of the identity by landing (block, tx index), merges after each body, and emits the differences as `RefUpdate`s; v1 anchors before the migration produce events exactly as today.
-- Entities and head bodies share one order: by block, entities first in query order, then head bodies by tx index; every client computes the same order, so every client folds the same state.
-- Fetched bodies are cached under the repo directory, so each fetch walks only the bodies it has not seen.
+- For a v2 delegate, the ref updates come from its head bodies: the reader walks each device's bodies back through `prev_tx` (block history) to the first body that landed before the pin's effective block, merges all bodies of the identity per landing block with the rule of section 5.3 (bodies of one block together, exactly as the head merge and the writer's re-check see them), and emits the differences as `RefUpdate`s; v1 anchors before the migration produce events exactly as today.
+- Each step of the walk must carry a body of the same device whose seq is one lower and which landed in a strictly earlier block, with a successful receipt; otherwise the fold fails closed.
+- Entities and head bodies share one order: by block, the block's entities first in query order, then the merge of that block's head bodies; every client computes the same order, so every client folds the same state.
+- For a v2 update, `RefUpdate.old` is the signed `base` of the winning entry, and `ff` is true exactly when the identity's previously accepted value equals that base; the fold never looks at git ancestry for a v2 update, so a fresh clone missing old objects and a long-lived client reach the same verdict.
+- Fetched bodies are cached under the repo directory (`git/arkiv-head-bodies.json`), so each fetch walks only the bodies it has not seen.
+- What depends on block history: a fresh client of a pinned repo reads every body since the pin from calldata, which needs Rabdi to serve those transactions (it serves them back to block 1, section 12); the walk is bounded by the pin, so re-pinning a program resets it.
+  If that history were pruned, the fold fails closed with `E_CONTROL_NOT_LIVE` instead of guessing.
 - `chart program status`, `chart release verify`, `programs/ci-gated.rhai`, `scripts/chart-ci.sh` and `scripts/chart-merge.sh` need no change: they consume the fold.
 
 ## 9. Private repos
@@ -225,7 +249,11 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
 - After the migration, keepalive extends the identity's control plane (old anchors included, because the P1 completeness check counts them), the device heads and the current snapshots, and stops extending v1 refs, manifests and chunks.
 - A new repo created by v0.4.0 carries a device delegation from its first push, so v0.3.0 stops on it too.
 - An unmodified v0.3.0 client fetching or cloning such a repo reads the device delegation among the peer's anchors and stops with `E_UNSUPPORTED_VERSION ... from a tracked control address has an unsupported version`; it never lists stale refs (MEASURED on Rabdi, section 12).
-- v0.4.0 prints the hint "this repo uses a newer Charter format; upgrade chart" with that error.
+- The v0.4.0 message for `E_UNSUPPORTED_VERSION` ends with "upgrade charter", for the next format change.
+- Every peer is affected, not only the migrated one: v0.3.0 reads the anchors of every peer it syncs (delegates always, others on a peer url), so cloning or fetching the repo stops as soon as any synced peer has migrated.
+- When the migrated identity is a non-delegate peer, a v0.3.0 clone of the plain repo url (which syncs delegates only) keeps working and never shows that peer's refs, as before the migration; a v0.3.0 fetch of the peer url `arkiv::<rid>/<nid>`, or with the peer in `extra_peers`, stops with `E_UNSUPPORTED_VERSION`.
+  So v0.3.0 never shows a stale v1 ref of a migrated peer; it either stops or does not show that peer at all.
+- A v1 peer whose devices have no head yet (a half-done migration) keeps its v1 refs for v0.4.0 readers (section 5.1), and v0.3.0 stops on its delegation.
 
 ## 11. Downsides of 3.9 and what a user can still notice
 
@@ -235,7 +263,14 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
 4. Rollback: detected by fresh clients without checkpoints (section 6); clients that saw a newer head also reject older ones by seq.
 5. Migration: automatic on the first push; v0.3.0 fails loudly on a migrated repo.
 
-What remains noticeable: a snapshot push is slower and costs more (entity chunks at 30 days), about every 64 pushes or 1 MiB of changes; a first push from a new machine adds one transaction (the delegation); a refs-only push still writes one small marker; block-history retention is not a priced promise (section 12 records how far back Rabdi serves it).
+What remains noticeable: a snapshot push is slower and costs more (entity chunks at 30 days), about every 64 pushes or 1 MiB of changes; a first push from a new machine adds one transaction (the delegation); a refs-only push still writes one small marker; block-history retention is not a priced promise (section 12 records how far back Rabdi serves it); a pinned program's fold on a fresh client also reads every head body since the pin from block history (section 8).
+
+Known limits not handled in v0.4.0:
+
+- A device's head holds at most about 550 to 900 refs (section 4.2); a migration or push past that fails with `E_REFS_TOO_LARGE` instead of moving the ref list into a piece.
+- A pack no live ref reaches that cannot be indexed is downloaded again on every fetch (section 5.5).
+- A copied `device/seed` makes two machines one device; they serialise on one account nonce, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4).
+- Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can collide on the wallet nonce and one push fails with an RPC error; running it again succeeds.
 
 ## 12. Measurements
 

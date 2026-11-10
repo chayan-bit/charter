@@ -234,6 +234,9 @@ Private repos upload sealed bytes only, as today.
 
 ### 3.4 One mutable head per peer, history as a transaction log
 
+Status: IMPLEMENTED for v0.4.0 as format v2, with the changes decided on 2026-11-11 (per-device heads, rollback check by `entityNonce`, snapshot plus pieces, collaboration ops left as entities); the design is `docs/p5/head-model.md` and the measured run is section 3.15.
+The design list below is the original proposal and is kept for the record.
+
 Measured 2026-11-09 by `eth_estimateGas` on Rabdi (impersonating each entity's owner, nothing sent):
 
 - Charter's anchors are read-only entities: a patch reverts with `ReadOnlyEntity`.
@@ -504,7 +507,7 @@ The last two columns are ESTIMATES until step 1 measures them; execution speed i
 - Storage tiers (section 3.1) and the default tier for new repos.
 - Upload ahead of push (section 3.2).
 - Big pushes on chain at upload speed (section 3.14): devnet measurement, client pipelining, the Arkiv asks, striping across db-chains.
-- One mutable head per peer with history in block calldata (section 3.4), and hash-chain signatures between checkpoints (section 3.5).
+- Hash-chain signatures between checkpoints (section 3.5); the head model of section 3.4 is decided and implemented.
 - Groth16 wrap of ZK receipts: 223,898 B to under 1 KB and about 8 ops to 1, at the price of a trusted setup that `docs/p4/zk-sealed-patch.md` deliberately avoids.
 - An untrusted read cache (CDN or GitHub Releases) serving hash-verified pieces: GitHub-speed clones with an unchanged trust model; this is a product choice.
 - Ask Arkiv upstream to lift the block builder from 30M to the 200M gas its genesis configures: big pushes about 6x faster for free.
@@ -513,6 +516,6 @@ The last two columns are ESTIMATES until step 1 measures them; execution speed i
 
 - Whether a multi-op `execute` tx is all-or-nothing on Rabdi (item 4 assumes it).
 - Whether `arkiv_query` works inside a JSON-RPC batch.
-- How long Rabdi retains block history and whether its RPC watchers prune (section 3.1 depends on it).
+- Whether Rabdi's RPC watchers will prune block history later: on 2026-11-11 `eth_getTransactionByHash` still served transactions back to block 1, about 11 days (head-model section 12).
 - A fair wall-time comparison of compressed vs uncompressed responses.
 - Section 3.8 covers one key and one repo shape; multi-peer repos, snapshots and the completeness change are not exercised yet.
