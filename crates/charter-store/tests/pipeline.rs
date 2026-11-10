@@ -152,6 +152,40 @@ async fn a_send_failing_below_others_is_plugged_then_reported() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_retry_after_a_mined_send_does_not_run_the_job_twice() {
+    let (fake, key) = setup();
+    let spy = Spy {
+        lose_reply: Some((0, true)),
+        ..Spy::new(fake.clone(), false)
+    };
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default());
+    let jobs = (0..3).map(|i| vec![small("m", i, i.into())]).collect();
+    let landed = with_miner(fake.clone(), p.run(jobs)).await.expect("run");
+    assert_eq!(landed.len(), 3);
+    assert_eq!(
+        fake.entity_nonce(key.address()).await.expect("n"),
+        3,
+        "job 0 created once, not again under a new nonce"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_send_whose_replies_are_lost_but_reached_the_node_is_not_plugged() {
+    let (fake, key) = setup();
+    let spy = Spy {
+        lose_reply: Some((1, false)),
+        ..Spy::new(fake.clone(), false)
+    };
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default());
+    let jobs = (0..5).map(|i| vec![small("l", i, i.into())]).collect();
+    let landed = with_miner(fake.clone(), p.run(jobs))
+        .await
+        .expect("nonce 1 was in the pool all along");
+    assert_eq!(landed.len(), 5);
+    assert_eq!(fake.entity_nonce(key.address()).await.expect("n"), 5);
+}
+
+#[tokio::test(start_paused = true)]
 async fn reverts_are_decoded() {
     let (fake, key) = setup();
     let err = run(&fake, &key, vec![vec![extend_op(B256::repeat_byte(9), 10)]])
@@ -188,6 +222,11 @@ struct Spy {
     ws: Option<WsConfig>,
     /// Refuse this many sends of the tx with this nonce, as a flaky RPC would.
     refuse: Option<(u64, std::sync::atomic::AtomicU32)>,
+    /// Every send of the tx with this nonce reaches the node but its reply is lost; with
+    /// `true` a block is mined right after the first, so a retry reads as nonce too low.
+    lose_reply: Option<(u64, bool)>,
+    /// The first send of a tx with one of these nonces is mined as status 0.
+    revert_nonces: std::sync::Mutex<std::collections::HashSet<u64>>,
 }
 
 impl Spy {
@@ -198,6 +237,8 @@ impl Spy {
             estimates: Default::default(),
             ws: None,
             refuse: None,
+            lose_reply: None,
+            revert_nonces: Default::default(),
         }
     }
     fn estimates(&self) -> usize {
@@ -249,6 +290,21 @@ impl Arkiv for Spy {
     async fn send(&self, tx: SignedTx) -> Result<charter_store::TxHash, StoreError> {
         if self.revert {
             self.inner.revert_next_at(0);
+        }
+        if self.revert_nonces.lock().expect("lock").remove(&tx.nonce()) {
+            self.inner.revert_next_at(0);
+        }
+        if let Some((n, mine)) = self.lose_reply
+            && tx.nonce() == n
+        {
+            if self.inner.receipt(tx.hash()).await?.is_some() {
+                return Err(StoreError::NonceTooLow("nonce too low".into()));
+            }
+            let _ = self.inner.send(tx).await;
+            if mine {
+                self.inner.mine();
+            }
+            return Err(StoreError::Rpc("injected: reply lost".into()));
         }
         if let Some((n, left)) = &self.refuse
             && tx.nonce() == *n

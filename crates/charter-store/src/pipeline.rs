@@ -545,30 +545,32 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         .await;
         let (mut stolen, mut lost) = (vec![], vec![]);
         for ((job, body, gas, shape, tx), r) in signed.into_iter().zip(results) {
+            let f = InFlight {
+                job,
+                body,
+                tx,
+                gas,
+                sent_at,
+                resends: 0,
+                shape,
+            };
+            // A send whose reply was lost (or retried after it was mined, which then
+            // reads as nonce too low) may have gone out: if the node has it, it is ours.
+            let r = match r {
+                Ok(()) => Ok(()),
+                Err(e) => match self.known(&f.tx).await? {
+                    true => Ok(()),
+                    false => Err(e),
+                },
+            };
             match r {
-                Ok(()) => inflight.push(InFlight {
-                    job,
-                    body,
-                    tx,
-                    gas,
-                    sent_at,
-                    resends: 0,
-                    shape,
-                }),
-                Err(StoreError::NonceTooLow(m)) => stolen.push((job, body, m)),
-                Err(e) => lost.push((tx.nonce(), e)),
+                Ok(()) => inflight.push(f),
+                Err(StoreError::NonceTooLow(_)) => stolen.push(f),
+                Err(e) => lost.push((f, e)),
             }
         }
-        if let Some((_, e)) = lost.first() {
-            // Txs above a nonce that never went out would wait on it forever: plug each
-            // such gap, let everything in flight land, then fail.
-            self.abort = Some(e.clone());
-            for (n, _) in &lost {
-                if above(inflight, *n) {
-                    inflight.extend(self.plug(*n, base_fee, sent_at).await?);
-                }
-            }
-            return Ok(false);
+        if !lost.is_empty() {
+            return self.lost(lost, base_fee, sent_at, inflight).await;
         }
         if stolen.is_empty() {
             self.reread = false;
@@ -581,10 +583,45 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             ));
         }
         self.nonce = None;
-        for (job, body, _) in stolen.into_iter().rev() {
-            queue.push_front((job, body));
+        for f in stolen.into_iter().rev() {
+            queue.push_front((f.job, f.body));
         }
         Ok(true)
+    }
+
+    /// Txs above a nonce that never went out would wait on it forever: plug each such gap,
+    /// let everything in flight land, then fail. A tx found to have gone out after all is
+    /// in flight like any other and does not fail the run.
+    async fn lost(
+        &mut self,
+        lost: Vec<(InFlight, StoreError)>,
+        base_fee: u128,
+        sent_at: u64,
+        inflight: &mut Vec<InFlight>,
+    ) -> Result<bool, StoreError> {
+        for (f, e) in lost {
+            let n = f.tx.nonce();
+            if above(inflight, n) {
+                match self.plug(n, base_fee, sent_at).await? {
+                    Some(p) => inflight.push(p),
+                    None if self.known(&f.tx).await? => {
+                        inflight.push(f);
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+            self.abort.get_or_insert(e);
+        }
+        Ok(false)
+    }
+
+    /// Whether the node has `tx`, mined or waiting in its pool.
+    async fn known(&self, tx: &SignedTx) -> Result<bool, StoreError> {
+        if self.arkiv.receipt(tx.hash()).await?.is_some() {
+            return Ok(true);
+        }
+        Ok(self.arkiv.transaction(tx.hash()).await?.is_some())
     }
 
     /// The sender's balance not already reserved by txs in flight.
@@ -699,12 +736,20 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                         if is_plug {
                             return Err(StoreError::Dropped(hash));
                         }
-                        // Replace it so the txs above it can still land, then fail.
-                        inflight.swap_remove(i);
-                        self.abort.get_or_insert(StoreError::Dropped(hash));
+                        // Replace it so the txs above it can still land, then fail; if its
+                        // nonce got used meanwhile and it was mined, poll it as usual.
+                        let f = inflight.swap_remove(i);
                         if above(inflight, n) {
-                            plugs.extend(self.plug(n, fee, head).await?);
+                            match self.plug(n, fee, head).await? {
+                                Some(p) => plugs.push(p),
+                                None if self.arkiv.receipt(hash).await?.is_some() => {
+                                    plugs.push(f);
+                                    continue;
+                                }
+                                None => {}
+                            }
                         }
+                        self.abort.get_or_insert(StoreError::Dropped(hash));
                         continue;
                     }
                     f.resends += 1;
