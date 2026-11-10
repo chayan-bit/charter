@@ -82,3 +82,19 @@ fn the_socket_lives_on_the_rpc_host() {
     assert_eq!(ws_url("https://rpc.example/x"), "wss://rpc.example/x");
     assert_eq!(ws_url("http://127.0.0.1:8545"), "ws://127.0.0.1:8545");
 }
+
+/// Live: Rabdi announces consecutive blocks over `wss` without an access key. Gated like
+/// `tests/rabdi.rs`: `CHARTER_RABDI=1 cargo test -p charter-store --test heads -- --ignored`.
+#[tokio::test]
+#[ignore = "live Rabdi; set CHARTER_RABDI=1"]
+async fn rabdi_announces_new_heads() {
+    if std::env::var("CHARTER_RABDI").map_or(true, |v| v != "1") {
+        eprintln!("skipped: set CHARTER_RABDI=1");
+        return;
+    }
+    let ws = charter_store::RpcConfig::rabdi(None).ws();
+    let mut h = subscribe(&ws).await.expect("subscribe");
+    let a = h.next().await.expect("head").expect("open");
+    let b = h.next().await.expect("head").expect("open");
+    assert!(b > a, "heads advance: {a} then {b}");
+}
