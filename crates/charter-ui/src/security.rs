@@ -125,8 +125,12 @@ pub async fn guard(State(auth): State<std::sync::Arc<Auth>>, req: Request, next:
         Err(r) => r,
     };
     let h = resp.headers_mut();
+    // Appended, so a handler's own policy (raw's `sandbox`) is enforced as well as this one.
+    h.append(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CSP),
+    );
     for (k, v) in [
-        (header::CONTENT_SECURITY_POLICY, CSP),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         (header::REFERRER_POLICY, "no-referrer"),
         (header::X_FRAME_OPTIONS, "DENY"),

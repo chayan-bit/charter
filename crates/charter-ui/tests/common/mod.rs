@@ -73,6 +73,12 @@ fn files(work: &std::path::Path) -> (String, String) {
             ("src/deep/x.txt", b"x\n"),
             ("long.rs", long.as_bytes()),
             ("bin.dat", &[0u8, 1, 2, 255]),
+            ("logo.png", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"),
+            (
+                "evil.svg",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>\n",
+            ),
+            ("page.html", b"<script>alert(1)</script>\n"),
         ],
         "feat: first\n\nThe body of the first commit.",
     );

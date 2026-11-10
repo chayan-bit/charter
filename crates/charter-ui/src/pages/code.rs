@@ -213,7 +213,31 @@ pub async fn blob(
 }
 
 /// Text as `text/plain; charset=utf-8`, anything else as an attachment.
+/// Image types served inline by the raw route. SVG is not one (it can carry script), so it
+/// goes out as text like any other text file.
+const IMAGES: [(&str, &str); 5] = [
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+];
+
+/// Repo content as an allowlisted image, `text/plain`, or a download; always sandboxed so
+/// nothing in it can run with this origin.
 fn raw_response(name: &str, bytes: Vec<u8>) -> Response {
+    let mut r = raw_body(name, bytes);
+    let sandbox = header::HeaderValue::from_static("sandbox");
+    r.headers_mut()
+        .insert(header::CONTENT_SECURITY_POLICY, sandbox);
+    r
+}
+
+fn raw_body(name: &str, bytes: Vec<u8>) -> Response {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    if let Some((_, ct)) = IMAGES.iter().find(|(e, _)| ext.as_deref() == Some(*e)) {
+        return ([(header::CONTENT_TYPE, *ct)], bytes).into_response();
+    }
     if is_binary(&bytes) {
         let safe: String = name
             .chars()

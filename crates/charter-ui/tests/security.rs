@@ -162,3 +162,36 @@ async fn raw_files_are_plain_text_or_attachments() {
     );
     assert_eq!(r.body, vec![0, 1, 2, 255]);
 }
+
+/// Raw files: only allowlisted image types inline; SVG and HTML as text; other binaries as
+/// a download; every raw response sandboxed on top of the page CSP.
+#[tokio::test(flavor = "multi_thread")]
+async fn raw_serves_only_allowlisted_images_inline_and_sandboxes_everything() {
+    let f = fixture();
+    let cases = [
+        ("logo.png", "image/png", false),
+        ("evil.svg", "text/plain; charset=utf-8", false),
+        ("page.html", "text/plain; charset=utf-8", false),
+        ("bin.dat", "application/octet-stream", true),
+        ("README.md", "text/plain; charset=utf-8", false),
+    ];
+    for (name, ct, download) in cases {
+        let r = get(&format!("/r/{}/raw/main/{name}", f.hex)).await;
+        assert_eq!(r.status, StatusCode::OK, "{name}");
+        assert_eq!(r.header(header::CONTENT_TYPE), ct, "{name}");
+        let disp = r.header(header::CONTENT_DISPOSITION);
+        assert_eq!(disp.starts_with("attachment"), download, "{name}: {disp}");
+        let csp: Vec<&str> = r
+            .headers
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        assert!(csp.contains(&"sandbox"), "{name}: {csp:?}");
+        assert!(
+            csp.iter().any(|c| c.starts_with("default-src 'self'")),
+            "{name}"
+        );
+        assert_eq!(r.header(header::X_CONTENT_TYPE_OPTIONS), "nosniff");
+    }
+}
