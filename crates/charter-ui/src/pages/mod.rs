@@ -121,6 +121,11 @@ pub fn ago(then_ms: u64) -> String {
     }
 }
 
+/// [`ago`] of a git timestamp in seconds.
+pub fn age(secs: i64) -> String {
+    ago(u64::try_from(secs).unwrap_or(0).saturating_mul(1000))
+}
+
 /// `%2F`-escapes `/` and `%` so a ref name stays one path segment.
 pub fn seg(r: &str) -> String {
     r.replace('%', "%25").replace('/', "%2F")

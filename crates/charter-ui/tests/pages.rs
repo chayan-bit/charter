@@ -59,6 +59,21 @@ async fn tree_lists_directories_first_and_walks_down() {
     );
     assert!(dir < file, "directories first");
     assert!(h.contains("rel=\"up\""));
+    // Each entry names the commit that last changed it, subject escaped.
+    let row = |name: &str| {
+        let at = h.find(&format!(">{name}<")).expect("row");
+        h[at..].split("</tr>").next().expect("tr").to_owned()
+    };
+    let main_rs = row("main.rs");
+    assert!(
+        main_rs.contains(&format!("/commit/{}\"", f.main)),
+        "{main_rs}"
+    );
+    assert!(
+        main_rs.contains(">fix: &#60;smaller&#62; main</a>"),
+        "{main_rs}"
+    );
+    assert!(row("deep/").contains(&format!("/commit/{}\"", f.first)));
     let h = page(&format!("/r/{}/tree/{}/src/deep", f.hex, f.first)).await;
     assert!(h.contains("x.txt"));
     let r = get(&format!("/r/{}/tree/main/README.md", f.hex)).await;

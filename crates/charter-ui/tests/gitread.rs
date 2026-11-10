@@ -164,6 +164,12 @@ fn gix_reads_match_the_git_cli() {
             .unwrap_or_default();
         assert_eq!(got, want, "last change of {p:?}");
     }
+    let all = gitread::last_changes(&g, &merge, "");
+    for e in gitread::tree(&g, &merge, "").expect("root") {
+        let want = cli(&["log", "-1", "--format=%H", &merge, "--", &e.name]);
+        let got = all.get(&e.name).map(|c| c.oid.clone()).unwrap_or_default();
+        assert_eq!(got, want, "last change of entry {}", e.name);
+    }
     let ls: Vec<String> = gitread::tree(&g, &merge, "")
         .expect("tree")
         .iter()

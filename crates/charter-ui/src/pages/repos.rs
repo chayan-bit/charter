@@ -93,6 +93,9 @@ impl Home {
     pub fn short(&self, s: &str) -> String {
         short(s)
     }
+    pub fn age(&self, secs: &i64) -> String {
+        super::age(*secs)
+    }
     /// Path of a root entry (`entries.html` is shared with the tree page).
     pub fn join(&self, name: &str) -> String {
         name.to_owned()
@@ -134,7 +137,7 @@ pub fn home_page(app: &App, theme: &Theme, r: &Repo) -> Response {
     let commit = gitread::resolve(&r.git, r.view.as_ref(), &default);
     let entries = commit
         .as_deref()
-        .and_then(|c| gitread::tree(&r.git, c, ""))
+        .and_then(|c| gitread::tree_with_last(&r.git, c, ""))
         .unwrap_or_default();
     let readme = commit.as_deref().and_then(|c| readme(r, c, &entries));
     let view = r.view.as_ref();

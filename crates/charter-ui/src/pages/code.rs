@@ -78,6 +78,9 @@ pub struct Tree {
 }
 
 impl Tree {
+    pub fn age(&self, secs: &i64) -> String {
+        super::age(*secs)
+    }
     pub fn join(&self, name: &str) -> String {
         if self.path.is_empty() {
             name.to_owned()
@@ -103,7 +106,7 @@ fn tree_page(app: &App, theme: &Theme, r: &Repo, rev: &str, path: &str) -> Respo
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    let Some(entries) = gitread::tree(&r.git, &at.commit, &at.path) else {
+    let Some(entries) = gitread::tree_with_last(&r.git, &at.commit, &at.path) else {
         return error_page(app, theme, StatusCode::NOT_FOUND, "No such directory.");
     };
     let last = gitread::last_change(&r.git, &at.commit, &at.path);
