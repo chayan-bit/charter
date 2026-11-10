@@ -34,7 +34,9 @@ fn patch_extend_and_revert_leave_entity_nonce_unchanged() {
             "testnet only"
         );
         let rid_text = std::env::var("CHARTER_PROBE_RID").expect("CHARTER_PROBE_RID");
-        let rid = charter_sync::ids::parse_url(&rid_text).expect("rid").rid;
+        let rid = charter_sync::ids::parse_url(rid_text.trim_start_matches("arkiv::"))
+            .expect("rid")
+            .rid;
         let dev = charter_sync::device::device_keys(&cfg.home).expect("device");
         let (c_d, signer) = (dev.control_address(&rid), dev.control(&rid));
         let filter = charter_store::Pred::And(vec![
@@ -56,7 +58,9 @@ fn patch_extend_and_revert_leave_entity_nonce_unchanged() {
             .await
             .expect("patch");
         let n1 = nonce().await;
-        let extend = extend_op(B256::from(head.key), 2_000);
+        // Past the current expiry, or the node refuses it (`ExpiryNotExtended`).
+        let left = head.expires_at - a.head().await.expect("head");
+        let extend = extend_op(B256::from(head.key), left + 2_000);
         let l2 = send(&a, &signer, cfg, vec![vec![extend]])
             .await
             .expect("extend");
