@@ -105,3 +105,68 @@ fn json_payloads_are_canonical_and_reject_floats() {
         json!({"1": 2})
     );
 }
+
+async fn post(net: &Net, p: &Peer, b: CobOpBody) -> Hash32 {
+    cob::post(net, &p.cfg, &p.keys, &b).await.expect("post")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_since_merged_into_a_cache_equals_a_full_list() {
+    let net = Net::new();
+    let (alice, bob) = (Peer::new(&net, 1), Peer::new(&net, 2));
+    let rid = init(&net, &alice, "since").await;
+    let obj = post(
+        &net,
+        &alice,
+        op(&rid, ZERO, "create", vec![], json!({"title": "a"})),
+    )
+    .await;
+    post(
+        &net,
+        &bob,
+        op(&rid, obj, "comment", vec![obj], json!({"body": "1"})),
+    )
+    .await;
+    let first = cob::list_since(&net, &rid, 0, &[]).await.expect("first");
+    assert_eq!(first.ops.len(), 2);
+    let last = first.last_block.expect("a block was seen");
+
+    // A comment on the old object (its create op is not in the new range) and a new object.
+    post(&net, &alice, op(&rid, obj, "close", vec![obj], json!({}))).await;
+    let obj2 = post(
+        &net,
+        &bob,
+        op(&rid, ZERO, "create", vec![], json!({"title": "b"})),
+    )
+    .await;
+    post(
+        &net,
+        &alice,
+        op(&rid, obj2, "comment", vec![obj2], json!({"body": "2"})),
+    )
+    .await;
+    let next = cob::list_since(&net, &rid, last + 1, &first.ops)
+        .await
+        .expect("next");
+    assert_eq!(next.ops.len(), 3, "only the new ops");
+    assert!(next.last_block > Some(last));
+
+    let merged: Vec<Hash32> = first.ops.iter().chain(&next.ops).map(|o| o.id).collect();
+    let full = cob::list(&net, &rid, None, None).await.expect("full");
+    assert_eq!(merged, full.iter().map(|o| o.id).collect::<Vec<_>>());
+    let blocks: Vec<u64> = first
+        .ops
+        .iter()
+        .chain(&next.ops)
+        .map(|o| o.arkiv_order.block)
+        .collect();
+    assert!(
+        blocks.windows(2).all(|w| w[0] <= w[1]),
+        "cache stays in Arkiv order"
+    );
+
+    let idle = cob::list_since(&net, &rid, next.last_block.expect("seen") + 1, &full)
+        .await
+        .expect("idle");
+    assert!(idle.ops.is_empty());
+}
