@@ -243,6 +243,7 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
 - Piece and snapshot bytes are sealed by `charter-private` exactly like chunks, since they are creates carrying `ag.rid`.
 - The head patch is sealed too: its `ag.body` moves into a sealed body under the current epoch key with `ag.ep`, like a sealed create.
 - Rows read back from block history (pieces and head bodies) go through the same opening as query rows.
+- The epoch keys live in `$CHARTER_HOME/private`, not in the identity seed: a second machine that copied only `keys/` gets `E_NOT_MEMBER` on a private repo (MEASURED in section 12) until that directory is copied too, as in v0.3.0.
 
 ## 10. Migration and old clients
 
@@ -285,4 +286,5 @@ MEASURED on Rabdi on 2026-11-11 with the v0.4.0 release build rebased on `main` 
 - Big pushes: 10 MiB took 72.9 s and refreshed the snapshot (164 transactions, 432M gas, 0.697 tGLM); 2 MiB afterwards stayed on the piece path (34 transactions, 84.9M gas, 0.0947 tGLM, 26.6 s).
 - Clone after the pieces expired from the entity store: 18.3 s for the 12 MiB repo, objects read from calldata and the snapshot, `git fsck` clean.
 - Two devices of one identity: concurrent pushes of different branches both landed (12.6 s and 14.7 s) and the merged refs listed both; a concurrent push of the same branch gave the slower device `E_LOST_RACE`, and a pull, rebase and push from that device then landed.
+- Private repo: first push 31.9 s, next push 12.2 s, clone 4.2 s; no ref name or content in plaintext calldata; a second device with only `keys/` copied gets `E_NOT_MEMBER` (section 9).
 - Migration of a v0.3.0 repo: one automatic push of 8 transactions (1,134,393 gas, 38.4 s); v0.3.0 fetch and clone of the migrated repo stop with `E_UNSUPPORTED_VERSION`.
