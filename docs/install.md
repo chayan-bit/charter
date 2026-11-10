@@ -11,15 +11,15 @@ https://github.com/chayan-bit/charter/releases/download/<tag>/charter-<tag>-<tar
 https://github.com/chayan-bit/charter/releases/download/<tag>/SHA256SUMS
 ```
 
-For v0.2.0 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.2.0/charter-v0.2.0-aarch64-apple-darwin.tar.gz`.
-For v0.2.0 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.2.0/charter-v0.2.0-x86_64-unknown-linux-gnu.tar.gz`.
+For v0.3.0 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.3.0/charter-v0.3.0-aarch64-apple-darwin.tar.gz`.
+For v0.3.0 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.3.0/charter-v0.3.0-x86_64-unknown-linux-gnu.tar.gz`.
 v0.1.0 predates the rename to Charter: its archives are named `arkiv-git-v0.1.0-<target>.tar.gz` and hold `git-remote-arkiv`, `arkiv-git` and `arkiv-git-mcp`.
 A combined `SHA256SUMS` file is attached to the release as well.
 
 ## Install snippet
 
 ```sh
-TAG=v0.2.0
+TAG=v0.3.0
 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 BASE=https://github.com/chayan-bit/charter/releases/download/$TAG
 curl -fsSLO "$BASE/charter-$TAG-$TARGET.tar.gz"

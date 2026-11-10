@@ -29,7 +29,7 @@ GitHub is a read-only mirror plus the host of the release binaries.
 
 ```sh
 # 1. install the prebuilt binaries (macOS arm64 or Linux x86_64), see docs/install.md
-TAG=v0.2.0 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
+TAG=v0.3.0 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 mkdir -p ~/.local/bin && curl -fsSL "https://github.com/chayan-bit/charter/releases/download/$TAG/charter-$TAG-$TARGET.tar.gz" | tar xz -C ~/.local/bin git-remote-arkiv chart chart-mcp
 export PATH="$HOME/.local/bin:$PATH"
 
