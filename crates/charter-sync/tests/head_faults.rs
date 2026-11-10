@@ -381,3 +381,48 @@ async fn a_device_repairs_its_head_after_a_copied_seed_landed_a_second_head_tx()
         .expect("readable again");
     assert_eq!(rev(&dest, "HEAD"), rev(&work, "HEAD"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_device_never_overwrites_a_commit_another_device_landed_after_its_listing() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "race-main").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    pushed(&net, &alice, &rid, tmp.path(), 1).await;
+    let laptop = alice.second_device(&net);
+    let dest = tmp.path().join("laptop");
+    Box::pin(clone_into(&net, &laptop, &rid, &dest))
+        .await
+        .expect("clone");
+    commit(&dest, &[("n", b"laptop")], "feat: n");
+    let rl = laptop.repo(&rid);
+    // git checked `main` against this listing.
+    let t = Box::pin(prepare2(
+        &net,
+        &laptop,
+        &rl,
+        &dest,
+        &[upd("refs/heads/main")],
+    ))
+    .await
+    .expect("prepare");
+
+    // The desk lands M on main before the laptop's first push (delegation, then head).
+    let work = tmp.path().join("work");
+    commit(&work, &[("m", b"desk")], "feat: m");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("desk push");
+
+    let r = Box::pin(t.run()).await;
+    assert_eq!(code(r), "E_LOST_RACE", "M must not be overwritten");
+    drop(rl);
+    let view = Box::pin(charter_sync::sync(&net, &alice.repo(&rid), &alice.want()))
+        .await
+        .expect("sync");
+    let refs = view.peers[&alice.keys.nid()]
+        .refs_body()
+        .expect("refs")
+        .clone();
+    assert_eq!(hex::encode(&refs.refs[0].oid), rev(&work, "HEAD"));
+}

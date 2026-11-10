@@ -66,6 +66,28 @@ fn oid_bytes(hex_oid: &str) -> Result<Vec<u8>> {
     hex::decode(hex_oid).map_err(|e| SyncError::io("oid", e))
 }
 
+fn refs_map(r: &RefsBody) -> BTreeMap<String, Vec<u8>> {
+    r.refs
+        .iter()
+        .map(|e| (e.name.clone(), e.oid.clone()))
+        .collect()
+}
+
+/// `refs` of `rid` as a refs body.
+pub(crate) fn refs_body(rid: Hash32, refs: &BTreeMap<String, Vec<u8>>) -> RefsBody {
+    RefsBody {
+        rid,
+        object_hash: 1,
+        refs: refs
+            .iter()
+            .map(|(name, oid)| RefEntry {
+                name: name.clone(),
+                oid: oid.clone(),
+            })
+            .collect(),
+    }
+}
+
 fn live(merged: &Merged) -> BTreeMap<String, Vec<u8>> {
     merged
         .iter()
@@ -230,6 +252,7 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
     /// nothing of this identity was sent since that sync.
     pub(crate) async fn plan_from(&self, state: &State, reuse_view: bool) -> Result<Plan> {
         let mine = self.view.peers.get(&self.nid()).and_then(|p| p.v2.clone());
+        let reread = !(reuse_view && mine.is_some());
         let v2 = match (reuse_view, mine) {
             (true, Some(v)) => Some(v),
             _ => Box::pin(self.own_v2(state)).await?,
@@ -239,6 +262,9 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             None => None,
         };
         let merged = self.merged_before(v2.as_ref());
+        if reread {
+            self.check_listing(&merged)?;
+        }
         let others: BTreeSet<String> = v2
             .iter()
             .flat_map(|v| v.heads())
@@ -298,6 +324,32 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             snapshot,
             carried,
         })
+    }
+
+    /// git decided each update against the listing of the view; a pushed ref another
+    /// device moved since then would be overwritten unseen, so it is a lost race.
+    fn check_listing(&self, fresh: &Merged) -> Result<()> {
+        let listed: BTreeMap<String, Vec<u8>> = self
+            .view
+            .peers
+            .get(&self.nid())
+            .and_then(|p| p.refs_body())
+            .map(refs_map)
+            .unwrap_or_default();
+        let fresh = live(fresh);
+        match self
+            .planned
+            .iter()
+            .find(|(name, _)| listed.get(name) != fresh.get(name))
+        {
+            Some((name, _)) => Err(SyncError::coded(
+                ErrorCode::LostRace,
+                format!(
+                    "another device of this identity moved {name} after git checked it; fetch and push again"
+                ),
+            )),
+            None => Ok(()),
+        }
     }
 
     /// The signed `base` of an update (head-model 8): the pinned program's accepted head

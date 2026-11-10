@@ -527,13 +527,24 @@ pub fn check_push(view: &View, nid: &Nid, pending: &PendingPush, git: &Git) -> R
 
 /// Like [`check_push`] for a push that would leave `nid`'s refs at `new` (format v2).
 pub fn check_refs(view: &View, nid: &Nid, new: &RefsBody, git: &Git) -> Result<()> {
+    let old = view.peers.get(nid).and_then(|p| p.refs_body());
+    check_refs_from(view, nid, old, new, git)
+}
+
+/// [`check_refs`] from refs `old` read after the view (a re-read of `nid`'s heads).
+pub fn check_refs_from(
+    view: &View,
+    nid: &Nid,
+    old: Option<&RefsBody>,
+    new: &RefsBody,
+    git: &Git,
+) -> Result<()> {
     let Some(e) = &view.program else {
         return Ok(());
     };
     if !view.delegates().contains(nid) {
         return Ok(());
     }
-    let old = view.peers.get(nid).and_then(|p| p.refs_body());
     e.check(ref_updates(*nid, old, new, PENDING_ORDER), git)
 }
 

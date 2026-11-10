@@ -160,6 +160,21 @@ impl<A: Arkiv> HeadPush<'_, A> {
         let current = self.setup().await?;
         let state = State::load(&self.repo.state_path())?;
         let plan = Box::pin(self.plan_from(&state, current)).await?;
+        if !current {
+            // The program check ran on the listing; run it again on the fresh heads.
+            let rid = self.rid();
+            let (before, after) = (
+                crate::head_push::refs_body(rid, &plan.before),
+                crate::head_push::refs_body(rid, &plan.after),
+            );
+            crate::program::check_refs_from(
+                &self.view,
+                &self.nid(),
+                Some(&before),
+                &after,
+                self.repo.git(),
+            )?;
+        }
         Box::pin(self.finish(plan)).await
     }
 
