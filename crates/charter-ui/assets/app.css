@@ -251,6 +251,52 @@ dialog h2 { margin: 0 0 var(--sp-3); }
 dialog form { margin: var(--sp-3) 0 0; text-align: right; }
 kbd { display: inline-block; min-width: 20px; padding: 0 4px; text-align: center; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--s2); line-height: 18px; }
 
+/* Writes: forms, the confirm dialog, the status panel and toast (ui-design.md 5). */
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
+.btn.primary:hover { background: var(--accent); filter: brightness(1.08); }
+.lh { display: flex; justify-content: flex-end; margin: 0 0 var(--sp-3); }
+.wf { margin: var(--sp-5) 0 0; }
+.fm { display: grid; gap: var(--sp-1); max-width: 720px; margin: 0 0 var(--sp-4); }
+.fm label, .fm legend { margin-top: var(--sp-2); font-size: var(--fs-dense); font-weight: 500; }
+.fm label .dim { font-weight: 400; }
+.fm input:not([type=radio]), .fm textarea { width: 100%; min-height: 28px; padding: 3px var(--sp-2); border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--s1); color: var(--text); font: inherit; line-height: 20px; }
+.fm textarea { resize: vertical; }
+.fm .mono { font-family: var(--font-mono); font-size: var(--fs-mono); }
+.fm .short { max-width: 16ch; }
+.fm > p { margin: var(--sp-1) 0 0; }
+.radios { display: flex; flex-wrap: wrap; gap: 0 var(--sp-4); margin: 0; padding: 0; border: 0; }
+.radios legend { padding: 0; width: 100%; }
+.radios label { display: inline-flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-1); font-weight: 400; }
+.acts { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-3); }
+.more-w { margin: 0 0 var(--sp-2); }
+.more-w > summary { width: fit-content; cursor: pointer; font-size: var(--fs-dense); color: var(--link); }
+.more-w[open] > summary { margin-bottom: var(--sp-1); }
+.off { padding: var(--sp-3); color: var(--text-2); background: var(--s2); border-radius: var(--radius-lg); font-size: var(--fs-dense); }
+.scrim { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: var(--sp-4); overflow-y: auto; background: rgb(0 0 0 / 0.5); }
+.dlg { width: min(480px, 100%); padding: var(--sp-4); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--s1); box-shadow: var(--shadow); animation: rise 100ms ease-out; }
+.dlg h2 { margin: 0 0 var(--sp-3); }
+.rows { margin: 0; font-size: var(--fs-dense); }
+.rows div { display: flex; justify-content: space-between; gap: var(--sp-4); padding: 4px 0 3px; border-top: 1px solid var(--border); }
+.rows div:first-child { border-top: 0; }
+.rows dt { color: var(--text-2); } .rows dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.rows .mono { font-family: var(--font-mono); font-size: var(--fs-mono); }
+.warnp { margin: var(--sp-3) 0 0; padding: var(--sp-2) var(--sp-3); color: var(--warn); background: var(--warn-bg); border-radius: var(--radius); font-size: var(--fs-dense); }
+.signed { margin: var(--sp-3) 0 0; font-size: var(--fs-dense); }
+.signed > summary { cursor: pointer; color: var(--link); width: fit-content; }
+.signed p { margin: var(--sp-2) 0 var(--sp-1); }
+.signed pre { max-height: 240px; padding: var(--sp-2); overflow: auto; background: var(--s2); border-radius: var(--radius); }
+.hint { margin: var(--sp-2) 0 0; text-align: right; }
+html.has-js .hint.js { display: block; }
+.wp h2 { margin: 0; padding: var(--sp-2) var(--sp-3); font-size: var(--fs-base); background: var(--s2); border-bottom: 1px solid var(--border); }
+.wp .facts code { overflow-wrap: anywhere; }
+html.has-js .nojs { display: none; }
+.toast { position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: 30; display: grid; gap: 2px; width: min(360px, calc(100vw - 32px)); padding: var(--sp-3) var(--sp-3) var(--sp-3) calc(var(--sp-3) + 3px); background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow), inset 3px 0 0 var(--bar, var(--border-strong)); font-size: var(--fs-dense); animation: rise 100ms ease-out; overflow-wrap: anywhere; }
+.toast .btn { justify-self: end; margin-top: var(--sp-1); }
+.t-sending, .t-sent { --bar: var(--warn); } .t-confirmed { --bar: var(--ok); } .t-failed { --bar: var(--bad); }
+.t-failed b { color: var(--bad); }
+.toast.gone { opacity: 0; transform: translateY(8px); transition: opacity 120ms ease-out, transform 120ms ease-out; pointer-events: none; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+
 @media (max-width: 640px) {
   .tree td.msg { display: none; }
   .bar { min-height: 48px; }
@@ -280,4 +326,6 @@ kbd { display: inline-block; min-width: 20px; padding: 0 4px; text-align: center
   .threads tbody tr:first-child { border-top: 0; }
   .threads td { display: inline; padding: 0; border: 0; }
   .threads td.st { padding-right: var(--sp-2); }
+  .fm input:not([type=radio]), .fm textarea { min-height: 32px; font-size: 16px; }
+  .acts .btn { flex: 1; }
 }

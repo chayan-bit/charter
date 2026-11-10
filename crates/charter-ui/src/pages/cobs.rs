@@ -31,10 +31,29 @@ impl Threads {
 pub struct ThreadPage {
     pub l: Layout,
     pub r: Head,
+    /// `issues` or `patches`.
+    pub kind: &'static str,
     pub t: Thread,
 }
 
 impl ThreadPage {
+    /// This page, where a write form returns to.
+    pub fn back(&self) -> String {
+        format!("/r/{}/{}/{}", self.r.hex, self.kind, self.t.id)
+    }
+    /// The patch's latest revision head, which a review approves.
+    pub fn head(&self) -> &str {
+        self.t.revisions.last().map_or("", String::as_str)
+    }
+    /// The issue the patch closes, if its create op names one.
+    pub fn closes(&self) -> &str {
+        let fields = self.t.entries.first().map(|e| e.fields.as_slice());
+        let hit = fields
+            .unwrap_or_default()
+            .iter()
+            .find(|(k, _)| k == "closes");
+        hit.map_or("", |(_, v)| v.as_str())
+    }
     pub fn short(&self, s: &str) -> String {
         short(s)
     }
@@ -86,7 +105,12 @@ fn thread_page(app: &App, theme: &Theme, r: &Repo, kind: &'static str, id: &str)
     l.crumbs
         .push((format!("/r/{}/{kind}", r.hex), kind.to_owned()));
     l.crumbs.push((String::new(), short(&t.id)));
-    html(&ThreadPage { l, r: head, t })
+    html(&ThreadPage {
+        l,
+        r: head,
+        kind,
+        t,
+    })
 }
 
 async fn list(app: Arc<App>, theme: Theme, rid: String, kind: &'static str) -> Response {

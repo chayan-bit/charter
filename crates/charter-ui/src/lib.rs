@@ -17,6 +17,7 @@ pub mod markdown;
 mod pages;
 pub mod security;
 pub mod sync_loop;
+pub mod writes;
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -42,7 +43,8 @@ pub enum UiError {
 
 /// The router with every page, the assets and the guard.
 pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
-    use pages::{cobs, code, history, program, repos};
+    use axum::routing::post;
+    use pages::{cobs, code, forms, history, program, repos, write};
     Router::new()
         .route("/", get(repos::index))
         .route("/r/{rid}", get(repos::home))
@@ -52,6 +54,13 @@ pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
         .route("/r/{rid}/raw/{rev}/{*path}", get(code::raw))
         .route("/r/{rid}/log/{rev}", get(history::log))
         .route("/r/{rid}/commit/{sha}", get(history::commit))
+        .route("/r/{rid}/write", post(write::prepare).get(write::to_repo))
+        .route(
+            "/r/{rid}/write/{id}",
+            post(write::confirm).get(write::status),
+        )
+        .route("/r/{rid}/issues/new", get(forms::new_issue))
+        .route("/r/{rid}/releases/new", get(forms::new_release))
         .route("/r/{rid}/issues", get(cobs::issues))
         .route("/r/{rid}/issues/{id}", get(cobs::issue))
         .route("/r/{rid}/patches", get(cobs::patches))
@@ -92,12 +101,13 @@ pub async fn serve<A: Arkiv + 'static>(
         shared.want(rid);
         shared.focus(rid);
     }
-    let app = Arc::new(App::new(
-        cfg.home.clone(),
-        shared.clone(),
-        auth.csrf.clone(),
-    ));
+    let mut app = App::new(cfg.home.clone(), shared.clone(), auth.csrf.clone());
+    // Keys stay in this process; without them every write form says why it is missing.
+    if let Some(keys) = charter_sync::Keys::load(&cfg.home)? {
+        app = app.with_writer(writes::spawn(a.clone(), cfg.clone(), keys));
+    }
     sync_loop::spawn(a, cfg, shared)?;
+    let app = Arc::new(app);
     println!("{}", auth.url());
     axum::serve(listener, router(app, auth)).await?;
     Ok(())

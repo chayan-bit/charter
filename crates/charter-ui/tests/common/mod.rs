@@ -26,7 +26,8 @@ pub const CSRF: &str = "csrf";
 pub const HOST: &str = "127.0.0.1:4321";
 
 pub struct Fixture {
-    pub net: Net,
+    /// Shared with a write worker, which needs the backend that mines on receipt polls.
+    pub net: Arc<Net>,
     pub alice: Peer,
     pub rid: Rid,
     pub hex: String,
@@ -192,7 +193,7 @@ async fn build() -> Fixture {
     assert_eq!(r, sync_loop::Outcome::Synced);
     Fixture {
         hex: hex32(&rid),
-        net,
+        net: Arc::new(net),
         alice,
         rid,
         main,

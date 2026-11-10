@@ -39,8 +39,13 @@
 
   function key(e) {
     var t = e.target, k = e.key;
+    var send = d.querySelector("form[data-confirm]");
+    // The confirm dialog: Enter on the focused Cancel cancels; only Cmd/Ctrl+Enter spends.
+    if (send && k === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send.requestSubmit(); return; }
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     if (k === "Escape") {
+      var cancel = send && send.querySelector("a.btn");
+      if (cancel) { cancel.click(); return; }
       var dlg = d.getElementById("help");
       if (dlg && dlg.open) dlg.close();
       if (t.blur) t.blur();
@@ -95,6 +100,7 @@
   d.addEventListener("click", function (e) {
     var t = e.target, ln = t.closest && t.closest(".blob td.ln");
     if (ln) { location.hash = ln.parentNode.id; return; }
+    if (t.closest && t.closest("[data-dismiss]")) { t.closest(".toast").classList.add("gone"); return; }
     var b = t.closest && t.closest("[data-help], [data-theme-toggle], [data-copy-from]");
     if (t.matches && t.matches("input[readonly]")) t.select();
     if (!b) return;
@@ -102,7 +108,19 @@
     else if (b.hasAttribute("data-help")) d.getElementById("help").showModal();
     else theme();
   });
-  d.addEventListener("htmx:afterSettle", function () { cur = -1; arrive(); });
+  // A confirmed toast hides after 6 s unless hovered or focused; a failed one stays.
+  function toast() {
+    var t = d.querySelector(".toast.t-confirmed:not(.gone)");
+    if (!t || t.dataset.timer) return;
+    t.dataset.timer = "1";
+    (function later() {
+      setTimeout(function () {
+        if (t.matches(":hover, :focus-within")) later(); else t.classList.add("gone");
+      }, 6000);
+    })();
+  }
+  d.addEventListener("htmx:afterSettle", function () { cur = -1; arrive(); toast(); });
   window.addEventListener("hashchange", arrive);
   arrive();
+  toast();
 })();

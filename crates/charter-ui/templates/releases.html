@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block main %}
 {% include "repo.html" %}
+{% if l.writes %}<div class="lh"><a class="btn primary" href="/r/{{ r.hex }}/releases/new">New release</a></div>{% endif %}
 {% if releases.is_empty() %}<section class="empty"><p>No releases among the verified ops.</p></section>{% endif %}
 {% for x in releases %}
 <article class="art" id="{{ x.tag }}">

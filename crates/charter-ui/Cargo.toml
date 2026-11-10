@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 charter-core = { path = "../charter-core" }
+charter-crypto = { path = "../charter-crypto" }
+charter-escrow = { path = "../charter-escrow" }
 charter-private = { path = "../charter-private" }
 charter-program = { path = "../charter-program" }
 charter-store = { path = "../charter-store" }
@@ -19,6 +21,7 @@ charter-sync = { path = "../charter-sync" }
 ammonia = "4.2"
 askama = "0.16"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "form"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 getrandom = "0.4"
 gix = { version = "0.90", default-features = false, features = ["revision", "blob-diff", "sha1", "parallel"] }
 hex = "0.4"
@@ -32,7 +35,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "
 tower-http = { version = "0.6", default-features = false, features = ["compression-gzip"] }
 
 [dev-dependencies]
-charter-crypto = { path = "../charter-crypto" }
 charter-store = { path = "../charter-store", features = ["fake"] }
 charter-sync = { path = "../charter-sync", features = ["fake"] }
 alloy-signer-local = "2.5"

@@ -14,5 +14,44 @@
 {% for e in t.reviews %}{% include "entry.html" %}{% endfor %}
 </ol>
 {% endif %}
+{% let back = self.back() %}
+<section class="wf">
+{% if !l.writes %}<p class="off">{{ l.off() }}</p>
+{% else if kind == "issues" %}
+<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="comment"><input type="hidden" name="issue" value="{{ t.id }}"><input type="hidden" name="back" value="{{ back }}">
+<label for="w-body">Comment <span class="dim">markdown</span></label><textarea id="w-body" name="body" rows="4" required></textarea>
+<div class="acts"><button class="btn primary" type="submit">Comment</button></div>
+</form>
+<details class="more-w"><summary>Fund the bounty</summary>
+<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="fund"><input type="hidden" name="issue" value="{{ t.id }}"><input type="hidden" name="back" value="{{ back }}">
+<label for="w-amount">Amount <span class="dim">tGLM</span></label><input id="w-amount" name="amount" required inputmode="decimal" pattern="[0-9]*[.]?[0-9]+" autocomplete="off" class="mono short">
+<p class="dim">Pledges this much on top of the issue's bounty and deposits it with the repo's escrow, which pays the author of the patch that closes the issue once it is merged into main.</p>
+<div class="acts"><button class="btn primary" type="submit">Fund</button></div>
+</form></details>
+<details class="more-w"><summary>Claim the bounty</summary>
+<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="claim"><input type="hidden" name="issue" value="{{ t.id }}"><input type="hidden" name="back" value="{{ back }}">
+<label for="w-ptitle">Patch title</label><input id="w-ptitle" name="title" required maxlength="256" autocomplete="off">
+<label for="w-head">Head commit <span class="dim">pushed to this repo</span></label><input id="w-head" name="head" required class="mono" pattern="[0-9a-f]{40}|[0-9a-f]{64}" autocomplete="off">
+<p class="dim">Opens a patch that closes this issue; the bounty is paid to you once it is merged into main.</p>
+<div class="acts"><button class="btn primary" type="submit">Open patch</button></div>
+</form></details>
+{% else %}
+<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="review"><input type="hidden" name="patch" value="{{ t.id }}"><input type="hidden" name="head" value="{{ self.head() }}"><input type="hidden" name="back" value="{{ back }}">
+<label for="w-review">Review <span class="dim">markdown</span></label><textarea id="w-review" name="body" rows="4"></textarea>
+<fieldset class="radios"><legend>Verdict</legend><label><input type="radio" name="verdict" value="approve" checked> Approve head <code>{{ self.short(self.head()) }}</code></label><label><input type="radio" name="verdict" value="comment"> Comment only</label></fieldset>
+<div class="acts"><button class="btn primary" type="submit">Review</button></div>
+</form>
+<details class="more-w"><summary>Mark merged</summary>
+<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="merge"><input type="hidden" name="patch" value="{{ t.id }}"><input type="hidden" name="closes" value="{{ self.closes() }}"><input type="hidden" name="back" value="{{ back }}">
+<p class="dim">Posts the delegate's merged op{% if !self.closes().is_empty() %}, which closes issue <code>{{ self.short(self.closes()) }}</code>{% endif %}. Main moves to the head only through a push, which the pinned program checks.</p>
+<div class="acts"><button class="btn primary" type="submit">Mark merged</button></div>
+</form></details>
+{% endif %}
+</section>
 </article>
 {% endblock %}

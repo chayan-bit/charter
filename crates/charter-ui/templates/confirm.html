@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block main %}
+{% include "repo.html" %}
+<div class="scrim">
+<section class="dlg" role="dialog" aria-modal="true" aria-labelledby="cw-t">
+<h2 id="cw-t">Confirm write</h2>
+<dl class="rows">{% for (k, v, mono) in rows %}<div><dt>{{ k }}</dt><dd{% if *mono %} class="mono"{% endif %}>{{ v }}</dd></div>{% endfor %}</dl>
+{% if let Some(w) = short_of %}<p class="warnp">{{ w }}</p>{% endif %}
+<details class="signed"><summary>What will be signed</summary>{% for (h, p) in ops %}<p><code>{{ h }}</code></p>{% if !p.is_empty() %}<pre>{{ p }}</pre>{% endif %}{% endfor %}</details>
+<form method="post" action="/r/{{ r.hex }}/write/{{ id }}" class="acts" data-confirm>
+<input type="hidden" name="csrf" value="{{ l.csrf }}">
+<a class="btn" href="{{ back }}" autofocus>Cancel</a>
+<button class="btn primary" type="submit">Send {{ cost }}</button>
+</form>
+<p class="dim hint js"><kbd>Enter</kbd> cancels, <kbd>Cmd</kbd> <kbd>Enter</kbd> sends. Keys stay in this process.</p>
+</section>
+</div>
+{% endblock %}

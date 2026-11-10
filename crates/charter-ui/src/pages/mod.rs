@@ -3,10 +3,12 @@
 
 pub mod cobs;
 pub mod code;
+pub mod forms;
 pub mod history;
 pub mod program;
 pub mod repos;
 mod verify;
+pub mod write;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +34,8 @@ pub struct App {
     pub home: PathBuf,
     pub shared: Arc<Shared>,
     pub csrf: String,
+    /// Signs and sends writes; `None` when `$CHARTER_HOME` has no keys.
+    pub writer: Option<Arc<crate::writes::Writer>>,
     /// One gix handle per repo, keyed by the `synced_ms` of the view it was opened under.
     repos: Mutex<HashMap<Rid, (u64, gix::ThreadSafeRepository)>>,
 }
@@ -42,7 +46,16 @@ impl App {
             home,
             shared,
             csrf,
+            writer: None,
             repos: Mutex::default(),
+        }
+    }
+
+    /// Writes enabled, through `w`.
+    pub fn with_writer(self, w: Arc<crate::writes::Writer>) -> Self {
+        Self {
+            writer: Some(w),
+            ..self
         }
     }
 
@@ -89,6 +102,8 @@ pub struct Layout {
     pub v: &'static str,
     pub csrf: String,
     pub theme: &'static str,
+    /// Write forms are shown (keys are loaded).
+    pub writes: bool,
     /// `(href, label)`; an empty href is the current page.
     pub crumbs: Vec<(String, String)>,
 }
@@ -100,8 +115,14 @@ impl Layout {
             v: assets::version(),
             csrf: app.csrf.clone(),
             theme: theme.0,
+            writes: app.writer.is_some(),
             crumbs: vec![],
         }
+    }
+
+    /// Why write forms are missing.
+    pub fn off(&self) -> &'static str {
+        write::WRITES_OFF
     }
 }
 

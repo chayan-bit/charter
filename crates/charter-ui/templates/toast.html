@@ -1,0 +1,13 @@
+<div class="wr"{% if !t.done() %} hx-get="/r/{{ t.hex }}/write/{{ t.id }}?part=1" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
+<section class="box wp">
+<h2>{{ t.s.label }}</h2>
+<table class="facts">
+<tr><th>State</th><td>{% match t.state %}{% when "sending" %}Signing and sending{% when "sent" %}Sent, waiting for the receipt{% when "confirmed" %}<span class="ok">Confirmed in block <code>{{ t.block }}</code></span>{% else %}<span class="bad">Failed</span>{% endmatch %}</td></tr>
+{% for h in t.txs %}<tr><th>Transaction {{ loop.index }}</th><td><code>{{ h }}</code></td></tr>{% endfor %}
+{% for i in t.ids %}<tr><th>Op {{ loop.index }}</th><td><code>{{ i }}</code></td></tr>{% endfor %}
+{% if let Some(e) = t.s.error %}<tr class="bad"><th>Error</th><td>{{ e }}</td></tr>{% endif %}
+</table>
+<p class="pad">{% if !t.done() %}<span class="nojs">Reload to see the receipt. </span>{% endif %}<a href="{{ t.s.back }}">Back</a>{% if t.state == "confirmed" %}; it shows there after the next sync round{% endif %}.</p>
+</section>
+<div class="toast t-{{ t.state }}" tabindex="-1">{% match t.state %}{% when "sending" %}<b>Sending</b><span class="dim">signing in this process</span>{% when "sent" %}<b>Sent</b>{% if let Some(h) = t.txs.last() %}<code title="{{ h }}">tx {{ t.short(h.as_str()) }}</code>{% endif %}{% when "confirmed" %}<b>Confirmed in block <code>{{ t.block }}</code></b>{% if let Some(h) = t.txs.last() %}<code class="dim" title="{{ h }}">tx {{ t.short(h.as_str()) }}</code>{% endif %}{% else %}<b>Write failed</b>{% if let Some(e) = t.s.error %}<span>{{ e }}</span>{% endif %}<button type="button" class="btn js" data-dismiss>Dismiss</button>{% endmatch %}</div>
+</div>
