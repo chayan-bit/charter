@@ -3,7 +3,7 @@
 //! `ag.body`, gains `ag.rid = HMAC(rid)`, `ag.name = HMAC(name)` and a plaintext `ag.ep`;
 //! reading reverses it, so core verification sees the original entity unchanged.
 
-use arkiv_bindings::{Attribute, Create, Ident32, OP_CREATE, Operation};
+use arkiv_bindings::{Attribute, Create, Ident32, OP_CREATE, OP_PATCH, Operation, Patch};
 use arkiv_rpc_types::{AttributeEntry, EntityData};
 use charter_core::{ErrorCode, Hash32};
 use charter_store::{AttributeValue, Field, Pred, Value};
@@ -101,33 +101,54 @@ fn decode_hidden(mut b: &[u8]) -> Option<Vec<AttributeEntry>> {
     Some(out)
 }
 
-/// Seals one create op of `ring`'s repo; every other op, and an op already sealed, is
-/// returned unchanged (sealing is idempotent, as `Arkiv::seal_ops` requires).
+/// Seals one create or patch op of `ring`'s repo; every other op, and an op already sealed,
+/// is returned unchanged (sealing is idempotent, as `Arkiv::seal_ops` requires). A v2 head
+/// patch carries every attribute, so it seals exactly like a create (head-model 9).
 pub fn seal_op(ring: &Keyring, op: Operation) -> Result<Operation> {
-    if op.operation != OP_CREATE {
-        return Ok(op);
+    match op.operation {
+        OP_CREATE => {
+            let c: Create = op.payload_of().map_err(|e| internal(&e.to_string()))?;
+            Ok(match seal_attrs(ring, &c.attributes)? {
+                Some(attrs) => {
+                    Operation::create(c.salt, c.expiresAt, c.minLifetime, c.creationFlags, attrs)
+                }
+                None => op,
+            })
+        }
+        OP_PATCH => {
+            let p: Patch = op.payload_of().map_err(|e| internal(&e.to_string()))?;
+            Ok(match seal_attrs(ring, &p.mutations)? {
+                Some(attrs) => Operation::patch(p.entityKey, attrs),
+                None => op,
+            })
+        }
+        _ => Ok(op),
     }
-    let c: Create = op.payload_of().map_err(|e| internal(&e.to_string()))?;
+}
+
+/// The sealed attribute list, or `None` when the attributes are not an unsealed entity
+/// of `ring`'s repo.
+fn seal_attrs(ring: &Keyring, given: &[Attribute]) -> Result<Option<Vec<Attribute>>> {
     let find = |n: &str| -> Result<Option<AttributeValue>> {
         let w = word(n)?;
-        match c.attributes.iter().find(|a| a.name == w) {
+        match given.iter().find(|a| a.name == w) {
             Some(a) => a.to_value().map_err(|e| internal(&e.to_string())),
             None => Ok(None),
         }
     };
     let (Some(AttributeValue::Bytes32(rid)), None) = (find("ag.rid")?, find(EPOCH)?) else {
-        return Ok(op);
+        return Ok(None);
     };
     let Some(AttributeValue::Str(kind)) = find("ag.kind")? else {
-        return Ok(op);
+        return Ok(None);
     };
     if rid != ring.rid {
-        return Ok(op);
+        return Ok(None);
     }
     let hidden_words = HIDDEN.map(word).into_iter().collect::<Result<Vec<_>>>()?;
     let mut hidden: Vec<(String, AttributeValue)> = vec![];
     let mut attrs: Vec<Attribute> = vec![];
-    for a in &c.attributes {
+    for a in given {
         let v = a.to_value().map_err(|e| internal(&e.to_string()))?;
         let name = HIDDEN
             .iter()
@@ -160,13 +181,7 @@ pub fn seal_op(ring: &Keyring, op: Operation) -> Result<Operation> {
         let b = blind(&ring.id_key, "name", name.as_bytes());
         attrs.push(attr("ag.name", AttributeValue::Bytes32(b), true)?);
     }
-    Ok(Operation::create(
-        c.salt,
-        c.expiresAt,
-        c.minLifetime,
-        c.creationFlags,
-        attrs,
-    ))
+    Ok(Some(attrs))
 }
 
 fn entry<'a>(row: &'a EntityData, name: &str) -> Option<&'a str> {
