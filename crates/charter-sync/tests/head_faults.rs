@@ -426,3 +426,43 @@ async fn a_new_device_never_overwrites_a_commit_another_device_landed_after_its_
         .clone();
     assert_eq!(hex::encode(&refs.refs[0].oid), rev(&work, "HEAD"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signed_base_that_is_not_an_ancestor_of_its_commit_fails_closed() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "forged-base").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    pushed(&net, &alice, &rid, tmp.path(), 1).await;
+    let work = tmp.path().join("work");
+    let accepted = hex::decode(rev(&work, "HEAD")).expect("hex");
+    // A force push of an unrelated root commit over main.
+    git(&work, &["checkout", "-q", "--orphan", "x"]);
+    commit(&work, &[("x", b"unrelated")], "feat: x");
+    let ra = alice.repo(&rid);
+    let forced = charter_sync::Update {
+        src: Some("refs/heads/x".into()),
+        dst: "refs/heads/main".into(),
+    };
+    let hp = Box::pin(prepare2(&net, &alice, &ra, &work, &[forced]))
+        .await
+        .expect("prepare");
+    let state = charter_sync::state::State::load(&ra.state_path()).expect("state");
+    let mut plan = Box::pin(hp.plan(&state)).await.expect("plan");
+    // A modified client claims the accepted head as the base, so a fold would call it ff.
+    for e in plan.refs.iter_mut().filter(|e| e.name == "refs/heads/main") {
+        e.base = accepted.clone();
+    }
+    Box::pin(hp.finish(plan))
+        .await
+        .expect("the writer lands it");
+    drop(ra);
+
+    let carol = Peer::new(&net, 3);
+    let r = Box::pin(clone_into(&net, &carol, &rid, &tmp.path().join("c"))).await;
+    assert_eq!(
+        code(r),
+        "E_BAD_REFS",
+        "every reader with the objects refuses it"
+    );
+}

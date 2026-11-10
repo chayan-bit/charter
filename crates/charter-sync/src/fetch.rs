@@ -22,6 +22,7 @@ pub async fn sync<A: Arkiv>(a: &A, repo: &Repo, want: &Want) -> Result<View> {
     let must: BTreeSet<Nid> = view.delegates().iter().chain(&want.must).copied().collect();
     let applied = apply_all(a, repo, &mut view, &state, &must).await?;
     check_connected(repo, &mut view, &must)?;
+    check_bases(repo, &mut view, &must)?;
     // After the packs are in the cache, so the program sees real git ancestry.
     view.program = crate::program::enforce(a, &view, repo.git()).await?;
     commit(repo, &view, &mut state, applied)?;
@@ -229,6 +230,38 @@ fn check_connected(repo: &Repo, view: &mut View, must: &BTreeSet<Nid>) -> Result
             let e = SyncError::coded(
                 ErrorCode::MissingObjects,
                 format!("refs of peer {} name objects not on Arkiv", to_text(&nid)),
+            );
+            skip_or_fail(view, must, &nid, e)?;
+        }
+    }
+    Ok(())
+}
+
+/// A format v2 base is the writer's claim that `new` fast-forwards it, and the program fold
+/// trusts it (head-model 8); every reader holding the objects of the live refs checks the
+/// claim of each winning entry and refuses a head that lies (`E_BAD_REFS`).
+fn check_bases(repo: &Repo, view: &mut View, must: &BTreeSet<Nid>) -> Result<()> {
+    let nids: Vec<Nid> = view.peers.keys().copied().collect();
+    for nid in nids {
+        let Some(v2) = view.peers.get(&nid).and_then(|p| p.v2.as_ref()) else {
+            continue;
+        };
+        let bad = v2.merged.iter().find(|(_, w)| {
+            let e = &w.entry;
+            !e.is_tombstone()
+                && !e.base.is_empty()
+                && e.base != e.oid
+                && crate::program::is_ancestor(repo.git(), &e.base, &e.oid) != Some(true)
+        });
+        if let Some((name, w)) = bad {
+            let e = SyncError::coded(
+                ErrorCode::BadRefs,
+                format!(
+                    "peer {} signed {name} at {} with base {}, which is not its ancestor",
+                    to_text(&nid),
+                    hex::encode(&w.entry.oid),
+                    hex::encode(&w.entry.base)
+                ),
             );
             skip_or_fail(view, must, &nid, e)?;
         }
