@@ -28,8 +28,8 @@ use exec::{Env, World, intrinsic_gas};
 pub use persist::FileMemArkiv;
 
 use crate::{
-    ARKIV_ADDRESS, Arkiv, BLOCK_GAS_LIMIT, MAX_RAW_TX_BYTES, Query, QueryOpts, QueryPage, Receipt,
-    SignedTx, StoreError, TX_GAS_CAP, TxInfo, execute_calldata,
+    ARKIV_ADDRESS, Arkiv, BLOCK_GAS_LIMIT, MAX_RAW_TX_BYTES, MinedTx, Query, QueryOpts, QueryPage,
+    Receipt, SignedTx, StoreError, TX_GAS_CAP, TxInfo, execute_calldata,
 };
 
 /// Txs one sender may have pending; the 17th is refused (stricter than Rabdi, which queues more).
@@ -83,6 +83,9 @@ struct Inner {
     pool: Vec<Pending>,
     receipts: HashMap<TxHash, Receipt>,
     txs: HashMap<TxHash, TxInfo>,
+    /// Calldata of every mined tx, kept forever, and each block's txs in order.
+    mined: HashMap<TxHash, MinedTx>,
+    blocks: HashMap<u64, Vec<TxHash>>,
     block_gas: HashMap<(u64, Address), u64>,
     sends: u64,
     faults: Faults,
@@ -102,6 +105,8 @@ impl MemArkiv {
             pool: Vec::new(),
             receipts: HashMap::new(),
             txs: HashMap::new(),
+            mined: HashMap::new(),
+            blocks: HashMap::new(),
             block_gas: HashMap::new(),
             sends: 0,
             faults: Faults::default(),
@@ -342,6 +347,16 @@ impl Inner {
         };
         self.receipts.insert(p.hash, r);
         self.txs.insert(p.hash, p.info(Some(n)));
+        let mined = MinedTx {
+            hash: p.hash,
+            from: p.from,
+            to: Some(p.to),
+            block: n,
+            index: tx_index,
+            input: p.input.clone(),
+        };
+        self.mined.insert(p.hash, mined);
+        self.blocks.entry(n).or_default().push(p.hash);
         gas_used
     }
 
@@ -467,5 +482,16 @@ impl Arkiv for MemArkiv {
         let g = self.lock();
         let pending = || g.pool.iter().find(|p| p.hash == h).map(|p| p.info(None));
         Ok(g.txs.get(&h).copied().or_else(pending))
+    }
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<MinedTx>, StoreError> {
+        Ok(self.lock().mined.get(&h).cloned())
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<MinedTx>, StoreError> {
+        let g = self.lock();
+        let hashes = g.blocks.get(&n).map(Vec::as_slice).unwrap_or_default();
+        Ok(hashes
+            .iter()
+            .filter_map(|h| g.mined.get(h).cloned())
+            .collect())
     }
 }

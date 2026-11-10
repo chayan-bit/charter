@@ -17,8 +17,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value as Json, json};
 
 use crate::{
-    ARKIV_ADDRESS, Arkiv, MAX_RAW_TX_BYTES, Query, QueryOpts, QueryPage, Quota, RABDI_CHAIN_ID,
-    RABDI_RPC, Receipt, SignedTx, StoreError, TxInfo, decode_revert, execute_calldata,
+    ARKIV_ADDRESS, Arkiv, MAX_RAW_TX_BYTES, MinedTx, Query, QueryOpts, QueryPage, Quota,
+    RABDI_CHAIN_ID, RABDI_RPC, Receipt, SignedTx, StoreError, TxInfo, decode_revert,
+    execute_calldata,
 };
 
 /// Header carrying the optional access key.
@@ -109,6 +110,35 @@ struct RawTx {
     to: Option<Address>,
     value: U256,
     block_number: Option<U64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMinedTx {
+    hash: TxHash,
+    from: Address,
+    to: Option<Address>,
+    block_number: Option<U64>,
+    transaction_index: Option<U64>,
+    input: Bytes,
+}
+
+impl RawMinedTx {
+    fn mined(self) -> Option<MinedTx> {
+        Some(MinedTx {
+            hash: self.hash,
+            from: self.from,
+            to: self.to,
+            block: u64_of(self.block_number?),
+            index: u32::try_from(u64_of(self.transaction_index?)).ok()?,
+            input: self.input,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct RawFullBlock {
+    transactions: Vec<RawMinedTx>,
 }
 
 #[derive(Deserialize)]
@@ -420,6 +450,24 @@ impl Arkiv for RpcArkiv {
             value: t.value,
             block_number: t.block_number.map(u64_of),
         }))
+    }
+
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<MinedTx>, StoreError> {
+        let t: Option<RawMinedTx> = self.call("eth_getTransactionByHash", json!([h])).await?;
+        Ok(t.and_then(RawMinedTx::mined))
+    }
+
+    async fn block_txs(&self, n: u64) -> Result<Vec<MinedTx>, StoreError> {
+        let b: Option<RawFullBlock> = self
+            .call("eth_getBlockByNumber", json!([format!("{n:#x}"), true]))
+            .await?;
+        Ok(b.map(|b| {
+            b.transactions
+                .into_iter()
+                .filter_map(RawMinedTx::mined)
+                .collect()
+        })
+        .unwrap_or_default())
     }
 }
 
