@@ -2,6 +2,7 @@
 {% block main %}
 {% include "repo.html" %}
 {% if kind == "issues" && l.writes %}<div class="lh"><a class="btn primary" href="/r/{{ r.hex }}/issues/new">New issue</a></div>{% endif %}
+<div id="live" data-live="op">
 {% if threads.is_empty() %}
 <section class="empty"><p>No {{ kind }} among the verified ops.</p></section>
 {% else %}
@@ -10,4 +11,5 @@
 {% endfor %}
 </tbody></table></div>
 {% endif %}
+</div>
 {% endblock %}

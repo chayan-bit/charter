@@ -2,6 +2,7 @@
 {% block main %}
 {% include "repo.html" %}
 <section class="clone"><label for="clone">Clone</label> <input id="clone" class="mono" readonly value="{{ clone }}" data-copy="{{ clone }}"><button type="button" class="btn js" data-copy-from="clone">Copy</button></section>
+<div id="live" data-live="push">
 {% if entries.is_empty() %}
 <section class="empty"><p>No verified commits on <code>{{ r.default_ref }}</code> yet.</p></section>
 {% else %}
@@ -29,4 +30,5 @@
 {% endif %}
 {% endfor %}
 </section>
+</div>
 {% endblock %}

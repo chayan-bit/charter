@@ -2,6 +2,7 @@
 {% block main %}
 {% include "repo.html" %}
 <article class="thread">
+<div id="live" data-live="op">
 <div class="thead"><h2><span class="badge s-{{ t.state }}">{{ t.state }}</span> {{ t.title }}</h2></div>
 <p class="dim">Opened by <code title="{{ t.author }}">{{ self.short(t.author.as_str()) }}</code> at block <code>{{ t.block }}</code>, op <code data-copy="{{ t.id }}" title="{{ t.id }}">{{ self.short(t.id.as_str()) }}</code>. Times are the authors' own clocks.</p>
 {% if t.revisions.len() > 1 %}<p class="dim">Revisions: {% for h in t.revisions %}<span class="nw">rev {{ loop.index }} <a href="/r/{{ r.hex }}/commit/{{ h }}"><code title="{{ h }}">{{ self.short(h.as_str()) }}</code></a></span>{% if !loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
@@ -14,6 +15,7 @@
 {% for e in t.reviews %}{% include "entry.html" %}{% endfor %}
 </ol>
 {% endif %}
+</div>
 {% let back = self.back() %}
 <section class="wf">
 {% if !l.writes %}<p class="off">{{ l.off() }}</p>

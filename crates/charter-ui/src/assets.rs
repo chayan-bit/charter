@@ -12,7 +12,7 @@ use axum::extract::Path;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-const FILES: [(&str, &str, &[u8]); 3] = [
+const FILES: [(&str, &str, &[u8]); 4] = [
     (
         "app.css",
         "text/css; charset=utf-8",
@@ -22,6 +22,11 @@ const FILES: [(&str, &str, &[u8]); 3] = [
         "keys.js",
         "text/javascript; charset=utf-8",
         include_bytes!("../assets/keys.js"),
+    ),
+    (
+        "live.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../assets/live.js"),
     ),
     (
         "htmx.min.js",

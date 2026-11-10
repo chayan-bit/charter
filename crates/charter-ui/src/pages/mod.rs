@@ -5,6 +5,7 @@ pub mod cobs;
 pub mod code;
 pub mod forms;
 pub mod history;
+pub mod live;
 pub mod program;
 pub mod repos;
 mod verify;
@@ -106,6 +107,8 @@ pub struct Layout {
     pub writes: bool,
     /// `(href, label)`; an empty href is the current page.
     pub crumbs: Vec<(String, String)>,
+    /// The repo's event stream (`live.js`); empty off repo pages.
+    pub events: String,
 }
 
 impl Layout {
@@ -117,6 +120,7 @@ impl Layout {
             theme: theme.0,
             writes: app.writer.is_some(),
             crumbs: vec![],
+            events: String::new(),
         }
     }
 
@@ -259,6 +263,7 @@ pub fn frame(app: &App, theme: &Theme, r: &Repo, tab: &'static str, title: &str)
     let ops = r.ops();
     let mut l = Layout::new(app, theme, format!("{title} - {}", r.name()));
     l.crumbs.push((format!("/r/{}", r.hex), r.name()));
+    l.events = format!("/r/{}/events", r.hex);
     (l, Head::new(r, &ops, tab))
 }
 

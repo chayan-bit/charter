@@ -432,7 +432,15 @@ async fn pin_cmd<A: Arkiv>(a: &A, cfg: &Config, p: &program::PinArgs) -> Result<
 
 async fn ui_cmd(a: backend::Backend, cfg: Config, u: &UiArgs) -> Result<()> {
     let want = u.repo.as_deref().map(rid_of).transpose()?;
-    let opts = charter_ui::Options { port: u.port, want };
+    let ws = match &a {
+        backend::Backend::Rpc(r) => Some(r.config().ws()),
+        backend::Backend::Mem(_) => None,
+    };
+    let opts = charter_ui::Options {
+        port: u.port,
+        want,
+        ws,
+    };
     charter_ui::serve(std::sync::Arc::new(a), cfg, opts)
         .await
         .map_err(|e| match e {

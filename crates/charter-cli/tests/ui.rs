@@ -1,7 +1,8 @@
 //! `chart ui` through the real binary on the file-backed fake: a peer with an empty
 //! `$CHARTER_HOME` names a repo pushed by another and the printed URL serves it verified;
 //! and an issue, a comment, a patch review and a release written through the UI's HTTP
-//! endpoints verify with the real `chart op list` and `chart release verify`.
+//! endpoints verify with the real `chart op list` and `chart release verify`; and a push
+//! from another process reaches an open event stream within one sync round.
 
 mod common;
 
@@ -331,4 +332,71 @@ fn writes_made_in_the_ui_verify_with_chart_op_list_and_chart_release_verify() {
         &format!("/r/{rid}/releases"),
         "valid under the pinned program",
     );
+}
+
+/// An open `/events` stream, past the response head.
+fn stream(port: u16, cookie: &str, path: &str) -> BufReader<TcpStream> {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("timeout");
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {cookie}\r\nAccept: text/event-stream\r\n\r\n"
+    )
+    .expect("send");
+    let mut r = BufReader::new(s);
+    let mut line = String::new();
+    r.read_line(&mut line).expect("status");
+    assert!(line.contains(" 200 "), "{line}");
+    while line != "\r\n" {
+        line.clear();
+        r.read_line(&mut line).expect("header");
+    }
+    r
+}
+
+/// The next event's name (chunk-size lines and data lines are skipped).
+fn next_event(r: &mut BufReader<TcpStream>) -> String {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(r.read_line(&mut line).expect("event") > 0, "stream closed");
+        if let Some(name) = line.trim_end().strip_prefix("event: ") {
+            return name.to_owned();
+        }
+    }
+}
+
+#[test]
+fn a_push_from_another_process_reaches_an_open_event_stream_within_one_round() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root, log) = (tmp.path(), tmp.path().join("chain.log"));
+    let alice = user(root, "alice", &log);
+    let bob = User::new(root, "bob", &log);
+    let (url, work, _) = repo_with_main(&alice, root, "live");
+    let (_guard, port, path) = start(&bob, &url);
+    let cookie = login(port, &path);
+    let rid =
+        hex::encode(charter_sync::ids::parse_id(url.trim_start_matches("arkiv::")).expect("rid"));
+    wait_for(port, &cookie, &format!("/r/{rid}"), "vp-verified");
+    let mut events = stream(port, &cookie, &format!("/r/{rid}/events"));
+    while next_event(&mut events) != "sync" {}
+
+    let c = commit(&alice, &work, "pushed while the page is open\n");
+    alice.git(&work, &["push", "-q", &url, "main"]);
+    let pushed = Instant::now();
+    // A round already running when the push landed may end without it; the next one
+    // must carry it.
+    let mut rounds = 0;
+    loop {
+        match next_event(&mut events).as_str() {
+            "push" => break,
+            "sync" => rounds += 1,
+            _ => {}
+        }
+        assert!(rounds <= 1, "a full round passed without the push");
+    }
+    eprintln!("push event {:?} after git push returned", pushed.elapsed());
+    let log = get(port, &format!("/r/{rid}/log/main"), Some(&cookie)).2;
+    assert!(log.contains(&c), "the log shows the pushed commit");
 }

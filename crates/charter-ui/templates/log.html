@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block main %}
 {% include "repo.html" %}
+<div id="live" data-live="push">
 {% if days.is_empty() %}<section class="empty"><p>No commits.</p></section>{% endif %}
 {% for d in days %}
 <h2 class="day">{{ d.date }}</h2>
@@ -10,4 +11,5 @@
 </tbody></table></div>
 {% endfor %}
 <nav class="pager">{% if page > 1 %}<a rel="prev" href="?page={{ page - 1 }}">Newer</a>{% endif %}{% if next %}<a rel="next" href="?page={{ page + 1 }}">Older</a>{% endif %}</nav>
+</div>
 {% endblock %}

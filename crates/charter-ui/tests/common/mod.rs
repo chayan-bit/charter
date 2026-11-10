@@ -190,7 +190,7 @@ async fn build() -> Fixture {
     let r = sync_loop::round(&net, &alice.cfg, &rid)
         .await
         .expect("round");
-    assert_eq!(r, sync_loop::Outcome::Synced);
+    assert!(matches!(r, sync_loop::Outcome::Synced(_)), "{r:?}");
     Fixture {
         hex: hex32(&rid),
         net: Arc::new(net),

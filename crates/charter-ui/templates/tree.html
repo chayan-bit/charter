@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block main %}
 {% include "repo.html" %}
+<div id="live" data-live="push">
 {% if let Some(u) = up %}<a class="up" rel="up" href="{{ u }}" hidden>Up</a>{% endif %}
 <div class="box">
 {% if let Some(c) = last %}<div class="last"><a href="/r/{{ r.hex }}/commit/{{ c.oid }}"><code>{{ self.short(c.oid.as_str()) }}</code></a> <span>{{ c.subject }}</span> <span class="dim">{{ c.author }}</span></div>{% endif %}
@@ -12,5 +13,6 @@
 </tbody>
 </table>
 {% endif %}
+</div>
 </div>
 {% endblock %}

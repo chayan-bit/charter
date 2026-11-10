@@ -14,6 +14,7 @@ import json
 import os
 import re
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -261,8 +262,10 @@ def shot(page, name, theme, vp, kind="", full=True, clip_h=None):
     return fn
 
 
-def context(browser, theme, vp):
-    """A logged-in browser context: (context, page, sink of console errors and failed requests)."""
+def context(browser, theme, vp, live=False):
+    """A logged-in browser context: (context, page, sink of console errors and failed requests).
+    Unless `live`, the event stream answers 204 (EventSource then stops), so sync rounds do not
+    swap regions under the screenshots and Tab checks."""
     w, h = VIEWPORTS[vp]
     ctx = browser.new_context(
         viewport={"width": w, "height": h}, color_scheme=theme,
@@ -270,6 +273,8 @@ def context(browser, theme, vp):
         is_mobile=vp == "phone", has_touch=vp == "phone",
     )
     ctx.add_init_script(INIT_JS)
+    if not live:
+        ctx.route(re.compile(r".*/r/[0-9a-f]{64}/events$"), lambda r: r.fulfill(status=204, body=""))
     page = ctx.new_page()
     sink = {"console": [], "pageerror": [], "bad": []}
     page.on("console", lambda m, s=sink: s["console"].append(m.text) if m.type == "error" else None)
@@ -439,6 +444,34 @@ def writes_nojs(browser, pages, cookie):
         confirm and hint and states[-1] == "t-confirmed", f"confirm form {confirm}, reload hint {hint}, states {states}")
     ctx.close()
     comment_lands(cookie, issue_path, text, "write/no-js")
+
+
+def live_update(browser, pages):
+    """A push from another process shows on an open page without a reload (ui.md 4.5)."""
+    scope = "live/light/desktop"
+    repo = next(p for n, p, *_ in pages if n == "repo")
+    ctx, page, sink = context(browser, "light", "desktop", live=True)
+    page.goto(f"http://{HOST}:{PORT}{repo}", wait_until="load")
+    page.wait_for_timeout(300)
+    page.evaluate("window.__same = 1")
+    work = Path(os.environ["E2E_WORK"]) / "fx" / "work"
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    t = time.time()
+    subprocess.run(["git", "-C", str(work), "push", "-q", os.environ["REPO_URL"], "main:refs/heads/e2e-live"],
+                   env=env, check=True, capture_output=True)
+    pushed = time.time()
+    try:
+        page.locator("#live code", has_text="e2e-live").first.wait_for(timeout=30000)
+        shown = True
+    except Exception:
+        shown = False
+    rec("a push from another process shows on the open page without a reload", scope,
+        shown and page.evaluate("window.__same === 1"),
+        f"push took {pushed - t:.1f} s, shown {time.time() - pushed:.1f} s after it" if shown else "never shown")
+    state_checks(page, sink, scope)
+    page.locator("#live code", has_text="e2e-live").first.scroll_into_view_if_needed()
+    shot(page, "repo-live", "light", "desktop", full=False)
+    ctx.close()
 
 
 def layout_checks(page, name, scope, vp, rid):
@@ -647,6 +680,7 @@ def main():
         visit_all(browser, pages, axe_src, cookie, rid)
         writes(browser, pages, axe_src, cookie)  # last: the comments change the issue page
         writes_nojs(browser, pages, cookie)
+        live_update(browser, pages)  # last: it adds a branch
         browser.close()
     write_reports(first)
     fails = [c for c in CHECKS if c["status"] == "fail"]

@@ -6,7 +6,7 @@ mod common;
 use charter_core::ZERO;
 use charter_sync::cob;
 use charter_ui::cache::{self, Cobs, RepoView};
-use charter_ui::sync_loop::{Outcome, round};
+use charter_ui::sync_loop::{Changes, Kind, Outcome, round};
 use common::*;
 use serde_json::json;
 
@@ -25,10 +25,16 @@ async fn a_round_skips_while_a_push_holds_the_lock_then_catches_up() {
         "a skipped round writes nothing"
     );
     drop(held);
+    let first = round(&net, &alice.cfg, &rid).await;
     assert_eq!(
-        round(&net, &alice.cfg, &rid).await.expect("round"),
-        Outcome::Synced
+        first.as_ref().expect("round"),
+        &Outcome::Synced(Changes {
+            pushed: true,
+            ops: 0
+        }),
+        "the first view is news to an open page"
     );
+    assert_eq!(Outcome::kinds(&first), [Kind::Push, Kind::Sync]);
     let dir = alice.repo(&rid).dir.clone();
     let v: RepoView = cache::read(&dir.join(cache::VIEW))
         .expect("read")
@@ -51,7 +57,8 @@ async fn rounds_keep_the_op_cache_equal_to_a_full_list() {
         json!({"title": "a"}),
     )
     .await;
-    round(&net, &alice.cfg, &rid).await.expect("first");
+    let first = round(&net, &alice.cfg, &rid).await.expect("first");
+    assert!(matches!(first, Outcome::Synced(Changes { ops: 1, .. })));
     post(
         &net,
         &alice,
@@ -72,8 +79,21 @@ async fn rounds_keep_the_op_cache_equal_to_a_full_list() {
         json!({"title": "p"}),
     )
     .await;
-    round(&net, &alice.cfg, &rid).await.expect("second");
-    round(&net, &alice.cfg, &rid).await.expect("idle");
+    let second = round(&net, &alice.cfg, &rid).await;
+    assert_eq!(
+        second.as_ref().expect("second"),
+        &Outcome::Synced(Changes {
+            pushed: false,
+            ops: 2
+        })
+    );
+    assert_eq!(Outcome::kinds(&second), [Kind::Op, Kind::Sync]);
+    let idle = round(&net, &alice.cfg, &rid).await;
+    assert_eq!(
+        idle.as_ref().expect("idle"),
+        &Outcome::Synced(Changes::default())
+    );
+    assert_eq!(Outcome::kinds(&idle), [Kind::Sync]);
     let dir = alice.repo(&rid).dir.clone();
     let c: Cobs = cache::read(&dir.join(cache::COBS))
         .expect("read")

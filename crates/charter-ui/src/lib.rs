@@ -1,4 +1,4 @@
-//! charter-ui: the local, read-only web UI behind `chart ui` (docs/p6/ui.md, slice 1).
+//! charter-ui: the local web UI behind `chart ui` (docs/p6/ui.md, slices 1 to 3).
 //!
 //! Pages render from `$CHARTER_HOME/repos/<rid>/` only (git cache, `view.json`,
 //! `cobs.json`) and never take the repo lock; one background loop ([`sync_loop`]) keeps
@@ -44,7 +44,7 @@ pub enum UiError {
 /// The router with every page, the assets and the guard.
 pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
     use axum::routing::post;
-    use pages::{cobs, code, forms, history, program, repos, write};
+    use pages::{cobs, code, forms, history, live, program, repos, write};
     Router::new()
         .route("/", get(repos::index))
         .route("/r/{rid}", get(repos::home))
@@ -54,6 +54,8 @@ pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
         .route("/r/{rid}/raw/{rev}/{*path}", get(code::raw))
         .route("/r/{rid}/log/{rev}", get(history::log))
         .route("/r/{rid}/commit/{sha}", get(history::commit))
+        .route("/r/{rid}/events", get(live::events))
+        .route("/r/{rid}/verify", get(live::verify))
         .route("/r/{rid}/write", post(write::prepare).get(write::to_repo))
         .route(
             "/r/{rid}/write/{id}",
@@ -71,7 +73,8 @@ pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
         .fallback(pages::not_found)
         .with_state(app)
         .layer(axum::middleware::from_fn_with_state(auth, security::guard))
-        // Outermost, so denials are gzipped too; tower-http skips images and event streams.
+        // Outermost, so denials are gzipped too; tower-http skips images and event streams,
+        // so each `/events` message is flushed as it is sent.
         // No BREACH exposure: the cookie is SameSite=Strict, so no cross-site request ever
         // gets a page with the CSRF token in it.
         .layer(tower_http::compression::CompressionLayer::new())
@@ -84,6 +87,8 @@ pub struct Options {
     pub port: u16,
     /// A repo to sync first even if it is not cached yet.
     pub want: Option<Rid>,
+    /// The backend's `newHeads` socket; `None` polls (the fake backend).
+    pub ws: Option<charter_store::heads::WsConfig>,
 }
 
 /// Binds `127.0.0.1`, starts the sync loop, prints the session URL and serves until killed.
@@ -106,7 +111,7 @@ pub async fn serve<A: Arkiv + 'static>(
     if let Some(keys) = charter_sync::Keys::load(&cfg.home)? {
         app = app.with_writer(writes::spawn(a.clone(), cfg.clone(), keys));
     }
-    sync_loop::spawn(a, cfg, shared)?;
+    sync_loop::spawn(a, cfg, shared, opts.ws)?;
     let app = Arc::new(app);
     println!("{}", auth.url());
     axum::serve(listener, router(app, auth)).await?;

@@ -2,6 +2,7 @@
 {% block main %}
 {% include "repo.html" %}
 {% if l.writes %}<div class="lh"><a class="btn primary" href="/r/{{ r.hex }}/releases/new">New release</a></div>{% endif %}
+<div id="live" data-live="op">
 {% if releases.is_empty() %}<section class="empty"><p>No releases among the verified ops.</p></section>{% endif %}
 {% for x in releases %}
 <article class="art" id="{{ x.tag }}">
@@ -15,4 +16,5 @@
 <p class="dim">Hashes are the signed claim; <code>chart release verify --tag {{ x.tag }}</code> downloads and checks the bytes.</p>
 </article>
 {% endfor %}
+</div>
 {% endblock %}
