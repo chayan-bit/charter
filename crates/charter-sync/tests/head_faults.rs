@@ -89,12 +89,30 @@ async fn landing_skips_a_reverted_tx_and_a_create_of_another_entity() {
     let signer = dev.control(&rid);
     net.fund(dev.control_address(&rid));
     let start = net.head().await.expect("head");
-    // 1. A patch of the head carrying this body, reverted.
+    // 1. A patch of the head carrying this body, mined and reverted (sent by hand: the
+    // pipeline would resend a failed tx that re-estimates fine).
     net.mem.revert_next_at(0);
     let patch = entity_patch_op::<HeadBody>(head.key, &env).expect("op");
-    let cfg = fast();
-    let reverted = charter_sync::write::send(&net, &signer, &cfg, vec![vec![patch.clone()]]);
-    assert!(reverted.await.is_err(), "the injected revert surfaces");
+    let c_d = dev.control_address(&rid);
+    let params = TxParams {
+        nonce: net.mem.tx_count(c_d).await.expect("nonce"),
+        to: charter_store::ARKIV_ADDRESS,
+        value: U256::ZERO,
+        input: charter_store::execute_calldata(std::slice::from_ref(&patch)),
+        gas_limit: 3_000_000,
+        max_fee_per_gas: 2_000_000_000,
+        max_priority_fee_per_gas: 0,
+    };
+    let tx = SignedTx::sign(&signer, CHAIN, params).expect("sign");
+    net.mem.send(tx.clone()).await.expect("send");
+    net.mine(1);
+    let r = net
+        .mem
+        .receipt(tx.hash())
+        .await
+        .expect("rpc")
+        .expect("mined");
+    assert!(!r.success, "the injected revert is on chain");
     // 2. A create of another entity carrying the same body.
     send_ops(
         &net,

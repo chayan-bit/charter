@@ -87,19 +87,19 @@ impl<A: Arkiv> HeadPush<'_, A> {
         Ok(ops)
     }
 
+    /// Sends `jobs` from `signer`, topped up from the wallet: `B_d` sends independent data
+    /// txs (pieces, chunks, manifests) with two blocks of gas in flight, every other
+    /// address sends ordered runs.
     async fn send_from(
         &self,
         signer: &alloy_signer_local::PrivateKeySigner,
         jobs: Vec<Vec<Operation>>,
     ) -> Result<Vec<charter_store::pipeline::Landed>> {
-        write::send_funded(
-            self.a,
-            signer,
-            &self.keys.wallet(),
-            &self.cfg.pipeline,
-            jobs,
-        )
-        .await
+        let cfg = match signer.address() == self.dev.bulk_address(&self.rid()) {
+            true => self.cfg.pipeline.bulk(),
+            false => self.cfg.pipeline.ordered(),
+        };
+        write::send_funded(self.a, signer, &self.keys.wallet(), &cfg, jobs).await
     }
 
     /// Refuses to sign while an earlier tx of `C_d` is still pending (head-model 7.2).
