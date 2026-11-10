@@ -219,9 +219,21 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             .collect()
     }
 
-    /// Computes the next body's refs and pack plan (no sends).
+    /// Computes the next body's refs and pack plan (no sends), from a fresh read of this
+    /// identity's heads.
     pub async fn plan(&self, state: &State) -> Result<Plan> {
-        let v2 = Box::pin(self.own_v2(state)).await?;
+        self.plan_from(state, false).await
+    }
+
+    /// Like [`Self::plan`]; with `reuse_view` the heads verified by the `list for-push`
+    /// sync are the base (head-model 7.1 step 1), saving a second read. Only valid while
+    /// nothing of this identity was sent since that sync.
+    pub(crate) async fn plan_from(&self, state: &State, reuse_view: bool) -> Result<Plan> {
+        let mine = self.view.peers.get(&self.nid()).and_then(|p| p.v2.clone());
+        let v2 = match (reuse_view, mine) {
+            (true, Some(v)) => Some(v),
+            _ => Box::pin(self.own_v2(state)).await?,
+        };
         let prev = match &v2 {
             Some(v) => self.prev(v, state).await?,
             None => None,

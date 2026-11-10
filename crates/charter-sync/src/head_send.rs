@@ -26,6 +26,11 @@ const HEAD_FLAGS: u8 = 2;
 /// Waits for this device's earlier txs before signing (a resumed push after a crash).
 const IDLE_POLLS: usize = 60;
 const RESEND_ROUNDS: usize = 3;
+/// Gas a head tx with a full 16 KiB inline piece stays under (MEASURED about 0.32M with
+/// 2.7 KiB inline on Rabdi, 2026-11-11).
+const HEAD_GAS: u64 = 1_200_000;
+/// Head txs one top-up of `C_d` pays for.
+const PREFUND_HEADS: u64 = 4;
 
 /// Pack bytes this push sends, in head form.
 struct Content {
@@ -102,12 +107,16 @@ impl<A: Arkiv> HeadPush<'_, A> {
         write::send_funded(self.a, signer, &self.keys.wallet(), &cfg, jobs).await
     }
 
-    /// Refuses to sign while an earlier tx of `C_d` is still pending (head-model 7.2).
-    async fn ensure_idle(&self) -> Result<()> {
+    /// Refuses to sign while an earlier tx of `C_d` is still pending (head-model 7.2);
+    /// `true` when it had to wait (so the view's heads may be stale).
+    async fn ensure_idle(&self) -> Result<bool> {
         let c = self.dev.control_address(&self.rid());
-        for _ in 0..IDLE_POLLS {
-            if self.a.tx_count(c).await? == self.a.tx_count_mined(c).await? {
-                return Ok(());
+        for round in 0..IDLE_POLLS {
+            let (pending, mined) =
+                futures_util::future::try_join(self.a.tx_count(c), self.a.tx_count_mined(c))
+                    .await?;
+            if pending == mined {
+                return Ok(round > 0);
             }
             tokio_sleep(self.cfg.pipeline.poll * 2).await;
         }
@@ -148,9 +157,9 @@ impl<A: Arkiv> HeadPush<'_, A> {
 
     /// Steps 1 to 6 end to end.
     pub async fn run(self) -> Result<()> {
-        self.setup().await?;
+        let current = self.setup().await?;
         let state = State::load(&self.repo.state_path())?;
-        let plan = Box::pin(self.plan(&state)).await?;
+        let plan = Box::pin(self.plan_from(&state, current)).await?;
         Box::pin(self.finish(plan)).await
     }
 
@@ -159,15 +168,36 @@ impl<A: Arkiv> HeadPush<'_, A> {
     }
 
     /// The first write and device delegation if missing, then waits for `C_d` to be idle
-    /// (and so for a head tx an interrupted push left in flight).
-    pub async fn setup(&self) -> Result<()> {
+    /// (and so for a head tx an interrupted push left in flight) while topping it up.
+    /// `true` when nothing was sent or landed since the view's sync.
+    pub async fn setup(&self) -> Result<bool> {
         let first = self.first_ops()?;
-        if !first.is_empty() {
+        let sent_first = !first.is_empty();
+        if sent_first {
             self.send_from(&self.keys.control(&self.rid()), vec![first])
                 .await?;
         }
-        self.ensure_idle().await?;
+        let (waited, ()) =
+            futures_util::future::try_join(self.ensure_idle(), self.prefund_control()).await?;
         let _ = std::fs::remove_file(self.pending_head_path());
+        Ok(!sent_first && !waited)
+    }
+
+    /// Tops `C_d` up for several head txs at once when it cannot pay for one, so most
+    /// pushes send no top-up before their head tx.
+    async fn prefund_control(&self) -> Result<()> {
+        let c = self.dev.control_address(&self.rid());
+        let (fee, have) =
+            futures_util::future::try_join(self.a.base_fee(), self.a.balance(c)).await?;
+        let one = self.cfg.pipeline.tx_reserve(HEAD_GAS, U256::ZERO, fee);
+        let Some(amount) = charter_store::PipelineConfig::top_up(have, one, PREFUND_HEADS) else {
+            return Ok(());
+        };
+        let chain = self.a.chain_id().await?;
+        let cfg = self.cfg.pipeline.clone();
+        charter_store::TxPipeline::new(self.a, self.keys.wallet(), chain, cfg)
+            .transfer(c, amount)
+            .await?;
         Ok(())
     }
 
@@ -378,8 +408,25 @@ impl<A: Arkiv> HeadPush<'_, A> {
             if inline.is_empty() {
                 inline.push(vec![]);
             }
+            let c_d = self.dev.control_address(&rid);
+            let (at, nonce) =
+                futures_util::future::try_join(self.a.head(), self.a.entity_nonce(c_d)).await?;
+            // Another writer of this device (a copied device seed) would fork the body
+            // chain; the next head must account for exactly what `C_d` created so far.
+            let expected = match key {
+                Some(_) => pieces + 1,
+                None => 0,
+            };
+            if nonce != expected {
+                return Err(SyncError::coded(
+                    ErrorCode::ConcurrentPush,
+                    format!(
+                        "this device's control address created {nonce} entities, its head \
+                         accounts for {expected}; another writer uses this device seed"
+                    ),
+                ));
+            }
             pieces += inline.len() as u64;
-            let at = self.a.head().await?;
             let body = HeadBody {
                 rid,
                 nid: self.nid(),

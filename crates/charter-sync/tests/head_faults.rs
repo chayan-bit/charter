@@ -177,3 +177,45 @@ async fn a_push_waits_for_an_earlier_head_tx_still_in_flight() {
     let d = device_view(&net, &alice, &rid).await;
     assert_eq!(d.head.expect("head").body.seq, 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copied_device_seed_cannot_fork_the_body_chain() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "twin").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    pushed(&net, &alice, &rid, tmp.path(), 1).await;
+    // A second machine with a copy of the whole home, device seed included.
+    let twin = alice.second_device(&net);
+    let seed = charter_sync::device::device_seed_path(alice.home.path());
+    let copy = charter_sync::device::device_seed_path(twin.home.path());
+    std::fs::create_dir_all(copy.parent().expect("dir")).expect("dir");
+    std::fs::copy(&seed, &copy).expect("copy seed");
+    let dest = tmp.path().join("twin");
+    Box::pin(clone_into(&net, &twin, &rid, &dest))
+        .await
+        .expect("clone");
+
+    // Both plan from the same view; alice lands first.
+    let work = tmp.path().join("work");
+    commit(&work, &[("a", b"alice")], "feat: alice");
+    commit(&dest, &[("t", b"twin")], "feat: twin");
+    let up = [upd("refs/heads/main")];
+    let (ra, rt) = (alice.repo(&rid), twin.repo(&rid));
+    let a = Box::pin(prepare2(&net, &alice, &ra, &work, &up))
+        .await
+        .expect("a");
+    let t = Box::pin(prepare2(&net, &twin, &rt, &dest, &up))
+        .await
+        .expect("t");
+    Box::pin(a.run()).await.expect("alice pushes");
+    let r = Box::pin(t.run()).await;
+    assert_eq!(
+        code(r),
+        "E_CONCURRENT_PUSH",
+        "the twin refuses to fork the chain"
+    );
+    drop((ra, rt)); // release the repo locks
+    let d = device_view(&net, &alice, &rid).await;
+    assert_eq!(d.head.expect("head").body.seq, 1, "alice's body stands");
+}
