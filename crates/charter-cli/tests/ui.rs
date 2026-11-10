@@ -1,5 +1,7 @@
-//! `chart ui` through the real binary: a peer with an empty `$CHARTER_HOME` names a repo
-//! pushed by another, the sync loop fetches it, and the printed URL serves it verified.
+//! `chart ui` through the real binary on the file-backed fake: a peer with an empty
+//! `$CHARTER_HOME` names a repo pushed by another and the printed URL serves it verified;
+//! and an issue, a comment, a patch review and a release written through the UI's HTTP
+//! endpoints verify with the real `chart op list` and `chart release verify`.
 
 mod common;
 
@@ -8,7 +10,9 @@ use std::net::TcpStream;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
+use common::ci::*;
 use common::e2e::{User, field, fund, write};
+use common::programs::*;
 
 struct Kill(Child);
 
@@ -19,15 +23,28 @@ impl Drop for Kill {
     }
 }
 
-/// One HTTP/1.1 GET: (status, raw headers, body).
-fn get(port: u16, path: &str, cookie: Option<&str>) -> (u16, String, String) {
+/// One HTTP/1.1 request: (status, raw headers, body).
+fn http(
+    port: u16,
+    req: &str,
+    path: &str,
+    cookie: Option<&str>,
+    form: &str,
+) -> (u16, String, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     let cookie = cookie
         .map(|c| format!("Cookie: {c}\r\n"))
         .unwrap_or_default();
+    let body = match form {
+        "" => String::new(),
+        f => format!(
+            "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n",
+            f.len()
+        ),
+    };
     write!(
         s,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{cookie}Connection: close\r\n\r\n"
+        "{req} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{cookie}{body}Connection: close\r\n\r\n{form}"
     )
     .expect("send");
     let mut out = String::new();
@@ -39,6 +56,58 @@ fn get(port: u16, path: &str, cookie: Option<&str>) -> (u16, String, String) {
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
     (status, head.to_owned(), body.to_owned())
+}
+
+fn get(port: u16, path: &str, cookie: Option<&str>) -> (u16, String, String) {
+    http(port, "GET", path, cookie, "")
+}
+
+/// A running `chart ui [<url>]` of `u`: the guard, its port and the session path.
+fn start(u: &User, url: &str) -> (Kill, u16, String) {
+    let mut child = u
+        .cmd(env!("CARGO_BIN_EXE_chart"), &u.home)
+        .args(["ui", url])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().expect("stdout"))
+        .read_line(&mut line)
+        .expect("url");
+    let link = line.trim();
+    let rest = link
+        .strip_prefix("http://127.0.0.1:")
+        .expect("loopback url");
+    let (port, path) = rest.split_once('/').expect("path");
+    (Kill(child), port.parse().expect("port"), path.to_owned())
+}
+
+/// Exchanges the URL token for the session cookie.
+fn login(port: u16, path: &str) -> String {
+    let (status, head, _) = get(port, &format!("/{path}"), None);
+    assert_eq!(status, 303);
+    head.lines()
+        .find_map(|l| l.strip_prefix("set-cookie: "))
+        .and_then(|c| c.split(';').next())
+        .expect("cookie")
+        .to_owned()
+}
+
+/// Polls `path` until its body contains `want`.
+fn wait_for(port: u16, cookie: &str, path: &str, want: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (status, _, body) = get(port, path, Some(cookie));
+        if status == 200 && body.contains(want) {
+            return body;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{path} never showed {want}: {status} {body}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 #[test]
@@ -59,54 +128,207 @@ fn chart_ui_fetches_a_named_repo_and_serves_it_behind_the_session_cookie() {
     alice.git(&work, &["commit", "-q", "-m", "first"]);
     alice.git(&work, &["push", "-q", &url, "main"]);
 
-    let mut child = bob
-        .cmd(env!("CARGO_BIN_EXE_chart"), &bob.home)
-        .args(["ui", &url])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn");
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().expect("stdout"))
-        .read_line(&mut line)
-        .expect("url");
-    let _guard = Kill(child);
-    let link = line.trim();
-    let rest = link
-        .strip_prefix("http://127.0.0.1:")
-        .expect("loopback url");
-    let (port, path) = rest.split_once('/').expect("path");
-    let port: u16 = port.parse().expect("port");
+    let (_guard, port, path) = start(&bob, &url);
     assert!(
         path.starts_with("?token=") && path.len() == 7 + 64,
-        "{link}"
+        "{path}"
+    );
+    assert_eq!(get(port, "/", None).0, 401, "no cookie, no page");
+    let cookie = login(port, &path);
+    let rid = url.trim_start_matches("arkiv::");
+    let body = wait_for(port, &cookie, &format!("/r/{rid}"), "vp-verified");
+    assert!(
+        body.contains("uidemo") && body.contains("<h1>uidemo</h1>"),
+        "{body}"
+    );
+    let issue = wait_for(port, &cookie, &format!("/r/{rid}/issues/new"), "New issue");
+    assert!(issue.contains("Writes are off"), "bob has no keys: {issue}");
+}
+
+/// The CSRF token every page carries.
+fn csrf(page: &str) -> String {
+    let at = page
+        .find("name=\"csrf-token\" content=\"")
+        .expect("csrf meta")
+        + 27;
+    page[at..at + 64].to_owned()
+}
+
+/// One write through the UI: price, confirm, wait for the receipt.
+fn ui_write(port: u16, cookie: &str, rid: &str, kv: &[(&str, &str)]) {
+    let token = csrf(&get(port, &format!("/r/{rid}"), Some(cookie)).2);
+    let enc = |s: &str| {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect::<String>()
+    };
+    let mut fields: Vec<String> = kv.iter().map(|(k, v)| format!("{k}={}", enc(v))).collect();
+    fields.push(format!("csrf={token}"));
+    let (status, _, page) = http(
+        port,
+        "POST",
+        &format!("/r/{rid}/write"),
+        Some(cookie),
+        &fields.join("&"),
+    );
+    assert_eq!(status, 200, "{page}");
+    assert!(page.contains("Confirm write"), "{page}");
+    let at = page.find("/write/").expect("confirm form") + 7;
+    let id = &page[at..at + 64];
+    let status_path = format!("/r/{rid}/write/{id}");
+    let (code, head, _) = http(
+        port,
+        "POST",
+        &status_path,
+        Some(cookie),
+        &format!("csrf={token}"),
+    );
+    assert_eq!(code, 303, "{head}");
+    wait_for(
+        port,
+        cookie,
+        &format!("{status_path}?part=1"),
+        "Confirmed in block",
+    );
+}
+
+#[test]
+fn writes_made_in_the_ui_verify_with_chart_op_list_and_chart_release_verify() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root, log) = (tmp.path(), tmp.path().join("chain.log"));
+    let alice = user(root, "alice", &log);
+    let (url, work, _) = repo_with_main(&alice, root, "uiw");
+    let ci = user(root, "ci", &log);
+    let gated = gated_for(&hex_id(&nid(&ci)), root);
+    alice.arkiv(&[
+        "program",
+        "pin",
+        "--repo",
+        &url,
+        "--file",
+        &gated.to_string_lossy(),
+    ]);
+    alice.git(&work, &["checkout", "-q", "-b", "feat/ui"]);
+    let c1 = commit(&alice, &work, "made for the ui\n");
+    let p1 = patch(&alice, &work, &url, "feat/ui");
+
+    let (_guard, port, path) = start(&alice, &url);
+    let cookie = login(port, &path);
+    let rid =
+        hex::encode(charter_sync::ids::parse_id(url.trim_start_matches("arkiv::")).expect("rid"));
+    wait_for(port, &cookie, &format!("/r/{rid}"), "vp-verified");
+
+    ui_write(
+        port,
+        &cookie,
+        &rid,
+        &[
+            ("kind", "issue"),
+            ("title", "Typed in the UI"),
+            ("body", "found it"),
+        ],
+    );
+    let ops = alice.arkiv(&[
+        "op",
+        "list",
+        "--repo",
+        &url,
+        "--type",
+        "xyz.arkiv.issue",
+        "--json",
+    ]);
+    let list: serde_json::Value = serde_json::from_str(&ops).expect("json");
+    let issue = list[0]["id"].as_str().expect("issue id").to_owned();
+    assert_eq!(list[0]["payload"]["title"], "Typed in the UI");
+    ui_write(
+        port,
+        &cookie,
+        &rid,
+        &[
+            ("kind", "comment"),
+            ("issue", &issue),
+            ("body", "a comment from the UI"),
+        ],
+    );
+    ui_write(
+        port,
+        &cookie,
+        &rid,
+        &[
+            ("kind", "review"),
+            ("patch", &p1),
+            ("verdict", "approve"),
+            ("head", &c1),
+        ],
     );
 
-    assert_eq!(get(port, "/", None).0, 401, "no cookie, no page");
-    let (status, head, _) = get(port, &format!("/{path}"), None);
-    assert_eq!(status, 303);
-    let cookie = head
-        .lines()
-        .find_map(|l| l.strip_prefix("set-cookie: "))
-        .and_then(|c| c.split(';').next())
-        .expect("cookie")
-        .to_owned();
-
-    let rid = url.trim_start_matches("arkiv::");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let (status, _, body) = get(port, &format!("/r/{rid}"), Some(&cookie));
-        if status == 200 && body.contains("vp-verified") {
-            assert!(
-                body.contains("uidemo") && body.contains("<h1>uidemo</h1>"),
-                "{body}"
-            );
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "repo never synced: {status} {body}"
-        );
-        std::thread::sleep(Duration::from_millis(200));
+    let ops = alice.arkiv(&["op", "list", "--repo", &url]);
+    for want in [
+        "xyz.arkiv.issue create",
+        "xyz.arkiv.issue comment",
+        "xyz.arkiv.review create",
+        "xyz.arkiv.review approve",
+    ] {
+        assert!(ops.contains(want), "{want} in:\n{ops}");
     }
+    assert!(
+        ops.contains("a comment from the UI") && ops.contains(&c1),
+        "{ops}"
+    );
+
+    // CI passes at the approved head and the merge script pushes it: the UI approval counts.
+    run_ci(&ci, &url, "true");
+    ok(merge(&alice, &work, &url, &p1));
+
+    let (dist, dl) = (root.join("dist"), root.join("dl"));
+    std::fs::create_dir_all(&dist).expect("dist");
+    write(&dist, "ui.tar.gz", b"from the ui");
+    let art = format!("ui.tar.gz={}", dist.join("ui.tar.gz").display());
+    let loc = format!("ui.tar.gz=file://{}", dist.join("ui.tar.gz").display());
+    ui_write(
+        port,
+        &cookie,
+        &rid,
+        &[
+            ("kind", "release"),
+            ("tag", "v1"),
+            ("commit", &c1),
+            ("artifacts", &art),
+            ("locations", &loc),
+        ],
+    );
+    ok(script(
+        &ci,
+        &ci.home,
+        "chart-release-attest.sh",
+        &["--repo", &url, "--tag", "v1"],
+        "",
+    ));
+    let dl_s = dl.to_string_lossy();
+    let args = [
+        "release",
+        "verify",
+        "--repo",
+        &url,
+        "--tag",
+        "v1",
+        "--download-dir",
+        &dl_s,
+    ];
+    let out = ok(alice.run(env!("CARGO_BIN_EXE_chart"), &alice.home, &args));
+    assert!(
+        out.contains("valid under the pinned program") && out.contains("OK ui.tar.gz"),
+        "{out}"
+    );
+    wait_for(
+        port,
+        &cookie,
+        &format!("/r/{rid}/releases"),
+        "valid under the pinned program",
+    );
 }
