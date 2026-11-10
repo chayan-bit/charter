@@ -1,5 +1,6 @@
 //! Backend selection: `CHARTER_BACKEND=mem:<path>` is a file-persisted `MemArkiv` (tests,
-//! demos), anything else is Rabdi over JSON-RPC with the optional `ARKIV_ACCESS_KEY`.
+//! demos; `CHARTER_MEM_POLL_MS` slows its receipt polls), anything else is Rabdi over
+//! JSON-RPC with the optional `ARKIV_ACCESS_KEY`.
 
 use std::path::PathBuf;
 
@@ -62,7 +63,16 @@ pub async fn connect() -> Result<(Backend, Config), CliError> {
     let (backend, mut cfg) = match target(var.as_deref())? {
         Target::Mem(path) => {
             let mem = FileMemArkiv::open(&path, MEM_CHAIN_ID)?;
-            (Backend::Mem(Box::new(mem)), Config::for_fake(home))
+            let mut cfg = Config::for_fake(home);
+            // The fake mines on the first receipt poll; a delay lets the UI e2e see a write
+            // that is sent but not yet in a block.
+            if let Some(ms) = std::env::var("CHARTER_MEM_POLL_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+            {
+                cfg.pipeline.poll = std::time::Duration::from_millis(ms);
+            }
+            (Backend::Mem(Box::new(mem)), cfg)
         }
         Target::Rabdi => {
             let key = std::env::var("ARKIV_ACCESS_KEY").ok();

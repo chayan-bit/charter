@@ -178,7 +178,8 @@ pub async fn guard(State(auth): State<std::sync::Arc<Auth>>, req: Request, next:
     );
     for (k, v) in [
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        (header::REFERRER_POLICY, "no-referrer"),
+        // Not `no-referrer`: with it a JS-off form post carries `Origin: null`, refused above.
+        (header::REFERRER_POLICY, "same-origin"),
         (header::X_FRAME_OPTIONS, "DENY"),
     ] {
         h.insert(k, HeaderValue::from_static(v));

@@ -40,7 +40,8 @@ now() { if [[ -n "${EPOCHREALTIME:-}" ]]; then echo "${EPOCHREALTIME/,/.}"; else
 out="${E2E_OUT:-$here/out}"
 mkdir -p "$out"; rm -f "$out/first-page.json"
 t0="$(now)"
-chart ui "$RID" >"$work/server.out" 2>"$work/server.err" &
+# Slow receipt polls so the e2e sees a write in its sent state before the fake mines it.
+CHARTER_MEM_POLL_MS=1500 chart ui "$RID" >"$work/server.out" 2>"$work/server.err" &
 server_pid=$!
 for _ in $(seq 1 1000); do
   [[ -s "$work/server.out" ]] && break

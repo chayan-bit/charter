@@ -120,6 +120,8 @@ def discover(cookie):
         ("patches", f"{r}/patches", ["Fix the crash"], 200),
         ("patch", f"{r}/patches/{patch}", ["Fix the crash"], 200),
         ("releases", f"{r}/releases", ["v0.1.0"], 200),
+        ("issue-new", f"{r}/issues/new", ["New issue", "Title"], 200),
+        ("release-new", f"{r}/releases/new", ["New release", "Artifacts"], 200),
         ("program", f"{r}/program", ["Pinned program"], 200),
         ("not-found", f"{r}/nope", ["Nothing here"], 404),
     ]
@@ -134,7 +136,11 @@ document.addEventListener('securitypolicyviolation',
 FOCUSABLES_JS = """() => {
   const sel = 'a[href]:not([tabindex="-1"]),button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),' +
     'textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])';
+  // Content of a closed <details> keeps its boxes but is not focusable; nor is an unchecked
+  // radio of a group, which arrow keys reach.
   const vis = e => { const r = e.getClientRects(); if (!r.length) return false;
+    if (e.checkVisibility && !e.checkVisibility({contentVisibilityAuto: true})) return false;
+    if (e.type === 'radio' && !e.checked) return false;
     const s = getComputedStyle(e); return s.visibility === 'visible' && r[0].width > 0 && r[0].height > 0; };
   window.__f = [...document.querySelectorAll(sel)].filter(vis);
   document.activeElement && document.activeElement.blur();
@@ -217,8 +223,10 @@ def keyboard_check(page, name, scope):
             bad.append(f'{s["d"]} (focus-visible={s["fv"]}, outline={s["os"]} {s["ow"]}px {s["oc"]}, shadow={s["bs"][:30]})')
     capped = n > TAB_CAP
     unreached = n - len(reached)
+    missed = page.evaluate("r => window.__f.filter((e, i) => !r.includes(i)).slice(0, 5).map(e => e.tagName.toLowerCase() +"
+                           " (e.name ? '[name=' + e.name + ']' : '') + ' ' + (e.textContent || '').trim().slice(0, 20))", sorted(reached))
     rec("keyboard: every link/button reachable by Tab", scope, capped or unreached == 0,
-        f"{n} focusable, {len(reached)} reached in {steps} Tab presses; {unreached} not reached" if not capped else "")
+        f"{n} focusable, {len(reached)} reached in {steps} Tab presses; {unreached} not reached: {missed}" if not capped else "")
     if capped:
         rec("keyboard: tab-stop count is manageable", scope, False,
             f"{n} tab stops (cap {TAB_CAP}); only the first {TAB_CAP} were checked", warn=True)
@@ -253,22 +261,29 @@ def shot(page, name, theme, vp, kind="", full=True, clip_h=None):
     return fn
 
 
+def context(browser, theme, vp):
+    """A logged-in browser context: (context, page, sink of console errors and failed requests)."""
+    w, h = VIEWPORTS[vp]
+    ctx = browser.new_context(
+        viewport={"width": w, "height": h}, color_scheme=theme,
+        device_scale_factor=2 if vp == "phone" else 1,
+        is_mobile=vp == "phone", has_touch=vp == "phone",
+    )
+    ctx.add_init_script(INIT_JS)
+    page = ctx.new_page()
+    sink = {"console": [], "pageerror": [], "bad": []}
+    page.on("console", lambda m, s=sink: s["console"].append(m.text) if m.type == "error" else None)
+    page.on("pageerror", lambda e, s=sink: s["pageerror"].append(str(e)))
+    page.on("response", lambda r, s=sink: s["bad"].append(f"{r.status} {r.url}")
+            if r.status >= 400 and r.request.resource_type != "document" else None)
+    page.goto(URL, wait_until="load")  # token exchange through the real redirect
+    return ctx, page, sink
+
+
 def visit_all(browser, pages, axe_src, cookie, rid_hex):
     for theme in THEMES:
-        for vp, (w, h) in VIEWPORTS.items():
-            ctx = browser.new_context(
-                viewport={"width": w, "height": h}, color_scheme=theme,
-                device_scale_factor=2 if vp == "phone" else 1,
-                is_mobile=vp == "phone", has_touch=vp == "phone",
-            )
-            ctx.add_init_script(INIT_JS)
-            page = ctx.new_page()
-            sink = {"console": [], "pageerror": [], "bad": []}
-            page.on("console", lambda m, s=sink: s["console"].append(m.text) if m.type == "error" else None)
-            page.on("pageerror", lambda e, s=sink: s["pageerror"].append(str(e)))
-            page.on("response", lambda r, s=sink: s["bad"].append(f"{r.status} {r.url}")
-                    if r.status >= 400 and r.request.resource_type != "document" else None)
-            page.goto(URL, wait_until="load")  # token exchange through the real redirect
+        for vp in VIEWPORTS:
+            ctx, page, sink = context(browser, theme, vp)
             for name, path, _, want in pages:
                 scope = f"{name}/{theme}/{vp}"
                 for k in sink:
@@ -307,6 +322,123 @@ def visit_all(browser, pages, axe_src, cookie, rid_hex):
                                 page.keyboard.press("Tab")
                             shot(page, name, theme, vp, "focus", full=False)
             ctx.close()
+
+
+# ---------------------------------------------------------------- writes (docs/p6/ui.md 4.4)
+def state_checks(page, sink, scope):
+    """Console, CSP and overflow checks for a state reached by an htmx swap, not a navigation."""
+    errs = sink["console"] + sink["pageerror"] + sink["bad"]
+    rec("no console errors or failed requests", scope, not errs, "; ".join(errs[:3]))
+    csp = page.evaluate("window.__csp")
+    rec("no CSP violations", scope, not csp, "; ".join(csp[:3]))
+    m = page.evaluate(OVERFLOW_JS)
+    rec("no horizontal scroll", scope, m["sw"] <= m["iw"], f'scrollWidth {m["sw"]} > innerWidth {m["iw"]}; widest: {m["off"]}')
+    for k in sink:
+        sink[k].clear()
+
+
+def comment_to_confirm(page, issue_url, text):
+    page.goto(issue_url, wait_until="load")
+    page.wait_for_timeout(120)
+    page.fill("#w-body", text)
+    page.locator("form.fm button[type=submit]", has_text="Comment").click()
+    page.wait_for_selector("form[data-confirm]", timeout=15000)
+    page.wait_for_timeout(120)
+
+
+def comment_lands(cookie, issue_path, text, scope):
+    deadline = time.time() + 30
+    while time.time() < deadline and text.encode() not in get(issue_path, cookie)[2]:
+        time.sleep(0.25)
+    rec("the comment shows on the issue after a sync round", scope, text.encode() in get(issue_path, cookie)[2], text)
+
+
+def writes(browser, pages, axe_src, cookie):
+    """Comment on the issue: confirm dialog, Escape, Cmd+Enter, then sent and confirmed."""
+    issue_path = next(p for n, p, *_ in pages if n == "issue")
+    issue_url = f"http://{HOST}:{PORT}{issue_path}"
+    for theme in THEMES:
+        for vp in VIEWPORTS:
+            scope = f"write/{theme}/{vp}"
+            ctx, page, sink = context(browser, theme, vp)
+            comment_to_confirm(page, issue_url, "never sent")
+            focused = page.evaluate("document.activeElement && document.activeElement.textContent.trim()")
+            rec("confirm dialog: Cancel has focus, so Enter cannot spend", scope, focused == "Cancel", str(focused))
+            page.keyboard.press("Escape")
+            page.wait_for_selector("#w-body", timeout=10000)
+            rec("confirm dialog: Escape cancels back to the issue", scope, "/write" not in page.url, page.url)
+            text = f"Written in the {theme} {vp} e2e run."
+            comment_to_confirm(page, issue_url, text)
+            state_checks(page, sink, f"{scope}/confirm")
+            shot(page, "write-confirm", theme, vp, full=False)
+            page.locator("details.signed > summary").click()
+            shot(page, "write-confirm", theme, vp, "signed", full=False)
+            if vp == "desktop":
+                run_axe(page, axe_src, "write-confirm", theme)
+                keyboard_check(page, "write-confirm", f"{scope}/confirm")
+            page.keyboard.press("ControlOrMeta+Enter")
+            sent_status(page, sink, scope, theme, vp, axe_src)
+            ctx.close()
+            comment_lands(cookie, issue_path, text, scope)
+
+
+def sent_status(page, sink, scope, theme, vp, axe_src):
+    """The status page right after sending (sent, with the tx hash), then confirmed in place."""
+    try:
+        page.wait_for_selector(".toast.t-sent", timeout=10000)
+    except Exception:
+        pass
+    toast = page.locator(".toast").inner_text() if page.locator(".toast").count() else ""
+    rec("sent: the toast shows Sent and the tx hash at once", scope,
+        toast.startswith("Sent") and "tx " in toast, f"{toast[:80]!r} at {page.url}")
+    state_checks(page, sink, f"{scope}/sent")
+    shot(page, "write-sent", theme, vp, full=False)
+    if vp == "desktop":
+        run_axe(page, axe_src, "write-sent", theme)
+    page.evaluate("window.__same = 1")
+    page.wait_for_selector(".toast.t-confirmed", timeout=30000)
+    toast = page.locator(".toast").inner_text()
+    rec("confirmed in block N replaces sent without a reload", scope,
+        page.evaluate("window.__same === 1") and toast.startswith("Confirmed in block"), toast[:80])
+    state_checks(page, sink, f"{scope}/confirmed")
+    shot(page, "write-confirmed", theme, vp, full=False)
+    if vp == "desktop":
+        run_axe(page, axe_src, "write-confirmed", theme)
+
+
+def writes_nojs(browser, pages, cookie):
+    """With JS off the same write works as plain form posts and reloads."""
+    issue_path = next(p for n, p, *_ in pages if n == "issue")
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, java_script_enabled=False)
+    page = ctx.new_page()
+    page.goto(URL, wait_until="load")
+    page.goto(f"http://{HOST}:{PORT}{issue_path}", wait_until="load")
+    text = "Written with JavaScript off."
+    page.fill("#w-body", text)
+    page.locator("form.fm button[type=submit]", has_text="Comment").click()
+    page.wait_for_load_state("load")
+    confirm = page.locator("form[data-confirm]").count() == 1
+    page.locator("form[data-confirm] button[type=submit]").click()
+    page.wait_for_load_state("load")
+    states, hint = [], False
+    for _ in range(60):
+        states.append(page.locator(".toast").get_attribute("class").split()[-1])
+        if states[-1] in ("t-confirmed", "t-failed"):
+            break
+        hint = hint or page.get_by_text("Reload to see the receipt").is_visible()
+        if states[-1] == "t-sent" and "t-sent" not in states[:-1]:
+            page.wait_for_timeout(400)  # the toast's rise animation
+            page.screenshot(path=str(OUT / "write-sent-nojs-light-desktop.png"))
+            SHOTS.append("write-sent-nojs-light-desktop.png")
+        page.wait_for_timeout(500)
+        page.reload(wait_until="load")
+    page.wait_for_timeout(400)
+    page.screenshot(path=str(OUT / "write-confirmed-nojs-light-desktop.png"))
+    SHOTS.append("write-confirmed-nojs-light-desktop.png")
+    rec("JS disabled: a write prices, sends and confirms through reloads", "write/no-js",
+        confirm and hint and states[-1] == "t-confirmed", f"confirm form {confirm}, reload hint {hint}, states {states}")
+    ctx.close()
+    comment_lands(cookie, issue_path, text, "write/no-js")
 
 
 def layout_checks(page, name, scope, vp, rid):
@@ -513,6 +645,8 @@ def main():
             browser = p.chromium.launch(headless=True)
         nojs(browser, pages)
         visit_all(browser, pages, axe_src, cookie, rid)
+        writes(browser, pages, axe_src, cookie)  # last: the comments change the issue page
+        writes_nojs(browser, pages, cookie)
         browser.close()
     write_reports(first)
     fails = [c for c in CHECKS if c["status"] == "fail"]

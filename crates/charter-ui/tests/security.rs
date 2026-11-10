@@ -136,7 +136,8 @@ async fn responses_carry_a_strict_csp_and_hardening_headers() {
         assert!(csp.starts_with("default-src 'self'") && csp.contains("frame-ancestors 'none'"));
         assert!(!csp.contains("unsafe"), "{csp}");
         assert_eq!(r.header(header::X_CONTENT_TYPE_OPTIONS), "nosniff");
-        assert_eq!(r.header(header::REFERRER_POLICY), "no-referrer");
+        // `no-referrer` would make browsers send `Origin: null` on plain form posts.
+        assert_eq!(r.header(header::REFERRER_POLICY), "same-origin");
     }
     assert_eq!(get("/").await.header(header::CACHE_CONTROL), "no-store");
     let css = get("/assets/app.css").await;
