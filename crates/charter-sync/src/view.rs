@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use charter_core::{
     AcceptedHead, AnchorChain, CompletenessObs, Equivocation, HeadInputs, IdentityChain, Kind,
-    ManifestBody, Nid, Observed, PeerInfo, Rid, Start, accept_head, anchor_chain, bind_chain,
-    check_requires, identity_chain, peer_key,
+    ManifestBody, Nid, Observed, PeerInfo, RefsBody, Rid, Start, accept_head, anchor_chain,
+    bind_chain, check_control_set, check_requires, identity_chain, is_device_row, peer_key,
 };
 use charter_store::{Arkiv, Pred};
 use futures_util::future::{join_all, try_join, try_join_all};
@@ -28,6 +28,18 @@ pub struct PeerView {
     /// The head refs entity and the manifests the head check saw.
     pub refs: Vec<Observed>,
     pub manifests: Vec<Observed>,
+    /// Format v2 (devices and heads); when set, `head` is `None` and the v1 chain is history.
+    pub v2: Option<crate::heads::V2>,
+}
+
+impl PeerView {
+    /// The peer's verified refs: the merged v2 heads, else the v1 head's refs.
+    pub fn refs_body(&self) -> Option<&RefsBody> {
+        match &self.v2 {
+            Some(v) => v.heads().next().map(|_| &v.refs),
+            None => self.head.as_ref().map(|h| &h.refs),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -135,7 +147,12 @@ pub async fn chain_of<A: Arkiv>(
     identity: &IdentityChain,
 ) -> Result<(AnchorChain, Vec<Observed>)> {
     let observed = anchors(a, rid, nid, info).await?;
-    let chain = anchor_chain(rid, nid, info, identity, &observed, Start::Genesis)?;
+    let v1: Vec<Observed> = observed
+        .iter()
+        .filter(|o| !is_device_row(o))
+        .cloned()
+        .collect();
+    let chain = anchor_chain(rid, nid, info, identity, &v1, Start::Genesis)?;
     Ok((chain, observed))
 }
 
@@ -156,6 +173,34 @@ pub async fn verify_peer<A: Arkiv>(
         chain_of(a, rid, nid, &info, identity),
     )
     .await?;
+    let device_rows: Vec<Observed> = anchors
+        .iter()
+        .filter(|o| is_device_row(o))
+        .cloned()
+        .collect();
+    if !device_rows.is_empty() {
+        check_control_set(nid, &info.binds.control_set(), &completeness)?;
+        let v2 = Box::pin(crate::heads::build(
+            a,
+            rid,
+            nid,
+            &info,
+            identity,
+            &device_rows,
+            state,
+        ))
+        .await?;
+        return Ok(PeerView {
+            info,
+            chain,
+            head: None,
+            completeness,
+            anchors,
+            refs: vec![],
+            manifests: vec![],
+            v2: Some(v2),
+        });
+    }
     let applied = state.applied_manifest_set()?;
     let (refs, manifests) = match chain.head() {
         None => (vec![], vec![]),
@@ -193,6 +238,7 @@ pub async fn verify_peer<A: Arkiv>(
         anchors,
         refs,
         manifests,
+        v2: None,
     })
 }
 

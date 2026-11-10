@@ -108,7 +108,7 @@ impl Keys {
     }
 }
 
-fn write_secret(p: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_secret(p: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let dir = p
         .parent()

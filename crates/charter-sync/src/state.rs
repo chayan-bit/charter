@@ -44,6 +44,36 @@ pub struct State {
     #[serde(default)]
     pub applied_manifests: BTreeSet<String>,
     pub equivocations: Vec<EquivocationJson>,
+    /// Format v2: high-water mark of each device head, by device nid (head-model 6).
+    #[serde(default)]
+    pub devices: BTreeMap<String, PeerMarkJson>,
+    /// Format v2: where each head body landed, by its `h` (head-model 5.4).
+    #[serde(default)]
+    pub landings: BTreeMap<String, LandingJson>,
+}
+
+/// The tx that carried a head body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandingJson {
+    #[serde(with = "hex_tx")]
+    pub tx: [u8; 32],
+    pub block: u64,
+    pub index: u32,
+}
+
+mod hex_tx {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(v))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+        let s = String::deserialize(d)?;
+        let v = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        v.try_into()
+            .map_err(|_| serde::de::Error::custom("tx hash is not 32 bytes"))
+    }
 }
 
 impl Default for State {
@@ -56,6 +86,8 @@ impl Default for State {
             applied_packs: BTreeSet::new(),
             applied_manifests: BTreeSet::new(),
             equivocations: vec![],
+            devices: BTreeMap::new(),
+            landings: BTreeMap::new(),
         }
     }
 }
@@ -108,6 +140,32 @@ impl State {
             block: m.block,
         };
         self.peers.insert(hex32(nid), j);
+    }
+
+    pub fn device_mark(&self, dev: &Nid) -> Result<Option<PeerMark>> {
+        self.devices
+            .get(&hex32(dev))
+            .map(|m| {
+                Ok(PeerMark {
+                    seq: m.seq,
+                    hash: unhex32(&m.hash)?,
+                    block: m.block,
+                })
+            })
+            .transpose()
+    }
+
+    pub fn set_device_mark(&mut self, dev: &Nid, m: &PeerMark) {
+        let j = PeerMarkJson {
+            seq: m.seq,
+            hash: hex32(&m.hash),
+            block: m.block,
+        };
+        self.devices.insert(hex32(dev), j);
+    }
+
+    pub fn landing(&self, h: &Hash32) -> Option<LandingJson> {
+        self.landings.get(&hex32(h)).copied()
     }
 
     pub fn applied_manifest_set(&self) -> Result<BTreeSet<Hash32>> {

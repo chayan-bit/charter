@@ -32,7 +32,7 @@ pub fn sign<B: Body>(sk: &SecretKey, body: &B) -> Result<Signed> {
     })
 }
 
-fn wire(attrs: &[Attribute]) -> Vec<(&str, AttributeValue, bool)> {
+pub(crate) fn wire(attrs: &[Attribute]) -> Vec<(&str, AttributeValue, bool)> {
     attrs
         .iter()
         .map(|a| {

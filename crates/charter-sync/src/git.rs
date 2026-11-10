@@ -233,6 +233,31 @@ impl Git {
         self.full_packs(tips, exclude, prefix)
     }
 
+    /// One thin pack of everything reachable from `tips` and not from `exclude`, in memory
+    /// (format v2 pieces); empty when there is nothing to send.
+    pub fn thin_pack_bytes(&self, tips: &[String], exclude: &[String]) -> Result<Vec<u8>> {
+        let input = rev_input(tips, exclude);
+        let bytes = self.run(
+            &[
+                "pack-objects",
+                "--revs",
+                "-q",
+                "--thin",
+                "--stdout",
+                "--delta-base-offset",
+            ],
+            input.as_bytes(),
+        )?;
+        let empty = bytes.len() < PACK_HEADER + 20
+            || u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) == 0;
+        Ok(if empty { vec![] } else { bytes })
+    }
+
+    /// Self-contained packs of everything reachable from `tips` (format v2 snapshots).
+    pub fn full_packs_of(&self, tips: &[String], prefix: &Path) -> Result<Vec<PathBuf>> {
+        self.full_packs(tips, &[], prefix)
+    }
+
     /// At most one thin pack; `None` when it would exceed the 100 MiB manifest cap.
     fn thin_pack(
         &self,

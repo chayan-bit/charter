@@ -15,7 +15,7 @@ use charter_store::{
     TxInfo, U256,
 };
 use charter_sync::identity::{self, RepoMeta};
-use charter_sync::{Config, Keys, Listing, Push, Repo, Update, View, Want};
+use charter_sync::{Config, HeadPush, Keys, Listing, Push, Repo, Update, View, Want};
 
 pub const CHAIN: u64 = 7;
 
@@ -135,16 +135,37 @@ pub struct Peer {
     pub home: tempfile::TempDir,
     pub cfg: Config,
     pub keys: Keys,
+    pub seed: [u8; 32],
 }
 
 impl Peer {
+    /// Another device of `self`'s identity: the same keys in a new home.
+    pub fn second_device(&self, net: &Net) -> Self {
+        let home = tempfile::tempdir().expect("home");
+        let mut cfg = Config::for_fake(home.path().to_path_buf());
+        cfg.pipeline.resend_after_blocks = 3;
+        let keys = Keys::from_seed(MasterSeed::from_bytes(self.seed));
+        let _ = net;
+        Self {
+            home,
+            cfg,
+            keys,
+            seed: self.seed,
+        }
+    }
+
     pub fn new(net: &Net, seed: u8) -> Self {
         let home = tempfile::tempdir().expect("home");
         let mut cfg = Config::for_fake(home.path().to_path_buf());
         cfg.pipeline.resend_after_blocks = 3;
         let keys = Keys::from_seed(MasterSeed::from_bytes([seed; 32]));
         net.fund(keys.wallet().address());
-        Self { home, cfg, keys }
+        Self {
+            home,
+            cfg,
+            keys,
+            seed: [seed; 32],
+        }
     }
 
     pub fn repo(&self, rid: &Rid) -> Repo {
@@ -207,6 +228,40 @@ pub async fn push(
     prepare(net, p, &repo, work, &updates).await?.run().await
 }
 
+/// Fetch sync including the identity, then prepare a format v2 push of `updates`.
+pub async fn prepare2<'a>(
+    net: &'a Net,
+    p: &'a Peer,
+    repo: &'a Repo,
+    work: &Path,
+    updates: &[Update],
+) -> charter_sync::Result<HeadPush<'a, Net>> {
+    let view = Box::pin(charter_sync::sync(net, repo, &p.want())).await?;
+    HeadPush::prepare(
+        net,
+        repo,
+        &p.cfg,
+        &p.keys,
+        view,
+        &charter_sync::git::Git::work(Some(work)),
+        updates,
+    )
+}
+
+/// A format v2 push (what v0.4.0's helper does).
+pub async fn push2(
+    net: &Net,
+    p: &Peer,
+    rid: &Rid,
+    work: &Path,
+    refs: &[&str],
+) -> charter_sync::Result<()> {
+    let repo = p.repo(rid);
+    let updates: Vec<Update> = refs.iter().map(|r| upd(r)).collect();
+    let hp = Box::pin(prepare2(net, p, &repo, work, &updates)).await?;
+    Box::pin(hp.run()).await
+}
+
 pub fn upd(r: &str) -> Update {
     match r.strip_prefix(':') {
         Some(dst) => Update {
@@ -229,7 +284,7 @@ pub async fn clone_into(
     dest: &Path,
 ) -> charter_sync::Result<(View, Listing)> {
     let repo = p.repo(rid);
-    let view = charter_sync::sync(net, &repo, &Want::default()).await?;
+    let view = Box::pin(charter_sync::sync(net, &repo, &Want::default())).await?;
     let listing = charter_sync::listing(&view, None);
     if !dest.join(".git").exists() {
         git(
