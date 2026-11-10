@@ -141,6 +141,12 @@ impl Arkiv for Backend {
     async fn base_fee(&self) -> Result<u128, StoreError> {
         both!(self, b => b.base_fee().await)
     }
+    async fn head_fee(&self) -> Result<(u64, u128), StoreError> {
+        both!(self, b => b.head_fee().await)
+    }
+    fn heads_ws(&self) -> Option<charter_store::heads::WsConfig> {
+        both!(self, b => b.heads_ws())
+    }
     async fn query(&self, q: &Query, o: &QueryOpts) -> Result<QueryPage, StoreError> {
         both!(self, b => b.query(q, o).await)
     }

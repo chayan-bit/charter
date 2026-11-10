@@ -8,12 +8,15 @@ use std::sync::Arc;
 
 use alloy_signer_local::PrivateKeySigner;
 use charter_store::fake::{MAX_LIFETIME, MemArkiv};
+use charter_store::heads::WsConfig;
 use charter_store::pipeline::Landed;
 use charter_store::{
     ARKIV_ADDRESS, Address, Arkiv, B256, PipelineConfig, SignedTx, StoreError, TxParams,
     TxPipeline, U256, execute_calldata, extend_op,
 };
 use common::{CHAIN, DAY, blob, exec, funded, small, with_miner};
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
 
 fn setup() -> (Arc<MemArkiv>, PrivateKeySigner) {
     let fake = Arc::new(MemArkiv::new(CHAIN));
@@ -120,14 +123,131 @@ async fn reverts_are_decoded() {
         "{err:?}"
     );
     assert_eq!(err.code(), "E_INTERNAL");
+    // A mined failure that does not reproduce on re-estimate is sent once more.
     fake.revert_next_at(0);
-    let err = run(&fake, &key, vec![vec![small("r", 0, 0)]])
+    let landed = run(&fake, &key, vec![vec![small("r", 0, 0)]])
         .await
-        .expect_err("mined revert");
+        .expect("retried once");
+    assert_eq!(landed.len(), 1);
+    // A second failure of the same job is the error.
+    let spy = Spy::new(fake.clone(), true);
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default());
+    let err = with_miner(fake.clone(), p.run(vec![vec![small("r", 1, 1)]]))
+        .await
+        .expect_err("mined revert twice");
     assert!(
         matches!(&err, StoreError::Reverted { tx: Some(_), .. }),
         "{err:?}"
     );
+}
+
+/// `MemArkiv` that counts estimates and, when `revert`, makes every mined tx revert.
+struct Spy {
+    inner: Arc<MemArkiv>,
+    revert: bool,
+    estimates: std::sync::atomic::AtomicUsize,
+    ws: Option<WsConfig>,
+}
+
+impl Spy {
+    fn new(inner: Arc<MemArkiv>, revert: bool) -> Self {
+        Self {
+            inner,
+            revert,
+            estimates: Default::default(),
+            ws: None,
+        }
+    }
+    fn estimates(&self) -> usize {
+        self.estimates.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Arkiv for Spy {
+    fn heads_ws(&self) -> Option<WsConfig> {
+        self.ws.clone()
+    }
+    async fn chain_id(&self) -> Result<u64, StoreError> {
+        self.inner.chain_id().await
+    }
+    async fn head(&self) -> Result<u64, StoreError> {
+        self.inner.head().await
+    }
+    async fn base_fee(&self) -> Result<u128, StoreError> {
+        self.inner.base_fee().await
+    }
+    async fn query(
+        &self,
+        q: &charter_store::Query,
+        o: &charter_store::QueryOpts,
+    ) -> Result<charter_store::QueryPage, StoreError> {
+        self.inner.query(q, o).await
+    }
+    async fn entity_nonce(&self, c: Address) -> Result<u64, StoreError> {
+        self.inner.entity_nonce(c).await
+    }
+    async fn balance(&self, a: Address) -> Result<U256, StoreError> {
+        self.inner.balance(a).await
+    }
+    async fn tx_count(&self, a: Address) -> Result<u64, StoreError> {
+        self.inner.tx_count(a).await
+    }
+    async fn tx_count_mined(&self, a: Address) -> Result<u64, StoreError> {
+        self.inner.tx_count_mined(a).await
+    }
+    async fn estimate(
+        &self,
+        from: Address,
+        ops: &[charter_store::Operation],
+    ) -> Result<u64, StoreError> {
+        self.estimates
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.estimate(from, ops).await
+    }
+    async fn send(&self, tx: SignedTx) -> Result<charter_store::TxHash, StoreError> {
+        if self.revert {
+            self.inner.revert_next_at(0);
+        }
+        self.inner.send(tx).await
+    }
+    async fn receipt(
+        &self,
+        h: charter_store::TxHash,
+    ) -> Result<Option<charter_store::Receipt>, StoreError> {
+        self.inner.receipt(h).await
+    }
+    async fn transaction(
+        &self,
+        h: charter_store::TxHash,
+    ) -> Result<Option<charter_store::TxInfo>, StoreError> {
+        self.inner.transaction(h).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_estimate_prices_every_chunk_of_a_shape() {
+    let (fake, key) = setup();
+    let spy = Spy::new(fake.clone(), false);
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default());
+    let mut jobs: Vec<_> = (0..12).map(|i| vec![blob(65_536, DAY, i)]).collect();
+    jobs.push(vec![blob(1_000, DAY, 99)]);
+    let landed = with_miner(fake.clone(), p.run(jobs)).await.expect("run");
+    assert_eq!(landed.len(), 13);
+    assert_eq!(
+        spy.estimates(),
+        2,
+        "one per shape: 64 KiB chunks and the tail"
+    );
+    assert!(landed.iter().all(|l| l.receipt.success));
+    let off = PipelineConfig {
+        reuse_estimates: false,
+        ..PipelineConfig::default()
+    };
+    let spy = Spy::new(fake.clone(), false);
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, off);
+    let jobs: Vec<_> = (0..3).map(|i| vec![blob(65_536, DAY, 100 + i)]).collect();
+    with_miner(fake.clone(), p.run(jobs)).await.expect("run");
+    assert_eq!(spy.estimates(), 3, "reuse can be switched off");
 }
 
 #[tokio::test(start_paused = true)]
@@ -207,4 +327,74 @@ async fn send_refuses_a_tx_already_too_large_for_the_rpc() {
         .await
         .expect_err("too big");
     assert_eq!(err.code(), "E_TX_TOO_LARGE");
+}
+
+/// A `newHeads` server that mines `fake` and announces the block every 50 ms, for one
+/// connection; returns its URL and how many subscriptions it served.
+async fn mining_heads(fake: Arc<MemArkiv>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("ws://{}", l.local_addr().expect("addr"));
+    let subs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = subs.clone();
+    tokio::spawn(async move {
+        let (s, _) = l.accept().await.expect("accept");
+        let mut ws = tokio_tungstenite::accept_async(s).await.expect("handshake");
+        let _ = ws.next().await;
+        seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ok = serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "0xab"});
+        ws.send(Message::text(ok.to_string())).await.expect("reply");
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            fake.mine();
+            let n = fake.head().await.expect("head");
+            let v = serde_json::json!({"jsonrpc": "2.0", "method": "eth_subscription",
+                "params": {"subscription": "0xab", "result": {"number": format!("{n:#x}")}}});
+            if ws.send(Message::text(v.to_string())).await.is_err() {
+                return;
+            }
+        }
+    });
+    (url, subs)
+}
+
+#[tokio::test]
+async fn inclusion_is_awaited_on_new_heads() {
+    let (fake, key) = setup();
+    let (url, subs) = mining_heads(fake.clone()).await;
+    let mut spy = Spy::new(fake.clone(), false);
+    spy.ws = Some(WsConfig {
+        url,
+        access_key: None,
+    });
+    // A poll interval far longer than the test: only the socket can wake the pipeline.
+    let cfg = PipelineConfig {
+        poll: std::time::Duration::from_secs(600),
+        ..PipelineConfig::default()
+    };
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, cfg);
+    let jobs: Vec<_> = (0..20).map(|i| vec![small("h", i, i.into())]).collect();
+    let landed = tokio::time::timeout(std::time::Duration::from_secs(30), p.run(jobs))
+        .await
+        .expect("woken by heads, not the timer")
+        .expect("run");
+    assert_eq!(landed.len(), 20);
+    assert_eq!(subs.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dead_socket_falls_back_to_polling() {
+    let (fake, key) = setup();
+    let mut spy = Spy::new(fake.clone(), false);
+    // Nothing listens on port 9 of localhost: the subscription fails at once.
+    spy.ws = Some(WsConfig {
+        url: "ws://127.0.0.1:9".into(),
+        access_key: None,
+    });
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default());
+    let landed = with_miner(fake.clone(), p.run(vec![vec![small("d", 0, 0)]]))
+        .await
+        .expect("polled");
+    assert_eq!(landed.len(), 1);
 }

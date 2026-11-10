@@ -253,6 +253,12 @@ impl<A: Arkiv> Arkiv for Tap<A> {
     async fn base_fee(&self) -> Result<u128, StoreError> {
         self.a.base_fee().await
     }
+    async fn head_fee(&self) -> Result<(u64, u128), StoreError> {
+        self.a.head_fee().await
+    }
+    fn heads_ws(&self) -> Option<charter_store::heads::WsConfig> {
+        self.a.heads_ws()
+    }
     async fn query(
         &self,
         q: &charter_store::Query,

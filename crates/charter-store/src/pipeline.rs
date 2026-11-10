@@ -2,13 +2,15 @@
 //! revert decoding for one sender (design 4.6), rolling top-ups from a funder (design 4.2
 //! step 6), plus greedy batching under caps.
 
-use std::collections::VecDeque;
-use std::time::Duration;
+use std::collections::{HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer_local::PrivateKeySigner;
 use arkiv_bindings::Operation;
 
+use crate::heads::{self, Heads};
+use crate::shape::{Estimates, Shape};
 use crate::tx::EXECUTE_BASE_BYTES;
 use crate::{
     ARKIV_ADDRESS, Arkiv, BLOCK_GAS_LIMIT, MAX_RAW_TX_BYTES, Receipt, SignedTx, StoreError,
@@ -37,6 +39,12 @@ pub struct PipelineConfig {
     /// Blocks without a receipt before a tx is resent.
     pub resend_after_blocks: u64,
     pub max_resends: u32,
+    /// Price a create job from an earlier estimate of the same shape instead of its own
+    /// `eth_estimateGas` (a failed tx is re-estimated and sent once more).
+    pub reuse_estimates: bool,
+    /// Wait for inclusion on the backend's `newHeads` socket when it has one, polling
+    /// on the `poll` timer only as the fallback.
+    pub use_heads: bool,
 }
 
 impl Default for PipelineConfig {
@@ -52,6 +60,8 @@ impl Default for PipelineConfig {
             poll: Duration::from_millis(250),
             resend_after_blocks: 30,
             max_resends: 3,
+            reuse_estimates: true,
+            use_heads: true,
         }
     }
 }
@@ -129,7 +139,26 @@ struct InFlight {
     gas: u64,
     sent_at: u64,
     resends: u32,
+    /// Its gas came from an earlier estimate of the same shape, not its own.
+    shape: Option<Shape>,
 }
+
+/// A job ready to sign: calldata, recipient, value and gas.
+struct Priced {
+    input: Bytes,
+    to: Address,
+    value: U256,
+    gas: u64,
+    /// Set when the gas was reused from an estimate of this shape.
+    reused: Option<Shape>,
+}
+
+/// Longest wait for the next `newHeads` block before polling anyway.
+const HEAD_WAIT: Duration = Duration::from_millis(2_500);
+/// Attempts at sending one signed tx; resending the same bytes can never double-spend.
+const SEND_ATTEMPTS: u32 = 3;
+/// A head and base fee seen this recently are reused instead of read again.
+const FEE_FRESH: Duration = Duration::from_secs(2);
 
 /// Sends jobs (each one `execute(ops)` tx) from one key. See the module docs.
 pub struct TxPipeline<'a, A: Arkiv> {
@@ -140,6 +169,17 @@ pub struct TxPipeline<'a, A: Arkiv> {
     nonce: Option<u64>,
     /// Tops the sender up from this key before each window that its balance cannot cover.
     funder: Option<PrivateKeySigner>,
+    estimates: Estimates,
+    /// Jobs whose failed tx did not reproduce on re-estimate; they are estimated afresh
+    /// and fail for good the second time.
+    retried: HashSet<usize>,
+    /// The latest head, its base fee and when they were read.
+    seen: Option<(u64, u128, Instant)>,
+    heads: Option<Heads>,
+    /// The socket failed once: poll on the timer for the rest of the run.
+    heads_off: bool,
+    /// The nonce was re-read because someone else took it; a second time is an error.
+    reread: bool,
 }
 
 impl<'a, A: Arkiv> TxPipeline<'a, A> {
@@ -151,6 +191,12 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             cfg,
             nonce: None,
             funder: None,
+            estimates: Estimates::default(),
+            retried: HashSet::new(),
+            seen: None,
+            heads: None,
+            heads_off: false,
+            reread: false,
         }
     }
 
@@ -197,31 +243,83 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 done.sort_by_key(|l: &Landed| (l.job, l.receipt.block_number));
                 return Ok(done);
             }
-            tokio::time::sleep(self.cfg.poll).await;
-            self.poll(&mut inflight, &mut done).await?;
+            self.wait().await;
+            self.poll(&mut queue, &mut inflight, &mut done).await?;
         }
     }
 
-    /// Send queued jobs while the window and the gas budget allow.
+    /// Until the next block is announced on the `newHeads` socket (or [`HEAD_WAIT`] passes),
+    /// else one poll interval. The socket is opened on the first wait, which returns at
+    /// once so a block announced during the handshake is not missed.
+    async fn wait(&mut self) {
+        if self.cfg.use_heads && self.heads.is_none() && !self.heads_off {
+            match self.arkiv.heads_ws() {
+                Some(ws) => match tokio::time::timeout(HEAD_WAIT, heads::subscribe(&ws)).await {
+                    Ok(Ok(h)) => {
+                        self.heads = Some(h);
+                        return;
+                    }
+                    _ => self.heads_off = true,
+                },
+                None => self.heads_off = true,
+            }
+        }
+        if let Some(h) = self.heads.as_mut() {
+            match tokio::time::timeout(HEAD_WAIT, h.next()).await {
+                Ok(Ok(Some(_))) | Err(_) => return,
+                Ok(_) => {
+                    self.heads = None;
+                    self.heads_off = true;
+                }
+            }
+        }
+        tokio::time::sleep(self.cfg.poll).await;
+    }
+
+    /// The head and its base fee: the last seen if fresh, else one read.
+    async fn head_fee(&mut self) -> Result<(u64, u128), StoreError> {
+        if let Some((head, fee, at)) = self.seen
+            && at.elapsed() < FEE_FRESH
+        {
+            return Ok((head, fee));
+        }
+        let (head, fee) = self.arkiv.head_fee().await?;
+        self.seen = Some((head, fee, Instant::now()));
+        Ok((head, fee))
+    }
+
+    /// Send queued jobs while the window and the gas budget allow: price and sign them in
+    /// order, then send them together (nonces are consecutive, so the node orders them).
     async fn fill(
         &mut self,
         queue: &mut VecDeque<(usize, Job)>,
         inflight: &mut Vec<InFlight>,
     ) -> Result<(), StoreError> {
-        // Read fresh every round: the base fee can rise while we fill blocks.
-        let (base_fee, sent_at) =
-            futures_util::future::try_join(self.arkiv.base_fee(), self.arkiv.head()).await?;
+        while self.fill_once(queue, inflight).await? {}
+        Ok(())
+    }
+
+    /// One round of [`TxPipeline::fill`]; `true` when jobs went back to the queue after a
+    /// nonce re-read and should be sent again now.
+    async fn fill_once(
+        &mut self,
+        queue: &mut VecDeque<(usize, Job)>,
+        inflight: &mut Vec<InFlight>,
+    ) -> Result<bool, StoreError> {
+        // The base fee can rise while we fill blocks: at most one block old.
+        let (sent_at, base_fee) = self.head_fee().await?;
         let budget = self.cfg.pace_budget(base_fee);
         let mut unconfirmed: u64 = inflight.iter().map(|f| f.gas).sum();
         let mut covered = match self.funder {
             Some(_) => Some(self.covered(inflight).await?),
             None => None,
         };
-        while inflight.len() < self.cfg.window {
+        let mut ready: Vec<(usize, Job, Priced)> = vec![];
+        while inflight.len() + ready.len() < self.cfg.window {
             let Some((job, body)) = queue.pop_front() else {
                 break;
             };
-            let (input, to, value, gas) = match self.price(&body).await {
+            let p = match self.price(job, &body).await {
                 Ok(p) => p,
                 Err(e) => match split(&body, &e) {
                     Some((a, b)) => {
@@ -233,50 +331,44 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 },
             };
             // One tx may exceed the budget alone, else nothing that large could ever go.
-            if !inflight.is_empty() && unconfirmed + gas > budget {
+            let empty = inflight.is_empty() && ready.is_empty();
+            if !empty && unconfirmed + p.gas > budget {
                 queue.push_front((job, body));
                 break;
             }
-            let reserve = self.cfg.tx_reserve(gas, value, base_fee);
+            let reserve = self.cfg.tx_reserve(p.gas, p.value, base_fee);
             // One transfer covers the rest of the window (free slots, capped at the jobs
             // left) at this tx's size.
-            let slots = ((self.cfg.window - inflight.len()) as u64).min(1 + queue.len() as u64);
+            let free = self.cfg.window - inflight.len() - ready.len();
+            let slots = (free as u64).min(1 + queue.len() as u64);
             let top = covered.and_then(|h| PipelineConfig::top_up(h, reserve, slots));
             if let (Some(have), Some(amount)) = (covered.as_mut(), top) {
                 self.top_up(amount, base_fee).await?;
                 *have += amount;
             }
-            let tx = match self.sign_and_send(input, to, value, gas, base_fee).await {
-                Err(e @ StoreError::TxTooLarge { .. }) => match split(&body, &e) {
-                    Some((a, b)) => {
-                        queue.push_front((job, b));
-                        queue.push_front((job, a));
-                        continue;
-                    }
-                    None => return Err(e),
-                },
-                other => other?,
-            };
-            unconfirmed += gas;
+            unconfirmed += p.gas;
             if let Some(have) = covered.as_mut() {
                 *have = have.saturating_sub(reserve);
             }
-            inflight.push(InFlight {
-                job,
-                body,
-                tx,
-                gas,
-                sent_at,
-                resends: 0,
-            });
+            ready.push((job, body, p));
         }
-        Ok(())
+        self.send_all(ready, base_fee, sent_at, queue, inflight)
+            .await
     }
 
-    /// Calldata, recipient, value and estimated gas, checking the byte and gas caps.
-    async fn price(&self, body: &Job) -> Result<(Bytes, Address, U256, u64), StoreError> {
+    /// Calldata, recipient, value and gas, checking the byte and gas caps. A create job
+    /// of a shape already estimated reuses that estimate unless it failed before.
+    async fn price(&mut self, job: usize, body: &Job) -> Result<Priced, StoreError> {
         let ops = match body {
-            Job::Transfer(to, value) => return Ok((Bytes::new(), *to, *value, TRANSFER_GAS)),
+            Job::Transfer(to, value) => {
+                return Ok(Priced {
+                    input: Bytes::new(),
+                    to: *to,
+                    value: *value,
+                    gas: TRANSFER_GAS,
+                    reused: None,
+                });
+            }
             Job::Execute(ops) => ops,
         };
         let input = execute_calldata(ops);
@@ -287,59 +379,124 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 cap: self.cfg.max_raw_bytes,
             });
         }
-        let gas = self.arkiv.estimate(self.address(), ops).await?;
+        let shape = self
+            .cfg
+            .reuse_estimates
+            .then(|| Shape::of(ops, &input))
+            .flatten()
+            .filter(|_| !self.retried.contains(&job));
+        let reuse = shape.as_ref().and_then(|s| self.estimates.get(s, &input));
+        let gas = match reuse {
+            Some(g) => g,
+            None => self.arkiv.estimate(self.address(), ops).await?,
+        };
         if gas > self.cfg.gas_cap {
             return Err(StoreError::GasCap {
                 gas,
                 cap: self.cfg.gas_cap,
             });
         }
-        Ok((input, ARKIV_ADDRESS, U256::ZERO, gas))
+        let reused = match (reuse, shape) {
+            (Some(_), s) => s,
+            (None, Some(s)) => {
+                self.estimates.put(s, &input, gas);
+                None
+            }
+            (None, None) => None,
+        };
+        Ok(Priced {
+            input,
+            to: ARKIV_ADDRESS,
+            value: U256::ZERO,
+            gas,
+            reused,
+        })
     }
 
-    async fn sign_and_send(
+    /// Signs `ready` with consecutive nonces and sends them concurrently. A nonce someone
+    /// else took is re-read once and the affected jobs go back to the queue.
+    async fn send_all(
         &mut self,
-        input: Bytes,
-        to: Address,
-        value: U256,
-        gas: u64,
+        ready: Vec<(usize, Job, Priced)>,
         base_fee: u128,
-    ) -> Result<SignedTx, StoreError> {
-        let gas_limit = self.cfg.gas_limit(gas);
-        for attempt in 0..2 {
-            let nonce = match self.nonce {
-                Some(n) => n,
-                None => self.arkiv.tx_count(self.address()).await?,
-            };
+        sent_at: u64,
+        queue: &mut VecDeque<(usize, Job)>,
+        inflight: &mut Vec<InFlight>,
+    ) -> Result<bool, StoreError> {
+        if ready.is_empty() {
+            return Ok(false);
+        }
+        let mut nonce = match self.nonce {
+            Some(n) => n,
+            None => self.arkiv.tx_count(self.address()).await?,
+        };
+        let mut signed = Vec::with_capacity(ready.len());
+        let mut ready = ready.into_iter();
+        while let Some((job, body, p)) = ready.next() {
             let params = TxParams {
                 nonce,
-                to,
-                value,
-                input: input.clone(),
-                gas_limit,
+                to: p.to,
+                value: p.value,
+                input: p.input,
+                gas_limit: self.cfg.gas_limit(p.gas),
                 max_fee_per_gas: self.cfg.max_fee(base_fee),
                 max_priority_fee_per_gas: self.cfg.tip,
             };
             let tx = SignedTx::sign(&self.signer, self.chain_id, params)?;
             if tx.raw().len() > self.cfg.max_raw_bytes {
-                return Err(StoreError::TxTooLarge {
+                // Only the envelope estimate was off: shrink this job and resend it later.
+                let e = StoreError::TxTooLarge {
                     size: tx.raw().len(),
                     cap: self.cfg.max_raw_bytes,
-                });
-            }
-            match self.arkiv.send(tx.clone()).await {
-                Ok(_) => {
-                    self.nonce = Some(nonce + 1);
-                    return Ok(tx);
+                };
+                let (a, b) = split(&body, &e).ok_or(e)?;
+                let rest: Vec<_> = ready.map(|(j, b, _)| (j, b)).collect();
+                for item in rest.into_iter().rev() {
+                    queue.push_front(item);
                 }
-                // Someone else used this nonce: re-read it once and re-sign.
-                Err(StoreError::NonceTooLow(_)) if attempt == 0 => self.nonce = None,
+                queue.push_front((job, b));
+                queue.push_front((job, a));
+                break;
+            }
+            nonce += 1;
+            signed.push((job, body, p.gas, p.reused, tx));
+        }
+        self.nonce = Some(nonce);
+        let results = futures_util::future::join_all(
+            signed.iter().map(|(.., tx)| send_retrying(self.arkiv, tx)),
+        )
+        .await;
+        let mut stolen = vec![];
+        for ((job, body, gas, shape, tx), r) in signed.into_iter().zip(results) {
+            match r {
+                Ok(()) => inflight.push(InFlight {
+                    job,
+                    body,
+                    tx,
+                    gas,
+                    sent_at,
+                    resends: 0,
+                    shape,
+                }),
+                Err(StoreError::NonceTooLow(m)) => stolen.push((job, body, m)),
                 Err(e) => return Err(e),
             }
         }
-        Err(StoreError::InconsistentView(
-            "nonce still too low after re-reading it".into(),
-        ))
+        if stolen.is_empty() {
+            self.reread = false;
+            return Ok(false);
+        }
+        // Someone else used our nonces: re-read once; a second time is an error.
+        if std::mem::replace(&mut self.reread, true) {
+            return Err(StoreError::InconsistentView(
+                "nonce still too low after re-reading it".into(),
+            ));
+        }
+        self.nonce = None;
+        for (job, body, _) in stolen.into_iter().rev() {
+            queue.push_front((job, body));
+        }
+        Ok(true)
     }
 
     /// The sender's balance not already reserved by txs in flight.
@@ -405,16 +562,19 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
     /// Collect receipts; resend txs that have waited too long; surface reverts.
     async fn poll(
         &mut self,
+        queue: &mut VecDeque<(usize, Job)>,
         inflight: &mut Vec<InFlight>,
         done: &mut Vec<Landed>,
     ) -> Result<(), StoreError> {
-        // The head and every receipt are independent reads: one round trip, not 1 + n.
+        // The head (with its base fee, for the next fill) and every receipt are
+        // independent reads: one round trip, not 1 + n.
         let hashes: Vec<_> = inflight.iter().map(|f| f.tx.hash()).collect();
-        let (head, receipts) = futures_util::future::try_join(
-            self.arkiv.head(),
+        let ((head, fee), receipts) = futures_util::future::try_join(
+            self.arkiv.head_fee(),
             futures_util::future::try_join_all(hashes.iter().map(|h| self.arkiv.receipt(*h))),
         )
         .await?;
+        self.seen = Some((head, fee, Instant::now()));
         let mut receipts = receipts.into_iter().map(Some).collect::<Vec<_>>();
         let mut i = 0;
         while i < inflight.len() {
@@ -432,7 +592,12 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                     inflight.swap_remove(i);
                     continue;
                 }
-                Some(_) => return Err(self.revert_reason(f).await),
+                Some(_) => {
+                    let f = inflight.swap_remove(i);
+                    let again = self.failed(f).await?;
+                    queue.push_front(again);
+                    continue;
+                }
                 None if head >= f.sent_at + self.cfg.resend_after_blocks => {
                     if f.resends >= self.cfg.max_resends {
                         return Err(StoreError::Dropped(f.tx.hash()));
@@ -452,29 +617,43 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         Ok(())
     }
 
-    /// Why a mined tx failed: re-estimate it to recover the registry error when possible.
-    async fn revert_reason(&self, f: &InFlight) -> StoreError {
+    /// A mined tx failed, so none of its ops took effect. If re-estimating it reverts, that
+    /// is the error; if not (its gas was too low, or the state moved), the job is returned
+    /// to be priced afresh and sent once more.
+    async fn failed(&mut self, f: InFlight) -> Result<(usize, Job), StoreError> {
         let reason = match &f.body {
             Job::Execute(ops) => match self.arkiv.estimate(self.address(), ops).await {
                 Err(StoreError::Reverted { reason, .. }) => reason,
-                Err(StoreError::InsufficientFunds {
-                    address,
-                    need,
-                    have,
-                }) => {
-                    return StoreError::InsufficientFunds {
-                        address,
-                        need,
-                        have,
-                    };
+                Err(e @ StoreError::InsufficientFunds { .. }) => return Err(e),
+                _ if self.retried.insert(f.job) => {
+                    if let Some(s) = &f.shape {
+                        self.estimates.forget(s);
+                    }
+                    return Ok((f.job, f.body));
                 }
                 _ => "status 0 (does not reproduce on re-estimate)".into(),
             },
             Job::Transfer(..) => "transfer failed".into(),
         };
-        StoreError::Reverted {
+        Err(StoreError::Reverted {
             tx: Some(f.tx.hash()),
             reason,
+        })
+    }
+}
+
+/// Sends one signed tx, resending the same bytes on an RPC error: an identical tx can land
+/// at most once, so this never double-spends. Other errors return at once.
+async fn send_retrying<A: Arkiv>(a: &A, tx: &SignedTx) -> Result<(), StoreError> {
+    let mut attempt = 1;
+    loop {
+        match a.send(tx.clone()).await {
+            Ok(_) => return Ok(()),
+            Err(StoreError::Rpc(_)) if attempt < SEND_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(200 << attempt)).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
         }
     }
 }
