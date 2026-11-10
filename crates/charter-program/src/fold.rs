@@ -142,13 +142,14 @@ impl Folder<'_> {
             || p.new.is_empty()
             || head == p.new
             || (p.signed_base && head == p.old)
-            || !p.signed_base && match (self.ancestry)(&head, &p.new) {
-                Some(known) => known,
-                None => {
-                    self.undecided = true;
-                    head == p.old
-                }
-            };
+            || !p.signed_base
+                && match (self.ancestry)(&head, &p.new) {
+                    Some(known) => known,
+                    None => {
+                        self.undecided = true;
+                        head == p.old
+                    }
+                };
         p.old = head;
         let verdict = match self.prog.abi.check_push {
             true => self
