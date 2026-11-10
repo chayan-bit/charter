@@ -294,7 +294,16 @@ impl<A: Arkiv> Arkiv for Tap<A> {
     fn seal_ops(&self, ops: Vec<Operation>) -> Result<Vec<Operation>, StoreError> {
         self.a.seal_ops(ops)
     }
+    fn open_rows(&self, rows: Vec<charter_store::EntityData>) -> Vec<charter_store::EntityData> {
+        self.a.open_rows(rows)
+    }
     async fn transaction(&self, h: TxHash) -> Result<Option<TxInfo>, StoreError> {
         self.a.transaction(h).await
+    }
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.a.mined_tx(h).await
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        self.a.block_txs(n).await
     }
 }
