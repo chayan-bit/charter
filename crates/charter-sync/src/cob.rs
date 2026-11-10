@@ -46,6 +46,16 @@ pub(crate) async fn peer_keys<A: Arkiv>(
     a: &A,
     observed: &[Observed],
 ) -> Result<BTreeMap<Nid, charter_crypto::PublicKey>> {
+    peer_keys_with(a, observed, &BTreeMap::new()).await
+}
+
+/// Like [`peer_keys`], taking keys already verified in `known` (the sync view resolves
+/// delegates and identity signers) and looking up the rest concurrently.
+pub(crate) async fn peer_keys_with<A: Arkiv>(
+    a: &A,
+    observed: &[Observed],
+    known: &BTreeMap<Nid, charter_core::PeerInfo>,
+) -> Result<BTreeMap<Nid, charter_crypto::PublicKey>> {
     let nids: BTreeSet<Nid> = observed
         .iter()
         .filter_map(|o| match o.attr("ag.nid") {
@@ -53,9 +63,18 @@ pub(crate) async fn peer_keys<A: Arkiv>(
             _ => None,
         })
         .collect();
-    let mut keys = BTreeMap::new();
-    for nid in nids {
-        let docs = all(a, Pred::And(vec![kind(Kind::Peer), b32("ag.nid", &nid)])).await?;
+    let mut keys: BTreeMap<Nid, charter_crypto::PublicKey> = nids
+        .iter()
+        .filter_map(|n| known.get(n).map(|p| (*n, p.pk.clone())))
+        .collect();
+    let missing: Vec<Nid> = nids.into_iter().filter(|n| !keys.contains_key(n)).collect();
+    let docs = futures_util::future::try_join_all(
+        missing
+            .iter()
+            .map(|nid| all(a, Pred::And(vec![kind(Kind::Peer), b32("ag.nid", nid)]))),
+    )
+    .await?;
+    for (nid, docs) in missing.into_iter().zip(docs) {
         if let Some(pk) = peer_key(&nid, &docs) {
             keys.insert(nid, pk);
         }

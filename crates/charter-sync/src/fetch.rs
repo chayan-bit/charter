@@ -52,41 +52,129 @@ async fn apply_all<A: Arkiv>(
     must: &BTreeSet<Nid>,
 ) -> Result<Applied> {
     let mut applied = Applied::default();
+    let mut todo: Vec<Download> = vec![];
     let nids: Vec<Nid> = view.peers.keys().copied().collect();
     for nid in nids {
-        if let Err(e) = apply_peer(a, repo, view, &nid, state, &mut applied).await {
+        match download_peer(a, repo, view, &nid, state, &applied, &todo).await {
+            Ok((known, fetched)) => {
+                applied.manifests.extend(known);
+                todo.extend(fetched);
+            }
+            Err(e) => skip_or_fail(view, must, &nid, e)?,
+        }
+    }
+    let failed = index_until_stuck(repo, todo, &mut applied);
+    for (nid, e) in failed {
+        if view.peers.contains_key(&nid) {
             skip_or_fail(view, must, &nid, e)?;
         }
     }
     Ok(applied)
 }
 
-async fn apply_peer<A: Arkiv>(
+/// A downloaded, verified pack waiting for `index-pack`.
+#[derive(Debug)]
+struct Download {
+    nid: Nid,
+    manifest: Hash32,
+    pack_id: Hash32,
+    tmp: std::path::PathBuf,
+}
+
+/// Downloads one peer's missing packs in anchor order; returns the manifests whose packs
+/// are already in the cache and the downloads still to index.
+async fn download_peer<A: Arkiv>(
     a: &A,
     repo: &Repo,
     view: &View,
     nid: &Nid,
     state: &State,
-    applied: &mut Applied,
-) -> Result<()> {
-    let Some(pv) = view.peers.get(nid) else {
-        return Ok(());
+    applied: &Applied,
+    queued: &[Download],
+) -> Result<(Vec<Hash32>, Vec<Download>)> {
+    let (mut known, mut fetched) = (vec![], vec![]);
+    let Some(head) = view.peers.get(nid).and_then(|p| p.head.as_ref()) else {
+        return Ok((known, fetched));
     };
-    let Some(head) = &pv.head else { return Ok(()) };
-    let bulk = pv.info.binds.bulk_set();
+    let bulk = view.peers[nid].info.binds.bulk_set();
     for (h, m) in &head.manifests {
-        let known = state.applied_packs.contains(&hex32(&m.pack_id));
-        if !known && !applied.packs.contains(&m.pack_id) {
-            let tmp = repo.tmp().join(format!("{}.pack", hex32(&m.pack_id)));
-            let r = packs::download(a, &view.rid, m, &bulk, &tmp).await;
-            let r = r.and_then(|()| repo.git().index_pack(&tmp));
-            let _ = std::fs::remove_file(&tmp);
-            r?;
-            applied.packs.insert(m.pack_id);
+        let in_cache =
+            state.applied_packs.contains(&hex32(&m.pack_id)) || applied.packs.contains(&m.pack_id);
+        if in_cache {
+            known.push(*h);
+            continue;
         }
-        applied.manifests.insert(*h);
+        let tmp = repo.tmp().join(format!("{}.pack", hex32(&m.pack_id)));
+        // The same pack named twice is downloaded once; the second entry follows the first.
+        let in_flight = queued
+            .iter()
+            .chain(&fetched)
+            .any(|d: &Download| d.pack_id == m.pack_id);
+        if in_flight {
+            fetched.push(Download {
+                nid: *nid,
+                manifest: *h,
+                pack_id: m.pack_id,
+                tmp,
+            });
+            continue;
+        }
+        if let Err(e) = packs::download(a, &view.rid, m, &bulk, &tmp).await {
+            let _ = std::fs::remove_file(&tmp);
+            fetched.iter().for_each(|d: &Download| {
+                let _ = std::fs::remove_file(&d.tmp);
+            });
+            return Err(e);
+        }
+        fetched.push(Download {
+            nid: *nid,
+            manifest: *h,
+            pack_id: m.pack_id,
+            tmp,
+        });
     }
-    Ok(())
+    Ok((known, fetched))
+}
+
+/// Indexes downloads in rounds: a thin pack whose delta bases arrive in another peer's pack
+/// fails until that pack is in, so failures are retried while any round makes progress.
+/// Returns the last error of every download that never indexed.
+fn index_until_stuck(
+    repo: &Repo,
+    mut todo: Vec<Download>,
+    applied: &mut Applied,
+) -> Vec<(Nid, SyncError)> {
+    loop {
+        let before = todo.len();
+        let mut failed = vec![];
+        for d in std::mem::take(&mut todo) {
+            if applied.packs.contains(&d.pack_id) {
+                applied.manifests.insert(d.manifest);
+                continue;
+            }
+            match repo.git().index_pack(&d.tmp) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&d.tmp);
+                    applied.packs.insert(d.pack_id);
+                    applied.manifests.insert(d.manifest);
+                }
+                Err(e) => failed.push((d, e)),
+            }
+        }
+        if failed.is_empty() {
+            return vec![];
+        }
+        if failed.len() == before {
+            return failed
+                .into_iter()
+                .map(|(d, e)| {
+                    let _ = std::fs::remove_file(&d.tmp);
+                    (d.nid, e)
+                })
+                .collect();
+        }
+        todo = failed.into_iter().map(|(d, _)| d).collect();
+    }
 }
 
 fn oids(refs: &RefsBody) -> Vec<String> {

@@ -271,11 +271,16 @@ pub async fn enforce<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<E
         .into_iter()
         .filter(|o| kind_is(o, Kind::Cob))
         .collect();
-    let ops = verify_ops(&view.rid, &cob::peer_keys(a, &cobs).await?, &cobs);
-    let source = source(&pin, &ops)?;
     let pin_rev = pin_revision(&view.identity);
     let pin_order = order(&rank, &pin_rev.effective.key)?;
-    let (votes, pushes) = ref_events(a, view, &rank, pin_order).await?;
+    // Author keys and the delegates' refs are independent reads: fetch them together.
+    let (keys, (votes, pushes)) = futures_util::future::try_join(
+        cob::peer_keys_with(a, &cobs, &view.resolved),
+        ref_events(a, view, &rank, pin_order),
+    )
+    .await?;
+    let ops = verify_ops(&view.rid, &keys, &cobs);
+    let source = source(&pin, &ops)?;
     let seed = canonical_refs(&pin_rev.body, &votes)
         .refs
         .into_iter()
