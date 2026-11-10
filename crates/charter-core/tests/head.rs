@@ -156,6 +156,63 @@ fn heads_are_accepted_only_at_the_current_nonce() {
 }
 
 #[test]
+fn only_the_machine_that_sent_the_current_body_accepts_extra_creates_from_its_control_address() {
+    let w = world();
+    let s = setup();
+    let dev = &peers()[1];
+    let b = head_body(w.rid, 1, 2, h32(1));
+    let (obs, h) = observe(dev, &b, DEV_CONTROL, 31, 0);
+    let own = |n: u64, sent: &Hash32, mark: Option<&PeerMark>| {
+        accept_own_device_head(
+            &w.rid,
+            &alice().nid,
+            &s.device,
+            &s.identity,
+            std::slice::from_ref(&obs),
+            &nonce(n),
+            mark,
+            sent,
+        )
+    };
+    // A copied device seed landed a second head tx: C_d created 2 more than this body says.
+    let got = own(5, &h, None).expect("own body").expect("head");
+    assert_eq!((got.body.seq, got.h), (1, h));
+    // Every other reader, and a machine that did not send this body, fails closed.
+    let err = accept_device_head(
+        &w.rid,
+        &alice().nid,
+        &s.device,
+        &s.identity,
+        std::slice::from_ref(&obs),
+        &nonce(5),
+        None,
+    )
+    .expect_err("readers");
+    assert_eq!(err.code(), ErrorCode::ControlNotLive);
+    assert_eq!(
+        own(5, &h32(9), None).expect_err("not sent here").code(),
+        ErrorCode::ControlNotLive
+    );
+    // Fewer creates than recorded is never repaired.
+    assert_eq!(
+        own(2, &h, None).expect_err("fewer").code(),
+        ErrorCode::ControlNotLive
+    );
+    // A rollback below what this machine already saw stays a rollback.
+    let mark = PeerMark {
+        seq: 2,
+        hash: h32(7),
+        block: 40,
+    };
+    assert_eq!(
+        own(5, &h, Some(&mark)).expect_err("stale").code(),
+        ErrorCode::StaleHead
+    );
+    // At the right nonce it is an ordinary accept.
+    assert_eq!(own(3, &h32(9), None).expect("plain").expect("head").h, h);
+}
+
+#[test]
 fn a_head_from_another_creator_or_signer_is_ignored_and_fails_closed() {
     let w = world();
     let s = setup();

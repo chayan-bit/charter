@@ -16,7 +16,8 @@ pub use bind::{BindChain, BindLink, bind_chain};
 pub use cob::{VerifiedOp, verify_ops, verify_ops_after};
 pub use head::{
     Device, DeviceHead, EntryUpdate, HeadNonce, Merged, Winner, accept_device_head,
-    check_head_nonce, devices, is_device_row, merge, merged_refs, next_entries, resolve_stamps,
+    accept_own_device_head, check_head_nonce, devices, is_device_row, merge, merged_refs,
+    next_entries, resolve_stamps,
 };
 pub use identity::{IdentityChain, Revision, identity_chain, maj};
 

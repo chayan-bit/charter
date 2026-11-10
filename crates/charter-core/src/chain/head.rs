@@ -128,17 +128,14 @@ pub fn check_head_nonce(
     Ok(())
 }
 
-/// Accepts the head of `dev` (head-model 5.2) from the head rows of identity `nid`.
-pub fn accept_device_head(
+/// The one validly signed head of `dev` among `observed`, without the nonce check.
+fn valid_head(
     rid: &Rid,
     nid: &Nid,
     dev: &Device,
     identity: &IdentityChain,
     observed: &[Observed],
-    nonce: &HeadNonce,
-    mark: Option<&PeerMark>,
-) -> Result<Option<DeviceHead>, VerifyError> {
-    let updated: BTreeMap<Hash32, u64> = observed.iter().map(|o| (o.key, o.updated_at)).collect();
+) -> Result<Option<Entity<HeadBody>>, VerifyError> {
     let mut valid: Vec<Entity<HeadBody>> = open_all::<HeadBody>(observed)
         .ok
         .into_iter()
@@ -157,9 +154,16 @@ pub fn accept_device_head(
             count: valid.len(),
         });
     }
-    let head = valid.pop();
-    check_head_nonce(dev, head.as_ref().map(|e| &e.body), nonce)?;
-    let Some(e) = head else { return Ok(None) };
+    Ok(valid.pop())
+}
+
+/// The local high-water mark (head-model 5.2 rule 5), then the accepted head.
+fn after_mark(
+    e: Entity<HeadBody>,
+    dev: &Device,
+    observed: &[Observed],
+    mark: Option<&PeerMark>,
+) -> Result<DeviceHead, VerifyError> {
     if let Some(m) = mark {
         if e.body.seq < m.seq {
             return Err(VerifyError::StaleHead {
@@ -171,11 +175,58 @@ pub fn accept_device_head(
             return Err(VerifyError::HistoryRewritten { seq: m.seq });
         }
     }
-    let up = updated
-        .get(&e.position.key)
-        .copied()
-        .unwrap_or(e.position.block);
-    Ok(Some(to_head(e, dev, up)))
+    let up = observed
+        .iter()
+        .find(|o| o.key == e.position.key)
+        .map_or(e.position.block, |o| o.updated_at);
+    Ok(to_head(e, dev, up))
+}
+
+/// Accepts the head of `dev` (head-model 5.2) from the head rows of identity `nid`.
+pub fn accept_device_head(
+    rid: &Rid,
+    nid: &Nid,
+    dev: &Device,
+    identity: &IdentityChain,
+    observed: &[Observed],
+    nonce: &HeadNonce,
+    mark: Option<&PeerMark>,
+) -> Result<Option<DeviceHead>, VerifyError> {
+    let head = valid_head(rid, nid, dev, identity, observed)?;
+    check_head_nonce(dev, head.as_ref().map(|e| &e.body), nonce)?;
+    head.map(|e| after_mark(e, dev, observed, mark)).transpose()
+}
+
+/// [`accept_device_head`] on the machine that sent body `sent` (head-model 7.4): when the
+/// current head is exactly that body and `C_d` created more than it records (a copied
+/// device seed landed a second head tx), the head is accepted so the next push can sign a
+/// body that accounts for the real nonce. A rollback still fails: an older body is not the
+/// one this machine sent last, and the local mark rejects it.
+#[allow(clippy::too_many_arguments)]
+pub fn accept_own_device_head(
+    rid: &Rid,
+    nid: &Nid,
+    dev: &Device,
+    identity: &IdentityChain,
+    observed: &[Observed],
+    nonce: &HeadNonce,
+    mark: Option<&PeerMark>,
+    sent: &Hash32,
+) -> Result<Option<DeviceHead>, VerifyError> {
+    let err = match accept_device_head(rid, nid, dev, identity, observed, nonce, mark) {
+        Err(
+            e @ VerifyError::HeadRollback {
+                nonce, recorded, ..
+            },
+        ) if nonce > recorded => e,
+        other => return other,
+    };
+    match valid_head(rid, nid, dev, identity, observed)? {
+        Some(e) if e.h == *sent && nonce.before == nonce.after => {
+            after_mark(e, dev, observed, mark).map(Some)
+        }
+        _ => Err(err),
+    }
 }
 
 /// The entry that holds a name, and the device whose head carries it.
