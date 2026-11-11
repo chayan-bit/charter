@@ -13,7 +13,7 @@
 <section class="sec">
 <h2 class="h2">Bounties</h2>
 <div class="tblwrap"><table class="tbl"><thead><tr><th>Issue</th><th class="r">Amount</th></tr></thead><tbody>
-{% for (issue, amount) in bounties %}<tr><td><a href="/r/{{ r.hex }}/issues/{{ issue }}">issue <code title="{{ issue }}">{{ self.short(issue) }}</code></a></td><td class="r nw mono">{{ self.glm(amount) }}</td></tr>{% endfor %}
+{% for (issue, amount) in bounties %}<tr><td><a href="/r/{{ r.hex }}/issues/{{ issue }}">issue <code title="{{ issue }}">{{ self.short(issue) }}</code></a></td><td class="r nw mono">{{ m::amt(self.glm(amount)) }}</td></tr>{% endfor %}
 </tbody></table></div>
 </section>
 {% endif %}

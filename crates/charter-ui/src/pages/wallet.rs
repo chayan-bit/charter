@@ -11,8 +11,9 @@ use axum::response::{IntoResponse, Response};
 use charter_store::U256;
 use charter_sync::units::glm;
 
+use super::money::{Amount, amount};
 use super::people::{date, humane, stamp};
-use super::write::{WRITES_OFF, amount};
+use super::write::WRITES_OFF;
 use super::{App, Layout, Pref, WalletChip, blocking, html, short};
 use crate::spend::{self, Spend};
 use crate::writes::Writer;
@@ -27,11 +28,11 @@ fn low(wei: U256) -> bool {
 pub fn chip(w: &Writer) -> WalletChip {
     match w.balance() {
         Some((wei, _)) => WalletChip {
-            amount: amount(wei, false),
+            amount: Some(amount(wei, false)),
             low: low(wei),
         },
         None => WalletChip {
-            amount: String::new(),
+            amount: None,
             low: false,
         },
     }
@@ -44,8 +45,8 @@ pub struct Row {
     pub action: String,
     pub repo: String,
     pub hex: String,
-    pub cost: String,
-    pub value: Option<String>,
+    pub cost: Amount,
+    pub value: Option<Amount>,
     pub skipped: bool,
     pub estimated: bool,
 }
@@ -81,11 +82,11 @@ pub struct WalletPage {
     pub l: Layout,
     /// `None` without keys.
     pub address: Option<String>,
-    pub balance: Option<String>,
+    pub balance: Option<Amount>,
     pub read: String,
     pub low: bool,
     pub rows: Vec<Row>,
-    pub total: String,
+    pub total: Amount,
     pub error: Option<String>,
     pub off: &'static str,
     pub since: String,

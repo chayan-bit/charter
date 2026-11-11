@@ -6,6 +6,7 @@ pub mod code;
 pub mod forms;
 pub mod history;
 pub mod live;
+pub mod money;
 pub mod people;
 pub mod program;
 pub mod repos;
@@ -131,8 +132,8 @@ impl SyncChip {
 /// The header's wallet chip, from the balance the writer last read.
 #[derive(Debug, Clone)]
 pub struct WalletChip {
-    /// `12.4780`, or empty before the first read.
-    pub amount: String,
+    /// `None` before the first read.
+    pub amount: Option<money::Amount>,
     pub low: bool,
 }
 
@@ -374,20 +375,14 @@ impl Head {
     pub fn short(&self, h: &str) -> String {
         short(h)
     }
-    pub fn glm(&self, wei: &str) -> String {
-        glm(wei)
+    pub fn glm(&self, wei: &str) -> money::Amount {
+        money::glm(wei)
     }
     /// Maintainer names, joined: `you, ravi`.
     pub fn maintainers(&self) -> String {
         let names: Vec<String> = self.verify.delegates.iter().map(|d| self.who(d)).collect();
         names.join(", ")
     }
-}
-
-/// A decimal wei amount from an op or program state as tGLM; anything else as it is.
-pub fn glm(wei: &str) -> String {
-    charter_store::U256::from_str_radix(wei.trim_matches('"'), 10)
-        .map_or_else(|_| wei.to_owned(), write::tglm)
 }
 
 /// The people of a page: aliases from the view, nicknames from Settings, "you" from keys.

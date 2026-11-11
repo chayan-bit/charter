@@ -13,15 +13,15 @@
 <div class="publish"><span class="label">What you publish</span><p>{{ publish }}</p></div>
 {% if let Some(w) = short_of %}<div class="notice bad" role="alert">{{ m::i(l.v, "warning-circle") }}<div><p><b>Not enough funds.</b> {{ w }}</p>{% if !address.is_empty() %}<button class="btn btn-sm js" type="button" data-copy="{{ address }}">{{ m::i(l.v, "copy") }}Copy wallet address</button>{% endif %}</div></div>{% endif %}
 {% if let Some(q) = quota %}<div class="notice warn" role="status">{{ m::i(l.v, "pause") }}<p><b>Arkiv is rate limiting this computer.</b> {{ q }}. Nothing was spent.</p></div>{% endif %}
-<div class="price"><span class="label">Most you can pay<small>Test tokens, no real value</small></span><span class="amt">{{ most }} <small>tGLM</small></span></div>
+<div class="price"><span class="label">Most you can pay<small>Test tokens, no real value</small></span><span class="amt" title="{{ most.exact }}">{{ most.num }} <small>{{ most.unit }}</small></span></div>
 <dl class="cfacts">
-<div><dt>Wallet now</dt><dd>{{ wallet_now }} tGLM</dd></div>
-<div><dt>After, at least</dt><dd>{{ wallet_after }} tGLM</dd></div>
+<div><dt>Wallet now</dt><dd>{{ m::amt(wallet_now) }}</dd></div>
+<div><dt>After, at least</dt><dd>{{ m::amt(wallet_after) }}</dd></div>
 <div><dt>Takes</dt><dd class="tx">{{ takes }}</dd></div>
 <div><dt>Kept for</dt><dd class="tx">{{ kept }}, then it needs a renewal</dd></div>
 </dl>
 <details><summary>Breakdown and what will be signed</summary>
-<ul class="receipt">{% for (k, v) in receipt %}<li{% if loop.last %} class="tot"{% endif %}><span>{{ k }}</span><span>{{ v }}</span></li>{% endfor %}</ul>
+<ul class="receipt">{% for (k, v, x) in receipt %}<li{% if loop.last %} class="tot"{% endif %}><span>{{ k }}</span><span{% if !x.is_empty() %} title="{{ x }}"{% endif %}>{{ v }}</span></li>{% endfor %}</ul>
 {% for (h, p) in ops %}<p class="small sec"><code>{{ h }}</code></p>{% if !p.is_empty() %}<pre>{{ p }}</pre>{% endif %}{% endfor %}
 </details>
 <form method="post" action="/r/{{ r.hex }}/write/{{ id }}" class="cd-actions" data-confirm>

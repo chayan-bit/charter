@@ -74,8 +74,8 @@ impl ProgramPage {
         short(s)
     }
     /// A bounty amount (wei, as the program keeps it) in tGLM.
-    pub fn glm(&self, wei: &str) -> String {
-        super::glm(wei)
+    pub fn glm(&self, wei: &str) -> super::money::Amount {
+        super::money::glm(wei)
     }
     pub fn rejected(&self) -> Vec<&MoveJson> {
         self.p

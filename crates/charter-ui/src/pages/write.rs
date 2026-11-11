@@ -17,28 +17,13 @@ use charter_store::U256;
 use charter_sync::ids::{hex32, parse_id};
 use charter_sync::units::fmt_glm;
 
+use super::money::{Amount, amount};
 use super::{App, Head, Layout, Pref, blocking, error_page, frame, html, open, short};
 use crate::writes::{Draft, Estimate, Status, Step, Writer, form};
 use crate::{cache, prefs};
 
 pub const WRITES_OFF: &str = "Writes are off: there are no keys in $CHARTER_HOME. \
     Run `chart keys init`, fund the wallet, then restart `chart ui`.";
-
-/// `0.0042 tGLM`, exact.
-pub fn tglm(wei: U256) -> String {
-    format!("{} tGLM", fmt_glm(wei))
-}
-
-/// `0.0044`: four decimals, rounded up (a most-you-pay) or down (a balance).
-pub fn amount(wei: U256, up: bool) -> String {
-    let unit = U256::from(100_000_000_000_000_u64); // 1e18 / 1e4
-    let q = match up {
-        true => wei.div_ceil(unit),
-        false => wei / unit,
-    };
-    let ten_k = U256::from(10_000_u64);
-    format!("{}.{:04}", q / ten_k, (q % ten_k).to::<u64>())
-}
 
 #[derive(Template)]
 #[template(path = "confirm.html")]
@@ -53,16 +38,16 @@ pub struct Confirm {
     pub button: String,
     /// What is published, in words (a title, a body, an approval of a commit).
     pub publish: String,
-    /// Most you can pay, 4 decimals rounded up.
-    pub most: String,
-    pub wallet_now: String,
-    pub wallet_after: String,
+    /// Most you can pay, rounded up.
+    pub most: Amount,
+    pub wallet_now: Amount,
+    pub wallet_after: Amount,
     /// `about 6 s`.
     pub takes: String,
     /// `about 6 months`.
     pub kept: String,
-    /// Breakdown lines: `(label, value)`; the last is the total.
-    pub receipt: Vec<(&'static str, String)>,
+    /// Breakdown lines: `(label, value, exact value or empty)`; the last is the total.
+    pub receipt: Vec<(&'static str, String, String)>,
     /// The balance cannot cover it: Send is disabled.
     pub short_of: Option<String>,
     /// The RPC refused or nearly ran out of quota: Send is disabled until it resets.
@@ -122,7 +107,7 @@ fn publishes(d: &Draft) -> String {
     }) {
         Some(a) => format!(
             "A pledge of {} to this issue's bounty, paid into the repo's escrow",
-            tglm(a)
+            amount(a, false)
         ),
         None => d.label.clone(),
     }
@@ -153,7 +138,7 @@ fn signed_ops(d: &Draft) -> Vec<(String, String)> {
             )],
             Step::Deposit { amount, purpose } => vec![
                 (
-                    format!("transfer {} to the escrow", tglm(*amount)),
+                    format!("transfer {} tGLM to the escrow", fmt_glm(*amount)),
                     String::new(),
                 ),
                 (
@@ -176,9 +161,14 @@ fn top_up(e: &Estimate) -> String {
     };
     format!(
         "{n}{} to the repo's paying address, fee at most {}",
-        tglm(total),
-        tglm(e.top_up_fee)
+        amount(total, true),
+        amount(e.top_up_fee, true)
     )
+}
+
+/// A receipt line of one amount, with its exact value for the tooltip.
+fn money(label: &'static str, a: Amount) -> (&'static str, String, String) {
+    (label, a.to_string(), a.exact)
 }
 
 /// The dialog of a priced draft.
@@ -187,18 +177,18 @@ fn dialog(app: &App, l: Layout, head: Head, id: String, d: &Draft, e: &Estimate)
     let most = amount(need, true);
     let (q, verb) = ask(&d.label);
     let mut receipt = vec![
-        ("Transactions", e.txs.to_string()),
-        ("Records", e.entities.to_string()),
-        ("Wallet top-up", top_up(e)),
-        ("Network fees, at most", tglm(e.cost)),
+        ("Transactions", e.txs.to_string(), String::new()),
+        ("Records", e.entities.to_string(), String::new()),
+        ("Wallet top-up", top_up(e), String::new()),
+        money("Network fees, at most", amount(e.cost, true)),
     ];
     if e.value > U256::ZERO {
-        receipt.push(("Paid into escrow", tglm(e.value)));
+        receipt.push(money("Paid into escrow", amount(e.value, true)));
     }
-    receipt.push(("Total, at most", tglm(need)));
+    receipt.push(money("Total, at most", amount(need, true)));
     let short_of = (e.balance < need).then(|| {
         format!(
-            "Your wallet holds {} tGLM and this may cost up to {most}. Nothing was spent. \
+            "Your wallet holds {} and this may cost up to {most}. Nothing was spent. \
              Add funds with `chart fund`, then send again.",
             amount(e.balance, false)
         )
@@ -207,7 +197,7 @@ fn dialog(app: &App, l: Layout, head: Head, id: String, d: &Draft, e: &Estimate)
         l,
         id,
         back: d.back.clone(),
-        button: format!("{verb} for up to {most} tGLM"),
+        button: format!("{verb} for up to {most}"),
         ask: q,
         publish: publishes(d),
         // The wallet alone, as the header chip shows it; the repo's paying address pays the rest.
@@ -334,8 +324,8 @@ pub struct Toast {
     pub block: String,
     /// Every op it wrote is in the local cache (`cobs.json`), so pages show it.
     pub visible: bool,
-    /// Fees paid, 4 decimals rounded up; the estimate until every receipt is in.
-    pub cost: String,
+    /// Fees paid, rounded up; the estimate until every receipt is in.
+    pub cost: Amount,
     /// Seconds from confirm to the block.
     pub took: u64,
     /// The small-write limit it was sent under, when the dialog was skipped.

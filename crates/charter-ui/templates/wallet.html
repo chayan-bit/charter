@@ -8,7 +8,7 @@
 <div class="maincol">
 <section>
 <p class="label">Balance</p>
-<p class="big num">{% if let Some(b) = balance %}{{ b }} <small>tGLM</small>{% else %}<small>Not read yet</small>{% endif %}</p>
+<p class="big num">{% if let Some(b) = balance %}<span title="{{ b.exact }}">{{ b.num }} <small>{{ b.unit }}</small></span>{% else %}<small>Not read yet</small>{% endif %}</p>
 <form method="post" action="/wallet/refresh" class="toolbar sec">
 <input type="hidden" name="csrf" value="{{ l.csrf }}">
 <span class="muted small">{% if read.is_empty() %}The balance is read when Charter starts and after each write.{% else %}Read {{ read }}; again after each write.{% endif %}</span>
@@ -20,11 +20,11 @@
 {% if let Some(e) = error %}<div class="notice bad">{{ m::i(l.v, "warning-circle") }}<p><b>The history file could not be read.</b> {{ e }}. It is kept as it is; new writes are not added to it until it is fixed or removed.</p></div>
 {% else if rows.is_empty() %}<p class="muted">Nothing yet. Every write you confirm here is listed with what it cost.</p>
 {% else %}
-<p class="muted small">{{ total }} tGLM in fees over {{ rows.len() }} write{% if rows.len() != 1 %}s{% endif %} since {{ since }}.</p>
+<p class="muted small">{{ m::amt(total) }} in fees over {{ rows.len() }} write{% if rows.len() != 1 %}s{% endif %} since {{ since }}.</p>
 <div class="tblwrap"><table class="tbl">
 <thead><tr><th>When</th><th>What</th><th>Repo</th><th class="r">Cost</th></tr></thead>
 <tbody>
-{% for x in rows %}<tr><td class="nw"><time title="{{ x.stamp }}">{{ x.when }}</time></td><td>{{ x.action }}{% if x.skipped %} <span class="tag">no dialog</span>{% endif %}</td><td><a href="/r/{{ x.hex }}">{{ x.repo }}</a></td><td class="r nw mono">{% if x.estimated %}up to {% endif %}{{ x.cost }}{% if let Some(v) = x.value %}<br><span class="muted">+ {{ v }} to escrow</span>{% endif %}</td></tr>
+{% for x in rows %}<tr><td class="nw"><time title="{{ x.stamp }}">{{ x.when }}</time></td><td>{{ x.action }}{% if x.skipped %} <span class="tag">no dialog</span>{% endif %}</td><td><a href="/r/{{ x.hex }}">{{ x.repo }}</a></td><td class="r nw mono">{% if x.estimated %}up to {% endif %}{{ m::amt(x.cost) }}{% if let Some(v) = x.value %}<br><span class="muted">+ {{ m::amt(v) }} to escrow</span>{% endif %}</td></tr>
 {% endfor %}
 </tbody></table></div>
 {% endif %}

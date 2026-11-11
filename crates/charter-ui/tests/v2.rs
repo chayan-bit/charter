@@ -375,7 +375,10 @@ async fn a_write_under_the_small_write_limit_skips_the_dialog_and_is_in_the_ledg
         t.contains("Sent without asking") && t.contains("0.1 tGLM limit"),
         "{t}"
     );
-    assert!(t.contains("Cost 0."), "{t}");
+    assert!(
+        t.contains("Cost <span title=\"0.") && t.contains(" tGLM</span>. It is in"),
+        "{t}"
+    );
     let e = spend::read(home.path()).expect("ledger");
     assert_eq!(e.len(), 1);
     assert!(e[0].skipped && e[0].repo == hex && e[0].txs >= 1, "{e:?}");

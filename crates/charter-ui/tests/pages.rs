@@ -169,7 +169,8 @@ async fn issues_fold_into_a_closed_thread_with_sanitized_bodies() {
     assert!(h.contains("<strong>crashes</strong>") && !h.contains("<script>x()"));
     assert!(h.contains("seen it too") && h.contains("<b>closed</b>"));
     assert!(
-        h.contains("Bounty: 0.000000000000000005 tGLM") && h.contains("Closed as fixed"),
+        h.contains("Bounty: <span title=\"0.000000000000000005 tGLM\">5 wei</span>")
+            && h.contains("Closed as fixed"),
         "payload fields as phrases"
     );
     let r = get(&format!("/r/{}/issues/{}", f.hex, "0".repeat(64))).await;
