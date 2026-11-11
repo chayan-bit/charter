@@ -462,10 +462,16 @@ async fn a_tx_is_read_by_block_and_index_in_one_call() {
     })
     .await;
     let got = rpc.tx_at(42, 5).await.expect("t").expect("some");
-    assert_eq!((got.block, got.index, got.input.to_vec()), (42, 5, vec![1, 2]));
+    assert_eq!(
+        (got.block, got.index, got.input.to_vec()),
+        (42, 5, vec![1, 2])
+    );
     assert_eq!(rpc.tx_at(42, 6).await, Ok(None));
     let calls = seen.lock().expect("log").len();
-    assert!(calls <= 3, "one call per tx, plus at most the chain probe: {calls}");
+    assert!(
+        calls <= 3,
+        "one call per tx, plus at most the chain probe: {calls}"
+    );
 }
 
 #[tokio::test]

@@ -172,7 +172,10 @@ fn a_v2_head_lists_its_packs_as_tx_pieces() {
     .expect("present");
     assert_eq!(head.format, HeadFormat::V2);
     assert_eq!(head.packs[0].codec, codec::Codec::Raw);
-    assert_eq!(head.packs[0].pieces, PackPieces::Txs(body.packs[0].pieces.clone()));
+    assert_eq!(
+        head.packs[0].pieces,
+        PackPieces::Txs(body.packs[0].pieces.clone())
+    );
 }
 
 #[test]
@@ -181,8 +184,16 @@ fn a_v2_and_a_v3_head_of_one_device_are_a_duplicate() {
     let (_, identity, d) = device(w);
     let (a, _) = observe(&peers()[1], &v3(w.rid, 0, 3), DEV_CONTROL, 41, 0);
     let (b, _) = observe(&peers()[1], &v3(w.rid, 1, 3).shared(), DEV_CONTROL, 42, 0);
-    let err = accept_device_head(&w.rid, &alice().nid, &d, &identity, &[a, b], &nonce(2), None)
-        .expect_err("two heads");
+    let err = accept_device_head(
+        &w.rid,
+        &alice().nid,
+        &d,
+        &identity,
+        &[a, b],
+        &nonce(2),
+        None,
+    )
+    .expect_err("two heads");
     assert_eq!(err.code(), ErrorCode::ControlNotLive);
 }
 
