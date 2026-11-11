@@ -1,40 +1,46 @@
 {% extends "base.html" %}
-{% import "macros.html" as u %}
+{% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
+<div class="solo">
 {% if let Some(p) = p %}
-<div class="box"><table class="facts"><tbody>
-<tr><th>Pinned program</th><td><code>{{ p.engine }}</code> <code title="{{ p.hash }}" data-copy="{{ p.hash }}">{{ self.short(p.hash.as_str()) }}</code></td></tr>
-<tr><th>Ref moves</th><td>{{ self.accepted().len() }} accepted, {{ self.rejected().len() }} rejected</td></tr>
-</tbody></table></div>
+<section>
+<h2 class="h2">Rules and CI</h2>
+<p class="md">Every push to this repo is checked by its pinned rules before it counts. {{ self.accepted().len() }} change{% if self.accepted().len() != 1 %}s{% endif %} allowed, {{ self.rejected().len() }} refused.</p>
+<details class="tech"><summary>Technical details</summary><dl class="facts"><dt>Rules program</dt><dd><code>{{ p.engine }}</code> <code title="{{ p.hash }}" data-copy="{{ p.hash }}">{{ self.short(p.hash) }}</code></dd></dl></details>
+</section>
 {% if !bounties.is_empty() %}
-<h2>Bounties</h2>
-<div class="box"><table class="list"><thead><tr><th>Issue</th><th class="num">Amount</th></tr></thead><tbody>
-{% for (issue, amount) in bounties %}<tr><td><a href="/r/{{ r.hex }}/issues/{{ issue }}"><code title="{{ issue }}">{{ self.short(issue.as_str()) }}</code></a></td><td class="num"><code>{{ amount }}</code></td></tr>{% endfor %}
+<section class="sec">
+<h2 class="h2">Bounties</h2>
+<div class="tblwrap"><table class="tbl"><thead><tr><th>Issue</th><th class="r">Amount</th></tr></thead><tbody>
+{% for (issue, amount) in bounties %}<tr><td><a href="/r/{{ r.hex }}/issues/{{ issue }}">issue <code title="{{ issue }}">{{ self.short(issue) }}</code></a></td><td class="r nw mono">{{ self.glm(amount) }}</td></tr>{% endfor %}
 </tbody></table></div>
+</section>
 {% endif %}
 {% if !p.obligations.is_empty() %}
-<h2>Obligations</h2>
-<ul class="mono">{% for o in p.obligations %}<li><code>{{ o }}</code></li>{% endfor %}</ul>
+<section class="sec"><h2 class="h2">Still owed</h2>
+<ul>{% for o in p.obligations %}<li><code>{{ o }}</code></li>{% endfor %}</ul></section>
 {% endif %}
-{% if self.accepted().is_empty() && self.rejected().is_empty() %}<h2>Ref moves</h2><p class="dim">No ref moves yet.</p>{% endif %}
+{% if self.accepted().is_empty() && self.rejected().is_empty() %}<section class="sec"><h2 class="h2">Decisions</h2><p class="muted">No pushes checked yet.</p></section>{% endif %}
 {% if !self.rejected().is_empty() %}
-<h2>Rejected</h2>
-<div class="box"><table class="list"><thead><tr><th>Ref</th><th>New</th><th>By</th><th>Reason</th></tr></thead><tbody>
-{% for m in self.rejected() %}<tr class="bad"><td><code class="ref">{{ u::refname(m.name) }}</code></td><td><code title="{{ m.new }}">{{ self.short(m.new.as_str()) }}</code></td><td><code title="{{ m.author }}">{{ self.short(m.author.as_str()) }}</code></td><td>{% if let Some(why) = m.reason %}{{ why }}{% endif %}</td></tr>{% endfor %}
-</tbody></table></div>
+<section class="sec"><h2 class="h2">Refused</h2>
+<div class="tblwrap"><table class="tbl"><thead><tr><th>Branch or tag</th><th>Commit</th><th>By</th><th>Why</th></tr></thead><tbody>
+{% for x in self.rejected() %}<tr class="bad"><td><code>{{ m::refname(x.name) }}</code></td><td><span class="hash" title="{{ x.new }}">{{ self.short(x.new) }}</span></td><td>{{ r.who(x.author) }}</td><td>{% if let Some(why) = x.reason %}{{ why }}{% endif %}</td></tr>{% endfor %}
+</tbody></table></div></section>
 {% endif %}
 {% if !self.accepted().is_empty() %}
-<h2>Accepted</h2>
-<div class="box"><table class="list"><thead><tr><th>Ref</th><th>New</th><th>By</th></tr></thead><tbody>
-{% for m in self.accepted() %}<tr><td><code class="ref">{{ u::refname(m.name) }}</code></td><td><a href="/r/{{ r.hex }}/commit/{{ m.new }}"><code title="{{ m.new }}">{{ self.short(m.new.as_str()) }}</code></a></td><td><code title="{{ m.author }}">{{ self.short(m.author.as_str()) }}</code></td></tr>{% endfor %}
-</tbody></table></div>
+<section class="sec"><h2 class="h2">Allowed</h2>
+<div class="tblwrap"><table class="tbl"><thead><tr><th>Branch or tag</th><th>Commit</th><th>By</th></tr></thead><tbody>
+{% for x in self.accepted() %}<tr><td><code>{{ m::refname(x.name) }}</code></td><td><a class="hash" href="/r/{{ r.hex }}/commit/{{ x.new }}" title="{{ x.new }}">{{ self.short(x.new) }}</a></td><td>{{ r.who(x.author) }}</td></tr>{% endfor %}
+</tbody></table></div></section>
 {% endif %}
-<h2>State</h2>
-<details class="file box"><summary>Raw program state (JSON)</summary><pre>{{ state }}</pre></details>
-{% if !p.logs.is_empty() %}<h2>Logs</h2><details class="file box"><summary>{{ p.logs.len() }} log lines</summary><pre>{% for g in p.logs %}{{ g }}
+<section class="sec">
+<details class="tech"><summary>State, as the rules keep it (JSON)</summary><pre>{{ state }}</pre></details>
+{% if !p.logs.is_empty() %}<details class="file"><summary><code>{{ p.logs.len() }} log lines</code></summary><pre>{% for g in p.logs %}{{ g }}
 {% endfor %}</pre></details>{% endif %}
+</section>
 {% else %}
-<section class="empty"><p>No program is pinned in the identity document.</p><p>Pin one with <code>chart program pin</code>.</p></section>
+<section class="empty"><h2>No rules pinned</h2><p>Without pinned rules, the maintainers' signatures decide what {{ r.default_ref }} is. Pin rules with <code>chart program pin</code>.</p></section>
 {% endif %}
+</div>
 {% endblock %}

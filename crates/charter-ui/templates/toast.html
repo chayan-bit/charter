@@ -1,13 +1,17 @@
-<div class="wr"{% if !t.done() %} hx-get="/r/{{ t.hex }}/write/{{ t.id }}?part=1" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
-<section class="box wp">
-<h2>{{ t.s.label }}</h2>
-<table class="facts">
-<tr><th>State</th><td>{% match t.state %}{% when "sending" %}Signing and sending{% when "sent" %}Sent, waiting for the receipt{% when "confirmed" %}<span class="ok">Confirmed in block <code>{{ t.block }}</code></span>{% else %}<span class="bad">Failed</span>{% endmatch %}</td></tr>
-{% for h in t.txs %}<tr><th>Transaction {{ loop.index }}</th><td><code>{{ h }}</code></td></tr>{% endfor %}
-{% for i in t.ids %}<tr><th>Op {{ loop.index }}</th><td><code>{{ i }}</code></td></tr>{% endfor %}
-{% if let Some(e) = t.s.error %}<tr class="bad"><th>Error</th><td>{{ e }}</td></tr>{% endif %}
-</table>
-<p class="pad">{% if !t.done() %}<span class="nojs">Reload to see the receipt. </span>{% endif %}<a href="{{ t.s.back }}">Back</a>{% if t.state == "confirmed" %}; it shows there after the next sync round{% endif %}.</p>
+<div class="wr" id="wr-{{ t.id }}"{% if !t.done() %} hx-get="/r/{{ t.hex }}/write/{{ t.id }}?part=1" hx-trigger="every 1s" hx-swap="outerHTML"{% else if t.state == "confirmed" && !t.visible %} data-live="op"{% endif %}>
+<section class="cost wp">
+<div class="cd">
+<div><h2>{{ t.s.label }}</h2>{% if let Some(lim) = t.limit %}<p class="lede">Sent without asking: it cost less than your {{ lim }} tGLM limit in Settings.</p>{% endif %}</div>
+<ol class="steps">
+<li class="{% if t.state == "sending" %}now{% else if t.state == "failed" && t.txs.is_empty() %}x{% else %}done{% endif %}">{% if t.state == "sending" %}{{ m::i(l.v, "spinner-gap") }}{% else if t.state == "failed" && t.txs.is_empty() %}{{ m::i(l.v, "x-circle") }}{% else %}{{ m::i(l.v, "check-circle") }}{% endif %}<div><b>Signed on this computer</b><span>Your keys never left this machine.</span></div></li>
+<li class="{% match t.state %}{% when "confirmed" %}done{% when "sent" %}now{% when "failed" %}x{% else %}{% endmatch %}">{% match t.state %}{% when "confirmed" %}{{ m::i(l.v, "check-circle") }}{% when "sent" %}{{ m::i(l.v, "spinner-gap") }}{% when "failed" %}{{ m::i(l.v, "x-circle") }}{% else %}{{ m::i(l.v, "circle-dashed") }}{% endmatch %}<div><b>{% match t.state %}{% when "confirmed" %}In a block{% when "failed" %}Not written{% else %}Waiting for a block{% endmatch %}</b><span>{% match t.state %}{% when "confirmed" %}Confirmed {{ t.took }} s after you sent it.{% when "failed" %}{% if let Some(e) = t.s.error %}{{ e }}{% endif %}{% else %}Usually 2 to 10 s.{% endmatch %}</span></div></li>
+<li class="{% if t.visible %}done{% endif %}">{% if t.visible %}{{ m::i(l.v, "check-circle") }}{% else %}{{ m::i(l.v, "circle-dashed") }}{% endif %}<div><b>Visible here</b><span>{% if t.visible %}This computer's copy has it, checked like everything else.{% else %}After the next sync checks it; others see it after theirs.{% endif %}</span></div></li>
+</ol>
+{% if t.state == "confirmed" %}<p class="small muted">Cost {{ t.cost }} tGLM{% if t.moved() %} in fees{% endif %}. It is in your <a href="/wallet">wallet history</a>.</p>{% endif %}
+{% if !t.txs.is_empty() %}<details class="tech"><summary>Technical details</summary><dl class="facts">{% if !t.block.is_empty() %}<dt>Block</dt><dd><code>{{ t.block }}</code></dd>{% endif %}{% for h in t.txs %}<dt>Transaction {{ loop.index }}</dt><dd><code>{{ h }}</code></dd>{% endfor %}{% for i in t.ids %}<dt>Op {{ loop.index }}</dt><dd><code>{{ i }}</code></dd>{% endfor %}</dl></details>{% endif %}
+<div class="cd-actions">{% if !t.done() %}<span class="nojs small muted">Reload to see the next step.</span>{% endif %}<a class="btn{% if t.done() %} btn-ink{% endif %}" href="{{ t.s.back }}">Back</a></div>
+</div>
 </section>
-<div class="toast t-{{ t.state }}" tabindex="-1">{% match t.state %}{% when "sending" %}<b>Sending</b><span class="dim">signing in this process</span>{% when "sent" %}<b>Sent</b>{% if let Some(h) = t.txs.last() %}<code title="{{ h }}">tx {{ t.short(h.as_str()) }}</code>{% endif %}{% when "confirmed" %}<b>Confirmed in block <code>{{ t.block }}</code></b>{% if let Some(h) = t.txs.last() %}<code class="dim" title="{{ h }}">tx {{ t.short(h.as_str()) }}</code>{% endif %}{% else %}<b>Write failed</b>{% if let Some(e) = t.s.error %}<span>{{ e }}</span>{% endif %}<button type="button" class="btn js" data-dismiss>Dismiss</button>{% endmatch %}</div>
+<div class="toast t-{{ t.state }}" tabindex="-1">{% match t.state %}{% when "sending" %}<b>Signing</b><span>in this process</span>{% when "sent" %}<b>Sent</b><span>waiting for a block</span>{% when "confirmed" %}<b>{% if t.limit.is_some() %}Sent without asking{% else %}Published{% endif %}</b><span>cost {{ t.cost }} tGLM</span>{% else %}<b>Write failed</b>{% if let Some(e) = t.s.error %}<span>{{ e }}</span>{% endif %}<button type="button" class="btn btn-sm js" data-dismiss>Dismiss</button>{% endmatch %}</div>
+{% if t.done() && t.part %}<span id="wallet-slot" hx-swap-oob="true">{% include "wallet_chip_a.html" %}</span>{% endif %}
 </div>

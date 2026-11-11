@@ -207,6 +207,25 @@ pub struct RepoView {
     pub peers: Vec<PeerJson>,
     pub equivocations: Vec<EquivocationJson>,
     pub program: Option<ProgramJson>,
+    /// Peer id to the alias of its peer document, for peers and op authors seen so far.
+    #[serde(default)]
+    pub aliases: BTreeMap<String, String>,
+    /// Issues and patches opened, counted when the round writes `cobs.json`, so the repo
+    /// list never reads every repo's ops. Zero until the first round after an upgrade.
+    #[serde(default)]
+    pub issues: usize,
+    #[serde(default)]
+    pub patches: usize,
+}
+
+impl Cobs {
+    /// How many objects of `type_name` were opened.
+    pub fn opened(&self, type_name: &str) -> usize {
+        self.ops
+            .iter()
+            .filter(|o| o.type_name == type_name && o.action == "create")
+            .count()
+    }
 }
 
 impl RepoView {
@@ -234,6 +253,13 @@ impl RepoView {
                 .collect(),
             equivocations: view.equivocations.iter().map(equivocation).collect(),
             program: program(view),
+            aliases: view
+                .peers
+                .keys()
+                .filter_map(|n| Some((hex32(n), charter_sync::cob::alias_of(n)?)))
+                .collect(),
+            issues: 0,
+            patches: 0,
         }
     }
 }

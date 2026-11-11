@@ -8,7 +8,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use super::{App, Head, Layout, Repo, Theme, blocking, error_page, frame, html, open, seg, short};
+use super::repos::Picker;
+use super::{App, Head, Layout, Pref, Repo, blocking, error_page, frame, html, open, seg, short};
 use crate::gitread::{self, CommitRow, Entry};
 use crate::highlight::{self, HIGHLIGHT_LINES};
 
@@ -27,8 +28,8 @@ struct At {
     path: String,
 }
 
-fn at(app: &App, theme: &Theme, r: &Repo, rev: &str, path: &str) -> Result<At, Response> {
-    let bad = |m| error_page(app, theme, StatusCode::NOT_FOUND, m);
+fn at(app: &App, pref: &Pref, r: &Repo, rev: &str, path: &str) -> Result<At, Response> {
+    let bad = |m| error_page(app, pref, StatusCode::NOT_FOUND, m);
     let path = gitread::clean_path(path).ok_or_else(|| bad("Invalid path."))?;
     let commit = gitread::resolve(&r.git, r.view.as_ref(), rev)
         .ok_or_else(|| bad("No such branch, tag or commit in the verified refs."))?;
@@ -75,6 +76,7 @@ pub struct Tree {
     pub up: Option<String>,
     pub entries: Vec<Entry>,
     pub last: Option<CommitRow>,
+    pub picker: Picker,
 }
 
 impl Tree {
@@ -101,20 +103,21 @@ fn up(r: &Repo, at: &At) -> Option<String> {
     Some(format!("/r/{}/tree/{}/{parent}", r.hex, at.rev))
 }
 
-fn tree_page(app: &App, theme: &Theme, r: &Repo, rev: &str, path: &str) -> Response {
-    let at = match at(app, theme, r, rev, path) {
+fn tree_page(app: &App, pref: &Pref, r: &Repo, rev: &str, path: &str) -> Response {
+    let at = match at(app, pref, r, rev, path) {
         Ok(a) => a,
         Err(resp) => return resp,
     };
     let Some(entries) = gitread::tree_with_last(&r.git, &at.commit, &at.path) else {
-        return error_page(app, theme, StatusCode::NOT_FOUND, "No such directory.");
+        return error_page(app, pref, StatusCode::NOT_FOUND, "No such directory.");
     };
     let last = gitread::last_change(&r.git, &at.commit, &at.path);
-    let (mut l, head) = frame(app, theme, r, "code", "Tree");
+    let (mut l, head) = frame(app, pref, r, "code", "Tree");
     crumbs(&mut l, r, &at);
     html(&Tree {
         l,
         r: head,
+        picker: Picker::new(r, &at.rev),
         up: up(r, &at),
         rev: at.rev,
         path: at.path,
@@ -125,11 +128,11 @@ fn tree_page(app: &App, theme: &Theme, r: &Repo, rev: &str, path: &str) -> Respo
 
 pub async fn tree_root(
     State(app): State<Arc<App>>,
-    theme: Theme,
+    pref: Pref,
     Path((rid, rev)): Path<(String, String)>,
 ) -> Response {
-    blocking(move || match open(&app, &theme, &rid) {
-        Ok(r) => tree_page(&app, &theme, &r, &rev, ""),
+    blocking(move || match open(&app, &pref, &rid) {
+        Ok(r) => tree_page(&app, &pref, &r, &rev, ""),
         Err(e) => e,
     })
     .await
@@ -137,11 +140,11 @@ pub async fn tree_root(
 
 pub async fn tree(
     State(app): State<Arc<App>>,
-    theme: Theme,
+    pref: Pref,
     Path((rid, rev, path)): Path<(String, String, String)>,
 ) -> Response {
-    blocking(move || match open(&app, &theme, &rid) {
-        Ok(r) => tree_page(&app, &theme, &r, &rev, &path),
+    blocking(move || match open(&app, &pref, &rid) {
+        Ok(r) => tree_page(&app, &pref, &r, &rev, &path),
         Err(e) => e,
     })
     .await
@@ -162,19 +165,26 @@ pub struct Blob {
     pub binary: bool,
     /// Lines not shown (the "show all" link).
     pub hidden: usize,
+    pub picker: Picker,
+}
+
+impl Blob {
+    pub fn age(&self, secs: &i64) -> String {
+        super::age(*secs)
+    }
 }
 
 fn is_binary(b: &[u8]) -> bool {
     b.iter().take(8_000).any(|c| *c == 0) || std::str::from_utf8(b).is_err()
 }
 
-fn blob_page(app: &App, theme: &Theme, r: &Repo, rev: &str, path: &str, all: bool) -> Response {
-    let at = match at(app, theme, r, rev, path) {
+fn blob_page(app: &App, pref: &Pref, r: &Repo, rev: &str, path: &str, all: bool) -> Response {
+    let at = match at(app, pref, r, rev, path) {
         Ok(a) => a,
         Err(resp) => return resp,
     };
     let Some(bytes) = gitread::blob(&r.git, &at.commit, &at.path) else {
-        return error_page(app, theme, StatusCode::NOT_FOUND, "No such file.");
+        return error_page(app, pref, StatusCode::NOT_FOUND, "No such file.");
     };
     let binary = is_binary(&bytes) || bytes.len() > MAX_VIEW_BYTES;
     let text = if binary {
@@ -186,11 +196,12 @@ fn blob_page(app: &App, theme: &Theme, r: &Repo, rev: &str, path: &str, all: boo
     let limit = if all { usize::MAX } else { HIGHLIGHT_LINES };
     let name = at.path.rsplit('/').next().unwrap_or("");
     let lines = highlight::lines(name, text, limit);
-    let (mut l, head) = frame(app, theme, r, "code", name);
+    let (mut l, head) = frame(app, pref, r, "code", name);
     crumbs(&mut l, r, &at);
     html(&Blob {
         l,
         r: head,
+        picker: Picker::new(r, &at.rev),
         up: up(r, &at),
         hidden: total.saturating_sub(lines.len()),
         size: bytes.len(),
@@ -204,12 +215,12 @@ fn blob_page(app: &App, theme: &Theme, r: &Repo, rev: &str, path: &str, all: boo
 
 pub async fn blob(
     State(app): State<Arc<App>>,
-    theme: Theme,
+    pref: Pref,
     Path((rid, rev, path)): Path<(String, String, String)>,
     Query(q): Query<All>,
 ) -> Response {
-    blocking(move || match open(&app, &theme, &rid) {
-        Ok(r) => blob_page(&app, &theme, &r, &rev, &path, q.all.is_some()),
+    blocking(move || match open(&app, &pref, &rid) {
+        Ok(r) => blob_page(&app, &pref, &r, &rev, &path, q.all.is_some()),
         Err(e) => e,
     })
     .await
@@ -264,21 +275,21 @@ fn raw_body(name: &str, bytes: Vec<u8>) -> Response {
 
 pub async fn raw(
     State(app): State<Arc<App>>,
-    theme: Theme,
+    pref: Pref,
     Path((rid, rev, path)): Path<(String, String, String)>,
 ) -> Response {
     blocking(move || {
-        let r = match open(&app, &theme, &rid) {
+        let r = match open(&app, &pref, &rid) {
             Ok(r) => r,
             Err(e) => return e,
         };
-        let at = match at(&app, &theme, &r, &rev, &path) {
+        let at = match at(&app, &pref, &r, &rev, &path) {
             Ok(a) => a,
             Err(e) => return e,
         };
         match gitread::blob(&r.git, &at.commit, &at.path) {
             Some(b) => raw_response(at.path.rsplit('/').next().unwrap_or(""), b),
-            None => error_page(&app, &theme, StatusCode::NOT_FOUND, "No such file."),
+            None => error_page(&app, &pref, StatusCode::NOT_FOUND, "No such file."),
         }
     })
     .await

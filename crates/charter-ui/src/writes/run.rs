@@ -18,7 +18,7 @@ use charter_sync::release::{self, RELEASE_TYPE};
 use charter_sync::write::{entity_op, price, sign};
 use charter_sync::{Config, Keys, view};
 
-use super::{Draft, Estimate, Obj, Shared, Status, Step};
+use super::{Balance, Draft, Estimate, Obj, Shared, Status, Step};
 
 /// Gas of a plain value transfer.
 const TRANSFER_GAS: u64 = 21_000;
@@ -27,6 +27,7 @@ pub struct Ctx<A> {
     pub a: Arc<A>,
     pub cfg: Config,
     pub keys: Keys,
+    pub balance: Balance,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -89,6 +90,19 @@ impl<A: Arkiv> Ctx<A> {
         self.keys.wallet().address()
     }
 
+    fn keep_balance(&self, wei: U256) {
+        if let Ok(mut b) = self.balance.lock() {
+            *b = Some((wei, now_ms()));
+        }
+    }
+
+    /// One balance read, for the header chip and the wallet page.
+    pub async fn read_balance(&self) {
+        if let Ok(w) = self.a.balance(self.wallet()).await {
+            self.keep_balance(w);
+        }
+    }
+
     async fn bound(&self, rid: &Rid) -> Result<bool, String> {
         let p = view::resolve_peer(&*self.a, rid, &self.keys.nid()).await;
         Ok(p.map_err(err)?.is_some_and(|p| !p.binds.links.is_empty()))
@@ -138,8 +152,11 @@ impl<A: Arkiv> Ctx<A> {
             futures_util::future::try_join(self.a.balance(self.wallet()), self.a.balance(control))
                 .await
                 .map_err(err)?;
+        self.keep_balance(w);
         let mut e = Estimate {
             balance: w + have,
+            wallet: w,
+            lifetime: self.cfg.control_lifetime,
             ..Estimate::default()
         };
         let mut steps = Vec::with_capacity(d.steps.len());
@@ -153,6 +170,7 @@ impl<A: Arkiv> Ctx<A> {
                     // The escrow transfer goes from the wallet itself: never topped up.
                     (e.value, e.txs) = (e.value + amount, e.txs + 1);
                     e.cost += price(TRANSFER_GAS, base_fee);
+                    e.from_wallet += *amount + price(TRANSFER_GAS, base_fee);
                     deposit_step(appt.appointment.object, *amount, purpose)?
                 }
                 _ => step.clone(),
@@ -173,6 +191,7 @@ impl<A: Arkiv> Ctx<A> {
         if let Some(amount) = PipelineConfig::top_up(*have, reserve, 1) {
             let fee = pc.top_up_fee(base_fee);
             e.top_ups.push(amount);
+            e.from_wallet += amount + fee;
             (e.top_up_fee, e.cost, e.txs) = (e.top_up_fee + fee, e.cost + fee, e.txs + 1);
             *have += amount;
         }
@@ -224,6 +243,10 @@ impl<A: Arkiv> Ctx<A> {
             (Ok(_), Some(h)) => tap.receipt(h).await.ok().flatten().map(|r| r.block_number),
             _ => None,
         };
+        // Before the status says confirmed, so the page that shows it has the new balance.
+        if out.is_ok() {
+            self.read_balance().await;
+        }
         if let Ok(mut s) = status.lock() {
             match (out, block) {
                 (Ok(ids), Some(b)) => (s.ids, s.block) = (ids, Some(b)),
@@ -233,6 +256,30 @@ impl<A: Arkiv> Ctx<A> {
                 }
                 (Err(e), _) => s.error = Some(e),
             }
+            if s.block.is_some() {
+                s.done_ms = now_ms();
+                self.ledger(&d, &s);
+            }
+        }
+    }
+
+    /// Appends a confirmed write to the spend ledger; a ledger error is logged, never
+    /// turned into a failed write (the write is on chain already).
+    fn ledger(&self, d: &Draft, s: &Status) {
+        let (wei, estimated) = s.spent();
+        let entry = crate::spend::Spend {
+            ts_ms: s.done_ms,
+            block: s.block.unwrap_or_default(),
+            repo: charter_sync::ids::hex32(&d.rid),
+            action: d.label.clone(),
+            wei: wei.to_string(),
+            value: s.est.value.to_string(),
+            txs: s.txs.len(),
+            skipped: s.skipped,
+            estimated,
+        };
+        if let Err(e) = crate::spend::record(&self.cfg.home, entry) {
+            charter_sync::warn(&format!("ui: spend ledger not updated: {e}"));
         }
     }
 }
@@ -289,7 +336,14 @@ impl<A: Arkiv> Arkiv for Tap<A> {
         Ok(h)
     }
     async fn receipt(&self, h: TxHash) -> Result<Option<Receipt>, StoreError> {
-        self.a.receipt(h).await
+        let r = self.a.receipt(h).await?;
+        if let (Some(r), Ok(mut s)) = (&r, self.status.lock())
+            && !s.fees.iter().any(|(t, _)| *t == h)
+        {
+            let fee = U256::from(r.gas_used) * U256::from(r.effective_gas_price);
+            s.fees.push((h, fee));
+        }
+        Ok(r)
     }
     fn seal_ops(&self, ops: Vec<Operation>) -> Result<Vec<Operation>, StoreError> {
         self.a.seal_ops(ops)

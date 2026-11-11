@@ -1,0 +1,10 @@
+<details class="pop branch">
+<summary class="btn{% if small %} btn-sm{% endif %}" aria-label="Branch or tag: {{ picker.current }}. Switch">{{ m::i(l.v, "git-branch") }}<span>{{ picker.current }}</span>{{ m::i(l.v, "caret-down") }}</summary>
+<div class="popover left menu">
+{% if picker.branches > 0 %}<h3>Branches</h3>{% endif %}
+{% for x in picker.refs %}{% if !x.tag %}<a href="/r/{{ r.hex }}/tree/{{ x.seg }}"{% if x.name == picker.current %} aria-current="true"{% endif %}><span>{{ m::refname(x.name) }}</span><small>{% if x.default %}default{% else if let Some(t) = x.tip %}{{ self.age(t.time) }}{% endif %}</small></a>{% endif %}{% endfor %}
+{% if picker.tags > 0 %}<h3>Tags</h3>{% endif %}
+{% for x in picker.refs %}{% if x.tag %}<a href="/r/{{ r.hex }}/tree/{{ x.seg }}"{% if x.name == picker.current %} aria-current="true"{% endif %}><span>{{ m::refname(x.name) }}</span><small>{% if let Some(t) = x.tip %}{{ self.age(t.time) }}{% endif %}</small></a>{% endif %}{% endfor %}
+<div class="foot"><a href="/r/{{ r.hex }}/branches">All branches and tags</a></div>
+</div>
+</details>

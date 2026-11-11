@@ -1,16 +1,30 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 {% block main %}
-<h1 class="title">Repositories</h1>
+<div class="page-head"><div><h1>Repositories</h1><p>Repos on this computer. Each one is rebuilt from Arkiv and checked here before it is shown.</p></div></div>
 {% if repos.is_empty() %}
-<section class="empty"><p>No repos in this <code>$CHARTER_HOME</code> yet.</p><p>Clone one with <code>git clone arkiv::&lt;rid&gt;</code>, or run <code>chart ui &lt;rid&gt;</code> to fetch it here.</p></section>
+<section class="empty">
+<svg class="i i-xl" aria-hidden="true"><use href="/assets/icons.svg?v={{ l.v }}#i-git-branch"/></svg>
+<h2>No repositories on this computer yet</h2>
+<p>Clone one with <code>git clone arkiv::&lt;address&gt;</code>, or run <code>chart ui &lt;address&gt;</code> to fetch and verify it here. Reading is free.</p>
+</section>
 {% else %}
-<div class="box"><table class="list" data-list>
-<thead><tr><th>Name</th><th class="num">Last push</th><th class="hm">Synced</th><th>Verification</th></tr></thead>
-<tbody>
-{% for x in repos %}
-<tr data-row><td><div><a href="/r/{{ x.hex }}">{{ x.name }}</a></div>{% if !x.description.is_empty() %}<div class="dim">{{ x.description }}</div>{% endif %}</td><td class="num">{% if let Some(b) = x.last_push %}block <code>{{ b }}</code>{% else %}<span class="dim">none</span>{% endif %}</td><td class="hm">{% if let Some(p) = x.verify.pause %}{{ p }}{% else %}{{ x.verify.synced }}{% endif %}</td><td><span class="badge b-{{ x.verify.state }}">{{ x.verify.word }}</span></td></tr>
+{% let att = self.attention() %}
+{% if !att.is_empty() %}
+<ul class="attention" aria-label="Needs attention">
+{% for x in att %}{% if x.verify.state == "equivocation" %}<li class="bad">{{ m::i(l.v, "seal-warning") }}<p><b>{{ x.name }}</b> has conflicting histories. Don't merge or release until a maintainer explains.</p><a class="btn btn-sm" href="/r/{{ x.hex }}#verify">See details</a></li>{% else %}<li class="warn">{{ m::i(l.v, "warning-circle") }}<p><b>{{ x.name }}</b> could not be synced; it shows what was verified before.</p><a class="btn btn-sm" href="/r/{{ x.hex }}#verify">Details</a></li>{% endif %}
 {% endfor %}
-</tbody>
-</table></div>
+</ul>
+{% endif %}
+<ol class="repos" data-list>
+{% for x in repos %}
+<li class="repo-row" data-row>
+<h2><a href="/r/{{ x.hex }}">{{ x.name }}</a><span class="vis">{% if x.private %}{{ m::i(l.v, "lock-simple") }}Private{% else %}{{ m::i(l.v, "globe-simple") }}Public{% endif %}</span></h2>
+{% if !x.description.is_empty() %}<p class="desc">{{ x.description }}</p>{% endif %}
+<p class="meta">{% if let Some((when, full, who)) = x.updated %}<span>Updated <time title="{{ full }}">{{ when }}</time> by {{ who }}</span>{% else %}<span>No signed push yet</span>{% endif %}<span>{{ x.issues }} issue{% if x.issues != 1 %}s{% endif %}, {{ x.patches }} patch{% if x.patches != 1 %}es{% endif %}</span></p>
+<div class="state"><span class="sealmini {{ x.verify.state }}">{% match x.verify.state %}{% when "verified" %}{{ m::i(l.v, "seal-check") }}{% when "equivocation" %}{{ m::i(l.v, "seal-warning") }}{% when "pending" %}{{ m::i(l.v, "circle-dashed") }}{% else %}{{ m::i(l.v, "seal-question") }}{% endmatch %}{{ x.verify.word }}</span><span>{% if let Some(p) = x.verify.pause %}Sync {{ p }}{% else %}Checked {{ x.verify.synced }}{% endif %}</span></div>
+</li>
+{% endfor %}
+</ol>
 {% endif %}
 {% endblock %}

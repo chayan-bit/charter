@@ -1,4 +1,4 @@
-//! charter-ui: the local web UI behind `chart ui` (docs/p6/ui.md, slices 1 to 3).
+//! charter-ui: the local web UI behind `chart ui` (docs/p6/ui.md, ui-v2.md).
 //!
 //! Pages render from `$CHARTER_HOME/repos/<rid>/` only (git cache, `view.json`,
 //! `cobs.json`) and never take the repo lock; one background loop ([`sync_loop`]) keeps
@@ -16,7 +16,9 @@ pub mod highlight;
 pub mod markdown;
 pub mod pace;
 mod pages;
+pub mod prefs;
 pub mod security;
+pub mod spend;
 pub mod sync_loop;
 pub mod writes;
 
@@ -45,10 +47,16 @@ pub enum UiError {
 /// The router with every page, the assets and the guard.
 pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
     use axum::routing::post;
-    use pages::{cobs, code, forms, history, live, program, repos, write};
+    use pages::{cobs, code, forms, history, live, program, repos, settings, wallet, write};
     Router::new()
         .route("/", get(repos::index))
+        .route("/wallet", get(wallet::page))
+        .route("/wallet/chip", get(wallet::chip_part))
+        .route("/wallet/refresh", post(wallet::refresh))
+        .route("/settings", get(settings::page).post(settings::save))
+        .route("/settings/theme", post(settings::theme_toggle))
         .route("/r/{rid}", get(repos::home))
+        .route("/r/{rid}/branches", get(repos::branches))
         .route("/r/{rid}/tree/{rev}", get(code::tree_root))
         .route("/r/{rid}/tree/{rev}/{*path}", get(code::tree))
         .route("/r/{rid}/blob/{rev}/{*path}", get(code::blob))
@@ -70,6 +78,7 @@ pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
         .route("/r/{rid}/patches/{id}", get(cobs::patch))
         .route("/r/{rid}/releases", get(program::releases))
         .route("/r/{rid}/program", get(program::program))
+        .route("/r/{rid}/rules", get(program::program))
         .route("/assets/{name}", get(assets::serve))
         .fallback(pages::not_found)
         .with_state(app)

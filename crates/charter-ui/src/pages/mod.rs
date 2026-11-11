@@ -6,9 +6,12 @@ pub mod code;
 pub mod forms;
 pub mod history;
 pub mod live;
+pub mod people;
 pub mod program;
 pub mod repos;
+pub mod settings;
 mod verify;
+pub mod wallet;
 pub mod write;
 
 use std::collections::HashMap;
@@ -17,17 +20,19 @@ use std::sync::{Arc, Mutex};
 
 use askama::Template;
 use axum::extract::FromRequestParts;
+use axum::http::StatusCode;
 use axum::http::request::Parts;
-use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use charter_core::{Rid, VerifiedOp};
-use charter_sync::ids::{hex32, parse_id};
+use charter_sync::ids::{hex32, parse_id, to_text};
 
 use crate::cache::{self, Cobs, RepoView};
 use crate::gitread::{self, Git};
-use crate::sync_loop::{Round, Shared};
+use crate::prefs::{Fonts, Prefs, Store};
+use crate::sync_loop::{Round, Shared, mins_until};
 use crate::{assets, fold};
 
+use people::{Clock, People};
 pub use verify::Verify;
 
 /// Shared by every handler.
@@ -37,6 +42,8 @@ pub struct App {
     pub csrf: String,
     /// Signs and sends writes; `None` when `$CHARTER_HOME` has no keys.
     pub writer: Option<Arc<crate::writes::Writer>>,
+    /// Local preferences (`ui/prefs.json`).
+    pub prefs: Store,
     /// One gix handle per repo, keyed by the `synced_ms` of the view it was opened under.
     repos: Mutex<HashMap<Rid, (u64, gix::ThreadSafeRepository)>>,
 }
@@ -44,6 +51,7 @@ pub struct App {
 impl App {
     pub fn new(home: PathBuf, shared: Arc<Shared>, csrf: String) -> Self {
         Self {
+            prefs: Store::load(&home),
             home,
             shared,
             csrf,
@@ -74,26 +82,58 @@ impl App {
     }
 }
 
-/// `theme` cookie (`light` or `dark`), so the server renders the attribute without a flash.
+/// The preferences one request renders with (read once, so a page is consistent while
+/// Settings saves).
 #[derive(Debug, Clone, Default)]
-pub struct Theme(pub &'static str);
+pub struct Pref(pub Arc<Prefs>);
 
-impl<S: Send + Sync> FromRequestParts<S> for Theme {
+impl FromRequestParts<Arc<App>> for Pref {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(p: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        let cookies = p.headers.get_all(header::COOKIE);
-        let v = cookies
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(';'))
-            .find_map(|kv| kv.trim().strip_prefix("theme="));
-        Ok(Theme(match v {
-            Some("light") => "light",
-            Some("dark") => "dark",
-            _ => "",
-        }))
+    async fn from_request_parts(_: &mut Parts, app: &Arc<App>) -> Result<Self, Self::Rejection> {
+        Ok(Pref(app.prefs.get()))
     }
+}
+
+/// The header's sync indicator: `ok`, `warn`, `bad` or `idle`, and what it says.
+#[derive(Debug, Clone)]
+pub struct SyncChip {
+    pub state: &'static str,
+    pub text: String,
+}
+
+impl SyncChip {
+    fn of(shared: &Shared) -> Self {
+        let (ok, failing) = shared.health();
+        let (state, text) = match (shared.paused(), failing, ok) {
+            (Some(t), _, _) if t > std::time::Instant::now() => (
+                "warn",
+                format!("Paused: RPC quota, resumes in {} min", mins_until(t)),
+            ),
+            (_, n, _) if n > 0 => ("bad", "Last sync failed".into()),
+            (_, _, Some(t)) => ("ok", format!("Synced {}", ago(t))),
+            _ => ("idle", "Starting sync".into()),
+        };
+        Self { state, text }
+    }
+}
+
+/// The header's wallet chip, from the balance the writer last read.
+#[derive(Debug, Clone)]
+pub struct WalletChip {
+    /// `12.4780`, or empty before the first read.
+    pub amount: String,
+    pub low: bool,
+}
+
+/// A page-wide banner: `warn`, `bad` or `off`, an icon, bold lead, text and a link.
+#[derive(Debug, Clone)]
+pub struct Banner {
+    pub kind: &'static str,
+    pub icon: &'static str,
+    pub lead: String,
+    pub text: String,
+    pub link: Option<(String, String)>,
 }
 
 /// Fields of the page frame (`base.html`).
@@ -103,8 +143,15 @@ pub struct Layout {
     pub v: &'static str,
     pub csrf: String,
     pub theme: &'static str,
+    /// System fonts instead of the embedded ones (Settings).
+    pub sysfont: bool,
     /// Write forms are shown (keys are loaded).
     pub writes: bool,
+    /// Which main destination this page is under: `repos`, `wallet` or `settings`.
+    pub nav: &'static str,
+    pub sync: SyncChip,
+    pub wallet: Option<WalletChip>,
+    pub banners: Vec<Banner>,
     /// `(href, label)`; an empty href is the current page.
     pub crumbs: Vec<(String, String)>,
     /// The repo's event stream (`live.js`); empty off repo pages.
@@ -112,13 +159,25 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn new(app: &App, theme: &Theme, title: impl Into<String>) -> Self {
+    pub fn new(app: &App, pref: &Pref, title: impl Into<String>) -> Self {
+        let notice = app.prefs.notice().map(|n| Banner {
+            kind: "warn",
+            icon: "warning-circle",
+            lead: "Settings reset.".into(),
+            text: n,
+            link: Some(("/settings".into(), "Open Settings".into())),
+        });
         Self {
             title: title.into(),
             v: assets::version(),
             csrf: app.csrf.clone(),
-            theme: theme.0,
+            theme: pref.0.theme.attr(),
+            sysfont: pref.0.fonts == Fonts::System,
             writes: app.writer.is_some(),
+            nav: "repos",
+            sync: SyncChip::of(&app.shared),
+            wallet: app.writer.as_deref().map(wallet::chip),
+            banners: notice.into_iter().collect(),
             crumbs: vec![],
             events: String::new(),
         }
@@ -139,7 +198,8 @@ pub fn short(h: &str) -> String {
 pub fn ago(then_ms: u64) -> String {
     let s = crate::sync_loop::now_ms().saturating_sub(then_ms) / 1000;
     match s {
-        0..60 => format!("{s} s ago"),
+        0..10 => "just now".into(),
+        10..60 => format!("{s} s ago"),
         60..3_600 => format!("{} min ago", s / 60),
         3_600..86_400 => format!("{} h ago", s / 3_600),
         _ => format!("{} d ago", s / 86_400),
@@ -191,8 +251,8 @@ impl Repo {
 }
 
 /// Loads the repo `rid` names (hex or `z...`), or the 404 page.
-pub fn open(app: &App, theme: &Theme, rid: &str) -> Result<Repo, Response> {
-    let gone = || not_found_page(app, theme, "No such repo in this $CHARTER_HOME.");
+pub fn open(app: &App, pref: &Pref, rid: &str) -> Result<Repo, Response> {
+    let gone = || not_found_page(app, pref, "No such repo in this $CHARTER_HOME.");
     let rid = parse_id(rid).map_err(|_| gone())?;
     let hex = hex32(&rid);
     let dir = app.home.join("repos").join(&hex);
@@ -206,7 +266,7 @@ pub fn open(app: &App, theme: &Theme, rid: &str) -> Result<Repo, Response> {
         let msg = "The git cache of this repo cannot be opened.";
         return Err(error_page(
             app,
-            theme,
+            pref,
             StatusCode::INTERNAL_SERVER_ERROR,
             msg,
         ));
@@ -221,7 +281,7 @@ pub fn open(app: &App, theme: &Theme, rid: &str) -> Result<Repo, Response> {
     })
 }
 
-/// Repo header, tabs and verification panel (`repo.html`).
+/// Repo header, tabs and the Verified seal (`repo.html`), plus who and when for the page.
 #[derive(Debug, Clone)]
 pub struct Head {
     pub hex: String,
@@ -232,39 +292,99 @@ pub struct Head {
     pub issues: usize,
     pub patches: usize,
     pub verify: Verify,
+    pub private: bool,
+    /// `z...` address, as `git clone arkiv::` takes it.
+    pub addr: String,
+    pub clock: Clock,
+    pub people: People,
+    /// The newest signed head: `(block, peer)`, the last push.
+    pub pushed: Option<(u64, String)>,
+}
+
+/// The newest signed head of a view: `(block, peer)`.
+pub fn last_push(v: Option<&RepoView>) -> Option<(u64, String)> {
+    v.into_iter()
+        .flat_map(|v| &v.peers)
+        .filter_map(|p| p.head.as_ref().map(|h| (h.block, p.nid.clone())))
+        .max()
 }
 
 impl Head {
-    pub fn new(r: &Repo, ops: &[VerifiedOp], tab: &'static str) -> Self {
+    pub fn new(r: &Repo, ops: &[VerifiedOp], tab: &'static str, people: People) -> Self {
         let count = |t: &str| {
             ops.iter()
                 .filter(|o| o.body.type_name == t && o.body.is_create())
                 .count()
         };
+        let v = r.view.as_ref();
         Self {
             hex: r.hex.clone(),
             name: r.name(),
-            description: r
-                .view
-                .as_ref()
-                .map(|v| v.description.clone())
-                .unwrap_or_default(),
+            description: v.map(|v| v.description.clone()).unwrap_or_default(),
             default_ref: seg(&r.default_ref()),
             tab,
             issues: count(fold::ISSUE),
             patches: count(fold::PATCH),
-            verify: Verify::new(r.view.as_ref(), &r.round),
+            verify: Verify::new(v, &r.round),
+            private: v.is_some_and(|v| v.private),
+            addr: to_text(&r.rid),
+            clock: Clock::of(v),
+            pushed: last_push(v),
+            people,
         }
+    }
+
+    /// A peer's name (alias, nickname or short id, per Settings).
+    pub fn who(&self, nid: &str) -> String {
+        self.people.name(nid)
+    }
+    /// `12 min ago` of a block.
+    pub fn when(&self, block: &u64) -> String {
+        self.clock.when(*block)
+    }
+    /// Tooltip of a block time, with the block number.
+    pub fn full(&self, block: &u64) -> String {
+        self.clock.full(*block)
+    }
+    /// The author's own clock, when Settings shows it.
+    pub fn their(&self, ts_ms: &u64) -> Option<String> {
+        self.people.author_clock(*ts_ms)
+    }
+    pub fn short(&self, h: &str) -> String {
+        short(h)
+    }
+    /// Maintainer names, joined: `you, ravi`.
+    pub fn maintainers(&self) -> String {
+        let names: Vec<String> = self.verify.delegates.iter().map(|d| self.who(d)).collect();
+        names.join(", ")
     }
 }
 
+/// The people of a page: aliases from the view, nicknames from Settings, "you" from keys.
+pub fn people(app: &App, pref: &Pref, v: Option<&RepoView>) -> People {
+    let you = app.writer.as_ref().map(|w| w.nid.clone());
+    People::new(v, pref.0.clone(), you)
+}
+
 /// Repo page frame: layout with `charter / <repo> / ...` crumbs, plus the header.
-pub fn frame(app: &App, theme: &Theme, r: &Repo, tab: &'static str, title: &str) -> (Layout, Head) {
+pub fn frame(app: &App, pref: &Pref, r: &Repo, tab: &'static str, title: &str) -> (Layout, Head) {
     let ops = r.ops();
-    let mut l = Layout::new(app, theme, format!("{title} - {}", r.name()));
+    let mut l = Layout::new(app, pref, format!("{title} - {}", r.name()));
     l.crumbs.push((format!("/r/{}", r.hex), r.name()));
     l.events = format!("/r/{}/events", r.hex);
-    (l, Head::new(r, &ops, tab))
+    let head = Head::new(r, &ops, tab, people(app, pref, r.view.as_ref()));
+    if head.verify.state == "equivocation" {
+        l.banners.push(Banner {
+            kind: "bad",
+            icon: "seal-warning",
+            lead: format!("{} has conflicting histories.", head.name),
+            text: "A key of this repo signed two different versions at the same step. \
+                   Don't merge or release until a maintainer explains."
+                .into(),
+            link: Some((format!("/r/{}#verify", head.hex), "See details".into())),
+        });
+    }
+    (l, head)
 }
 
 pub fn html<T: Template>(t: &T) -> Response {
@@ -293,8 +413,8 @@ pub struct ErrorPage {
     pub msg: String,
 }
 
-pub fn error_page(app: &App, theme: &Theme, status: StatusCode, msg: &str) -> Response {
-    let l = Layout::new(app, theme, status.canonical_reason().unwrap_or("Error"));
+pub fn error_page(app: &App, pref: &Pref, status: StatusCode, msg: &str) -> Response {
+    let l = Layout::new(app, pref, status.canonical_reason().unwrap_or("Error"));
     let page = ErrorPage {
         l,
         status: status.as_u16(),
@@ -303,13 +423,13 @@ pub fn error_page(app: &App, theme: &Theme, status: StatusCode, msg: &str) -> Re
     (status, html(&page)).into_response()
 }
 
-pub fn not_found_page(app: &App, theme: &Theme, msg: &str) -> Response {
-    error_page(app, theme, StatusCode::NOT_FOUND, msg)
+pub fn not_found_page(app: &App, pref: &Pref, msg: &str) -> Response {
+    error_page(app, pref, StatusCode::NOT_FOUND, msg)
 }
 
 pub async fn not_found(
     axum::extract::State(app): axum::extract::State<Arc<App>>,
-    theme: Theme,
+    pref: Pref,
 ) -> Response {
-    not_found_page(&app, &theme, "Nothing here.")
+    not_found_page(&app, &pref, "Nothing here.")
 }

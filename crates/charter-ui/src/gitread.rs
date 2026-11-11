@@ -159,6 +159,12 @@ fn row(git: &Git, id: ObjectId) -> Option<CommitRow> {
     })
 }
 
+/// The row of `commit` (an oid; an annotated tag is peeled to its commit).
+pub fn tip(git: &Git, commit: &str) -> Option<CommitRow> {
+    let c = git.find_object(oid(commit)?).ok()?.peel_to_commit().ok()?;
+    row(git, c.id)
+}
+
 /// Commits reachable from `commit`, newest commit time first (as `git log` orders them).
 fn walk<'r>(
     git: &'r Git,

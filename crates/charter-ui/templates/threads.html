@@ -1,15 +1,16 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
-{% if kind == "issues" && l.writes %}<div class="lh"><a class="btn primary" href="/r/{{ r.hex }}/issues/new">New issue</a></div>{% endif %}
-<div id="live" data-live="op">
+{% if kind == "issues" && l.writes %}<div class="lh"><a class="btn btn-ink" href="/r/{{ r.hex }}/issues/new">New issue</a></div>{% endif %}
+<div id="live" data-live="op"{% if kind != "issues" || !l.writes %} class="sec"{% endif %}>
 {% if threads.is_empty() %}
-<section class="empty"><p>No {{ kind }} among the verified ops.</p></section>
+<section class="empty"><h2>No {{ kind }} yet</h2><p>{% if kind == "issues" %}Issues anyone opens on Arkiv show here once a sync round checks their signatures.{% else %}Patches show here once a sync round checks their signatures. Open one with <code>chart patch open</code>.{% endif %}</p></section>
 {% else %}
-<div class="box"><table class="list threads" data-list><tbody>
-{% for t in threads %}<tr data-row data-copy="{{ t.id }}"><td class="st"><span class="badge s-{{ t.state }}">{{ t.state }}</span></td><td><a href="/r/{{ r.hex }}/{{ kind }}/{{ t.id }}">{{ t.title }}</a><div class="dim"><code>{{ self.short(t.id.as_str()) }}</code> by <code title="{{ t.author }}">{{ self.short(t.author.as_str()) }}</code> at block {{ t.block }}, <span class="nw">{{ t.comments() }} comment{% if t.comments() != 1 %}s{% endif %}</span>{% if t.revisions.len() > 1 %}, rev {{ t.revisions.len() }}{% endif %}{% if t.proofs() > 0 %} <span class="badge b-verified">proof</span>{% endif %}</div></td></tr>
+<ul class="rows threads" data-list>
+{% for t in threads %}<li data-row data-copy="{{ t.id }}"><span class="chip">{{ t.state }}</span><a class="t" href="/r/{{ r.hex }}/{{ kind }}/{{ t.id }}">{{ t.title }}</a><p class="meta"><span>Opened <time title="{{ r.full(t.block) }}">{{ r.when(t.block) }}</time> by {{ r.who(t.author) }}</span><span class="nw">{{ t.comments() }} comment{% if t.comments() != 1 %}s{% endif %}</span>{% if t.revisions.len() > 1 %}<span>{{ t.revisions.len() }} versions</span>{% endif %}{% if t.inferred %}<span>merged into {{ r.default_ref }}</span>{% endif %}{% if t.proofs() > 0 %}<span class="chip ok">proof</span>{% endif %}</p></li>
 {% endfor %}
-</tbody></table></div>
+</ul>
 {% endif %}
 </div>
 {% endblock %}

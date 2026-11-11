@@ -1,13 +1,27 @@
-<section class="repo">
-<div class="rh"><h1><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1>{% if !r.description.is_empty() %}<p class="desc" title="{{ r.description }}">{{ r.description }}</p>{% endif %}</div>
+<section class="repo-head">
+<div>
+<p class="crumb"><a href="/">Repositories</a> /</p>
+<h1 class="repo-name"><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1>
+{% if !r.description.is_empty() %}<p class="repo-desc">{{ r.description }}</p>{% endif %}
+<p class="perm"><span>{% if r.private %}{{ m::i(l.v, "lock-simple") }}Private: sealed for its members{% else %}{{ m::i(l.v, "globe-simple") }}Public and permanent on Arkiv{% endif %}</span>{% if let Some((block, nid)) = r.pushed %}<span>{{ m::i(l.v, "git-branch") }}<span>Updated <time title="{{ r.full(block) }}">{{ r.when(block) }}</time> by {{ r.who(nid) }}</span></span>{% endif %}</p>
+</div>
+<div class="rh-side">
 {% include "verify.html" %}
+<details class="pop">
+<summary class="btn">{{ m::i(l.v, "terminal-window") }}Clone{{ m::i(l.v, "caret-down") }}</summary>
+<div class="popover">
+<h3>Clone with git</h3>
+<div class="clonebox"><code>git clone arkiv::{{ r.addr }}</code><button class="copy js" type="button" data-copy="git clone arkiv::{{ r.addr }}" aria-label="Copy clone command">{{ m::i(l.v, "copy") }}</button></div>
+<p>Reading and cloning are free. Git needs the <code>chart</code> helper installed.</p>
+</div>
+</details>
+</div>
+</section>
 <nav class="tabs" id="tabs" data-live="op" aria-label="Repository">
 <a href="/r/{{ r.hex }}" data-go="c"{% if r.tab == "code" %} aria-current="page"{% endif %}>Code</a>
 <a href="/r/{{ r.hex }}/log/{{ r.default_ref }}" data-go="l"{% if r.tab == "log" %} aria-current="page"{% endif %}>Commits</a>
 <a href="/r/{{ r.hex }}/issues" data-go="i"{% if r.tab == "issues" %} aria-current="page"{% endif %}>Issues <span class="n">{{ r.issues }}</span></a>
 <a href="/r/{{ r.hex }}/patches" data-go="p"{% if r.tab == "patches" %} aria-current="page"{% endif %}>Patches <span class="n">{{ r.patches }}</span></a>
 <a href="/r/{{ r.hex }}/releases" data-go="r"{% if r.tab == "releases" %} aria-current="page"{% endif %}>Releases</a>
-<a href="/r/{{ r.hex }}/program"{% if r.tab == "program" %} aria-current="page"{% endif %}>Program</a>
-<a href="#verify" data-go="v">Verification</a>
+<a href="/r/{{ r.hex }}/rules"{% if r.tab == "program" %} aria-current="page"{% endif %}>Rules and CI</a>
 </nav>
-</section>

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block main %}
+{% include "repo.html" %}
+<div id="live" data-live="push">
+<section class="sec">
+<h2 class="h2">Branches and tags</h2>
+{% if refs.is_empty() %}<p class="muted">No verified branches or tags yet.</p>{% else %}
+<div class="tblwrap"><table class="tbl" data-list>
+<thead><tr><th>Name</th><th>Last commit</th><th class="r">When</th></tr></thead>
+<tbody>
+{% for x in refs %}<tr data-row data-copy="{{ x.name }}"><td><a href="/r/{{ r.hex }}/tree/{{ x.seg }}"><code>{{ m::refname(x.name) }}</code></a> {% if x.default %}<span class="chip">default</span>{% else if x.tag %}<span class="chip">tag</span>{% endif %}</td><td>{% if let Some(t) = x.tip %}<a href="/r/{{ r.hex }}/commit/{{ t.oid }}">{{ t.subject }}</a> <span class="muted">by {{ t.author }}</span>{% endif %}</td><td class="r nw muted">{% if let Some(t) = x.tip %}{{ self.age(t.time) }}{% endif %}</td></tr>
+{% endfor %}
+</tbody></table></div>
+{% endif %}
+</section>
+{% for p in peers %}{% if !p.refs.is_empty() %}
+<section class="sec">
+<h2 class="h2">As {{ r.who(p.nid) }} pushed them <span class="tag">{% if p.delegate %}maintainer{% else %}peer{% endif %}</span></h2>
+<div class="tblwrap"><table class="tbl"><thead><tr><th>Name</th><th class="r">Commit</th></tr></thead><tbody>
+{% for (name, oid) in p.refs %}<tr><td><a href="/r/{{ r.hex }}/tree/{{ oid }}"><code>{{ m::refname(self.bare(name)) }}</code></a></td><td class="r"><a class="hash" href="/r/{{ r.hex }}/commit/{{ oid }}" title="{{ oid }}">{{ self.short(oid) }}</a></td></tr>
+{% endfor %}
+</tbody></table></div>
+</section>
+{% endif %}{% endfor %}
+</div>
+{% endblock %}

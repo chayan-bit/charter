@@ -3,18 +3,22 @@
 {% block main %}
 {% include "repo.html" %}
 {% if let Some(u) = up %}<a class="up" rel="up" href="{{ u }}" hidden>Up</a>{% endif %}
-<div class="box">
-<div class="filehead"><code data-copy="{{ path }}">{{ path }}</code><span class="dim nw">{{ m::bytes(size) }}{% if !binary %}, {{ total }} line{% if total != 1 %}s{% endif %}{% endif %}</span><span class="grow"></span><a class="btn" href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a></div>
+<div class="pathbar">
+<h2>{% for (href, label) in l.crumbs %}{% if loop.first %}<a href="{{ href }}">{{ r.name }}</a>{% else if href.is_empty() %} / {{ label }}{% else if loop.index0 > 1 %} / <a href="{{ href }}">{{ label }}</a>{% endif %}{% endfor %}</h2>
+<div class="acts">{% let small = true %}{% include "picker.html" %}<button class="btn btn-sm js" type="button" data-copy="{{ path }}">{{ m::i(l.v, "copy") }}Copy path</button><a class="btn btn-sm" href="/r/{{ r.hex }}/log/{{ rev }}">History</a><a class="btn btn-sm" href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a></div>
+</div>
+<div class="codebox">
 {% if binary %}
-<p class="empty pad">Binary or very large file; use <a href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a>.</p>
+<section class="empty"><p>Binary or very large file ({{ m::bytes(size) }}); use <a href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a>.</p></section>
 {% else %}
-<div class="scroll" tabindex="0" role="region" aria-label="{{ path }}">
+<div class="scroll" tabindex="0" role="region" aria-label="{{ path }}, {{ total }} line{% if total != 1 %}s{% endif %}">
 <table class="code blob"><tbody>
 {#- Lean rows (optional </td> end tags left out): a long blob is 2,000 of them. -#}
 {% for line in lines %}<tr id=L{{ loop.index }}><td class=ln><td>{{ line|safe }}</tr>
 {% endfor %}
 </tbody></table>
 </div>
+<p class="codefoot">{{ m::bytes(size) }}, {{ total }} line{% if total != 1 %}s{% endif %}</p>
 {% endif %}
 </div>
 {% if hidden > 0 %}<p class="more">{{ hidden }} more lines. <a href="?all=1">Show all</a> (lines past 2,000 are plain text).</p>{% endif %}
