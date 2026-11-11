@@ -305,6 +305,37 @@ impl Git {
         self.full_packs_with(tips, &[], prefix, SNAPSHOT_PACK_ARGS)
     }
 
+    /// A snapshot layer: self-contained packs of everything reachable from `tips` that no
+    /// pack in `keep` (git pack trailers of packs in this repo) holds, with the snapshot
+    /// delta search. Objects of `keep` are never delta bases, so each layer indexes alone.
+    pub fn layer_packs(
+        &self,
+        tips: &[String],
+        keep: &[String],
+        prefix: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        let keep: Vec<String> = keep
+            .iter()
+            .map(|t| format!("--keep-pack=pack-{t}.pack"))
+            .collect();
+        let mut extra: Vec<&str> = SNAPSHOT_PACK_ARGS.to_vec();
+        extra.extend(keep.iter().map(String::as_str));
+        self.full_packs_with(tips, &[], prefix, &extra)
+    }
+
+    /// Whether this repo holds the pack with git trailer `trailer`.
+    pub fn has_pack(&self, trailer: &str) -> bool {
+        let dir = match &self.git_dir {
+            Some(d) => d.join("objects/pack"),
+            None => match self.run(&["rev-parse", "--absolute-git-dir"], b"") {
+                Ok(out) => PathBuf::from(String::from_utf8_lossy(&out).trim()).join("objects/pack"),
+                Err(_) => return false,
+            },
+        };
+        trailer.bytes().all(|b| b.is_ascii_hexdigit())
+            && dir.join(format!("pack-{trailer}.pack")).is_file()
+    }
+
     /// At most one thin pack; `None` when it would exceed the 100 MiB manifest cap.
     fn thin_pack(
         &self,
@@ -583,5 +614,31 @@ mod tests {
             .map(|p| p.metadata().expect("meta").len())
             .sum();
         assert!(size < 300_000, "second blob stored as a delta: {size} B");
+    }
+
+    #[test]
+    fn a_layer_leaves_out_every_object_of_the_kept_packs() {
+        let tmp = undeltified_repo();
+        let d = tmp.path();
+        let g = Git::work(Some(d));
+        let pack = sh(d, &["rev-parse", "--git-path", "objects/pack"]);
+        let kept: Vec<String> = std::fs::read_dir(d.join(&pack))
+            .expect("dir")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|n| Some(n.strip_prefix("pack-")?.strip_suffix(".pack")?.to_owned()))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert!(g.has_pack(&kept[0]));
+        assert!(!g.has_pack(&"0".repeat(40)));
+        std::fs::write(d.join("b.txt"), b"new").expect("write");
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-qm", "three"]);
+        let head = sh(d, &["rev-parse", "HEAD"]);
+        let layer = g
+            .layer_packs(std::slice::from_ref(&head), &kept, &d.join("layer"))
+            .expect("layer");
+        assert_eq!(layer.len(), 1);
+        // The new commit, its tree and the new blob; nothing of the kept pack.
+        assert_eq!(pack_object_count(&layer[0]).expect("count"), 3);
     }
 }
