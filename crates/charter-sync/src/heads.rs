@@ -101,21 +101,16 @@ impl DeviceRead {
     pub async fn quick<A: Arkiv>(a: &A, rid: &Rid, dev: &Device) -> Result<Self> {
         let rows = all(a, head_filter(rid, dev)).await?;
         let n = a.entity_nonce(addr(&dev.control)).await?;
-        Ok(Self::after(dev, rows, n))
-    }
-
-    /// `rows`, and `n` read from `entityNonce(C_d)` after them.
-    pub fn after(dev: &Device, rows: Vec<Observed>, n: u64) -> Self {
         let nonce = HeadNonce {
             address: dev.control,
             before: n,
             after: n,
         };
-        Self {
+        Ok(Self {
             device: dev.clone(),
             rows,
             nonce,
-        }
+        })
     }
 
     /// The full `entityNonce` bracket around the head rows of `dev`.
@@ -209,30 +204,6 @@ pub async fn build<A: Arkiv>(
             .map(|d| read_device(a, rid, nid, d, identity, state)),
     )
     .await?;
-    merged(a, rid, views, state).await
-}
-
-/// The devices of `nid` that `device_rows` delegate (what [`build_from`] needs reads of).
-pub fn delegated(rid: &Rid, info: &PeerInfo, device_rows: &[Observed]) -> Vec<Device> {
-    devices(rid, info, device_rows)
-}
-
-/// The v2 view of identity `nid` from head rows and nonces the caller already read: every
-/// head accepted under its reads (no retry here), then merged. The network is used only
-/// when a merge tie needs a body's landing block.
-pub async fn build_from<A: Arkiv>(
-    a: &A,
-    rid: &Rid,
-    nid: &Nid,
-    identity: &IdentityChain,
-    reads: Vec<DeviceRead>,
-    state: &State,
-) -> Result<V2> {
-    let mut views = Vec::with_capacity(reads.len());
-    for r in reads {
-        let head = accept(rid, nid, identity, state, &r)?;
-        views.push(device_view(r, head));
-    }
     merged(a, rid, views, state).await
 }
 
