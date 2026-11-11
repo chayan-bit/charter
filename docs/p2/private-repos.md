@@ -28,9 +28,9 @@ An entity is blinded with the generation of its epoch, and a query for the rid o
 Members keep every epoch key they ever held in a keyring file, `$CHARTER_HOME/private/<rid hex>.json`, mode 600.
 OpenMLS state (the ML-DSA-44 signature key, key package secrets and groups) lives in `$CHARTER_HOME/private/mls.json`, mode 600.
 Key material is zeroized on drop, and the buffers that load and save the keyring and the MLS state are zeroized after use.
-Each commit and welcome carries the keyring (id keys, all epoch keys so far, the role history, admin certificates, commit blocks and pinned heads) sealed under the new epoch key, so a new member can read history and every member learns role changes.
+Each commit and welcome carries the keyring (id keys, all epoch keys so far, the role history, the admin set of each epoch, commit blocks and pinned heads) sealed under the new epoch key, so a new member can read history and every member learns role changes.
 A removed member cannot open that lockbox, because it cannot derive the new epoch key.
-The lockbox is sealed with the AAD kind `box`, and the attestation with `att`; both are reserved, so no repo entity can be sealed under the same AAD.
+The lockbox is sealed with the AAD kind `box`, and the welcome attestation with `att`; both are reserved, so no repo entity can be sealed under the same AAD.
 
 ## Sealing
 
@@ -53,8 +53,8 @@ The identity root has `visibility = 1`.
 All are `ag.kind = mls`, unsigned like chunks (MLS messages carry their own ML-DSA-44 signatures), with `ag.t` naming the type.
 `kp` is a key package published from the member's wallet, with `ag.h = sha256(bytes)` as its id, `ag.pk` the member's composite public key, and `ag.sig` its leaf binding.
 `group` is the private-repo marker, with `ag.tag = H("private-tag", rid)`.
-`commit` comes from an admin's control address, with `ag.rid` blinded, `ag.ep` the new epoch, `ag.box` the sealed keyring and `ag.att` the sealed attestation.
-`welcome` carries `ag.kp`, the joiner's key package id, `ag.ep`, `ag.box` and `ag.att`.
+`commit` comes from an admin's control address, with `ag.rid` blinded, `ag.ct = HMAC(generation-0 id key, "commits" || rid)`, `ag.ep` the new epoch, `ag.box` the sealed keyring and `ag.att` the public commit attestation (see "Join").
+`welcome` carries `ag.kp`, the joiner's key package id, `ag.ep`, `ag.box` and `ag.att`, the welcome attestation sealed under the new epoch key.
 `pub` is a published epoch grant, with `ag.tag` and `ag.ep`.
 `stop` is the migration stopper (see "Migration").
 Commits are MLS PrivateMessages (`PURE_CIPHERTEXT_WIRE_FORMAT_POLICY`), so proposals never reveal member identities.
@@ -77,10 +77,15 @@ The fixes below are named after the findings of the 2026-11 review.
 ### Join (F2)
 
 A welcome is accepted only if it carries an attestation: the composite signature of an admin over `rid || epoch || sha256(welcome) || sha256(lockbox) || kp id`, sealed under the new epoch key.
-The signer must be the welcome's MLS sender and an admin, either a delegate of the root identity (its hash is the rid, so it cannot be forged) or an admin whose certificate chains to one.
-A certificate is an admin's composite signature over `rid || nid`, kept in the sealed keyring.
-A joiner evaluates every welcome for its key packages, each on a snapshot of its MLS state, keeps the ones that verify, and fails with `E_EQUIVOCATION` if two verified welcomes lead to different groups.
-A forged welcome from a removed member therefore cannot hijack a join, because that member is no longer an admin in the rid-rooted chain.
+Every commit carries a public attestation: the signer's nid, `D = HMAC(epoch key, "admins" || admin set)`, `A = HMAC(epoch key, "epoch" || rid)` and the signer's composite signature over `rid || epoch || sha256(commit) || sha256(lockbox) || D || A`.
+Anyone holding the generation-0 id key finds every commit by `ag.ct` and can check these signatures; only holders of that epoch's key can compute `D` and `A`.
+A joiner replays the admin history from the root before it accepts a welcome for epoch E.
+It starts at the first commit signed by a delegate of the root identity (whose hash is the rid, and whose generation-0 blinding pins the welcome's generation-0 id key).
+At each epoch from there to E it takes the first commit in Arkiv order signed by an admin of the epoch before, as the welcome's keyring records the admin sets, and requires that commit's `D` and `A` to match the keyring's admin set and key for that epoch.
+The commit at E must be signed by the welcome's signer.
+Members check the same fields when they apply a commit, so the history a joiner replays is the one members applied.
+A removed admin keeps every key and admin set up to her removal, but the first commit after it was signed by a remaining admin and pins a key and admin set she does not have, so any welcome she forges fails the replay, even when no genuine welcome exists yet.
+A joiner also evaluates every welcome for its key packages, each on a snapshot of its MLS state, and fails with `E_EQUIVOCATION` if two verified welcomes lead to different groups.
 
 ### Late writes and role checks (F3)
 
@@ -88,6 +93,9 @@ Each commit records the block it landed in (`Keyring::rotated`).
 A row sealed in epoch e is admitted only if it landed no later than the commit for e+1 plus `GRACE_BLOCKS` (64 blocks, about two minutes), so an in-flight push is not lost.
 Readonly rows use their creation block.
 Heads are mutable and anyone may extend them, which moves their update block, so a head is also admitted if its `ag.h` is in the snapshot of heads the admin pinned in the commit.
+A head that is not pinned, was created in time and whose update block passed the cutoff (a body that landed in the grace window and was extended later) is admitted if its body's transaction from the head's creator landed by the cutoff plus grace.
+The search reads only blocks `at + 1` to `min(at + 64, cutoff + grace)`, because a body must land within 64 blocks after its signed `at` (docs/p5/head-model.md 5.4), so a removed member's later patch with a backdated `at` finds nothing there.
+Without this, such a head was hidden from other members, and keepalive stopped extending the snapshot and pieces it names, until its writer pushed again.
 A signed row of a write kind (anchor, refs, manifest, device, head) is admitted only if its `ag.nid` held write or admin in the row's epoch; other signed rows need read.
 Heads and snapshot manifests are signed by a device key, which holds no role, so they pass this check and core accepts them only under the member's `device` record, which needs write.
 Unsigned rows (chunks, pieces) pass, since only an admitted signed row can reference them.
@@ -130,13 +138,14 @@ A welcome names its key package in plaintext (`ag.kp`), and key packages, commit
 
 ## Migration
 
-A repo created before 0.5.1 has keyring format 1: no certificates, attestations, role history or commit blocks.
+A repo created before 0.5.1 has keyring format 1: no attestations, admin sets, role history or commit blocks.
 A 0.5.1 client reads such a repo as before, deriving the role history and commit blocks from the commits it can open, and accepts unattested commits only while the format is 1.
 The first membership change on 0.5.1 must be made by a root delegate; any other admin is refused with a clear upgrade message.
-That commit sets format 2, signs certificates for the existing admins, pins the heads, and is attested.
+That commit sets format 2, records the admin set, pins the heads, and is attested; it is the first commit a joiner's replay starts from.
 From then on every client requires attestations, admission and the blinded pack.
 The same tx writes a `stop` row: an identity row under the generation-0 blinded rid whose `ag.v` no client supports.
 A pre-0.5.1 member then fails with `E_UNSUPPORTED_VERSION` on its next read instead of accepting forged state, and 0.5.1 clients skip the stopper.
+Keepalive extends the stopper with the rest of the root delegate's control plane, so it lives as long as the repo is kept alive.
 A grant reader on a migrated repo needs 0.5.1 as well.
 
 ## API
@@ -182,16 +191,17 @@ Push, clone, fetch and sync make no more queries than in 0.5.0, and `tests/query
 | fetch | 12 | 12 |
 | sync | 6 | 6 |
 | clone through published grants | 14 | 14 |
-| join and first clone | 13 | 15 |
-| add | 2 | 5 |
-| remove | 1 | 4 |
+| join and first clone | 13 | 16 |
+| add | 2 | 4 |
+| remove | 1 | 3 |
 
-Join reads the root identity and the signer's peer key to check the welcome's attestation.
-Add and remove read the root identity, the heads to pin and the admin's own peer document.
+Join reads the root identity, the signer's peer key and the commit list for the admin replay, plus one peer key per other admin who committed.
+Add and remove read the heads to pin and the admin's own peer document; the migrating commit also reads the root identity.
 Each commit applied costs one peer-key lookup for its signer, and a refresh queries commits again only when a removal starts a new id-key generation.
 A grant reader saves one query (the `group` and `pub` lookups are merged) and spends it on the commit list it needs for admission.
-Each attestation, certificate and signed grant costs one composite signature to make and one to check.
-Each commit and welcome grows by an attestation (about 3.4 KB sealed), and the lockbox by about 6.7 KB per non-root admin certificate plus a few bytes per role change, commit and pinned head.
+Each attestation and signed grant costs one composite signature to make and one to check, and a join checks one commit signature per epoch it replays.
+Each commit and welcome grows by an attestation (about 3.4 KB), and the lockbox by a few bytes per role change, admin set, commit and pinned head.
+A head extended past its epoch's cutoff costs at most 64 block reads, once per sync that reads it, and only until the next commit pins it.
 A signed grant is 64 B plus 5.4 KB of key and signature plus 33 B per member.
 
 ## Known limits
@@ -200,9 +210,10 @@ Knowing the rid reveals that a private repo exists, through the `group` marker, 
 A public identity for the rid takes precedence over the marker, so a forged marker cannot close a public repo.
 A published grant covers one epoch, so readers also need the grants of the epochs that sealed the identity and binds.
 Concurrent admins committing at the same epoch fork the group; the first commit in Arkiv order wins and the other admin must rejoin.
-An ex-admin whose certificate is still in an old lockbox, or an ex-root-delegate, can race a real admin with a forged welcome for a fresh key package; the equivocation check catches it only when both welcomes exist, and a revocation list in the lockbox would close it.
-A push that lands within the grace window and is extended by someone else before the next commit pins it can drop out of the admitted set until it is pushed again.
-The stopper lives for the control lifetime (about six months); a pre-0.5.1 client that first reads the repo after it expires sees no error, though it still cannot open anything sealed under a later id-key generation.
+An admin can still commit at an epoch before she is removed (the concurrent-admins fork above); the first commit in Arkiv order wins, as for members.
+A delegate of the root identity is trusted for good: removing one from the group does not stop it signing the first commit of a replay.
+Anyone who ever held the generation-0 id key (every member, past or present, and grant readers) can count later commits, see when they landed and which admin signed each, though not what they changed.
+A pre-0.5.1 client that first reads a migrated repo after its keepalive lapsed sees no stopper, though it still cannot open anything sealed under a later id-key generation.
 Leaves added before 0.5.1 were never checked against a leaf binding; an admin who doubts one should remove that member and add it again.
 Libcrux ML-DSA and X-Wing overflow 2 MiB stacks in debug builds, so the tests run on 64 MiB worker stacks.
 
@@ -212,5 +223,4 @@ Libcrux ML-DSA and X-Wing overflow 2 MiB stacks in debug builds, so the tests ru
 - Full blinded annotations: `ag.nid`, `ag.h`, `ag.seq`, `ag.at`, `ag.i` and entity sizes still leak structure.
 - History lockbox as its own rotating entity, instead of the full keyring inside every commit and welcome.
 - Rotation timer: a scheduled `self_update` commit for post-compromise security.
-- Certificate revocation, so a demoted admin's old certificate cannot sign welcomes.
 - Re-encrypting history after a removal, if a removed member must also lose access to old content.
