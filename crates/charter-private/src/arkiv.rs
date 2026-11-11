@@ -8,8 +8,25 @@ use charter_store::{
     TxHash, TxInfo, U256,
 };
 
-use crate::entity::{EPOCH, HIDDEN, blind_pred, open_row, seal_op};
+use crate::entity::{EPOCH, HIDDEN, PACK, blind_pred, is_stopper, open_row, seal_op};
 use crate::keyring::Keyring;
+
+/// Opens `rows` of `ring`'s repo as [`Sealed`] does: the migration stopper keeps its place
+/// (paging counts rows) but loses every attribute, so core sees no entity in it.
+pub fn open_all(
+    ring: &Keyring,
+    rows: Vec<charter_store::EntityData>,
+) -> Vec<charter_store::EntityData> {
+    rows.into_iter()
+        .map(|r| match is_stopper(&r) {
+            true => charter_store::EntityData {
+                attributes: Some(vec![]),
+                ..r
+            },
+            false => open_row(ring, r),
+        })
+        .collect()
+}
 
 pub struct Sealed<'a, A> {
     pub inner: &'a A,
@@ -44,18 +61,26 @@ impl<A: Arkiv> Arkiv for Sealed<'_, A> {
             order: q.order.clone(),
         };
         let mut o = o.clone();
-        // A named projection must still return what opening a sealed row needs.
-        if let Attrs::Named(names) = &mut o.select.attrs
-            && names.iter().any(|n| HIDDEN.contains(&n.as_str()))
-        {
-            names.extend(["ag.kind", "ag.rid", EPOCH].map(String::from));
+        // A named projection must still return what opening and admitting a row needs.
+        let opens = match &mut o.select.attrs {
+            Attrs::All => true,
+            Attrs::Named(names)
+                if names
+                    .iter()
+                    .any(|n| HIDDEN.contains(&n.as_str()) || n == PACK) =>
+            {
+                names.extend(["ag.kind", "ag.rid", EPOCH, "ag.nid", "ag.h"].map(String::from));
+                true
+            }
+            _ => false,
+        };
+        if opens {
+            o.select.created_at = true;
+            o.select.updated_at = true;
+            o.select.creation_flags = true;
         }
         let mut page = self.inner.query(&q, &o).await?;
-        page.rows = page
-            .rows
-            .into_iter()
-            .map(|r| open_row(&self.ring, r))
-            .collect();
+        page.rows = self.open_rows(std::mem::take(&mut page.rows));
         Ok(page)
     }
     async fn entity_nonce(&self, c: Address) -> Result<u64, StoreError> {
@@ -86,7 +111,7 @@ impl<A: Arkiv> Arkiv for Sealed<'_, A> {
         true
     }
     fn open_rows(&self, rows: Vec<charter_store::EntityData>) -> Vec<charter_store::EntityData> {
-        rows.into_iter().map(|r| open_row(&self.ring, r)).collect()
+        open_all(&self.ring, rows)
     }
     /// Estimates the sealed ops, so push cost predictions include padding.
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
