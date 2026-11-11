@@ -83,6 +83,21 @@ impl Stats {
 }
 
 impl Net {
+    /// A tx read counted as in flight while it is "on the wire" (piece reads).
+    async fn on_the_wire<T>(&self, call: String, read: impl std::future::Future<Output = T>) -> T {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.stats.note(call);
+        let now = self.stats.inflight.fetch_add(1, SeqCst) + 1;
+        self.stats.max_inflight_mined.fetch_max(now, SeqCst);
+        // Yield so concurrent callers get polled while this call is "on the wire".
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        let r = read.await;
+        self.stats.inflight.fetch_sub(1, SeqCst);
+        r
+    }
+
     pub fn new() -> Self {
         Self {
             mem: Arc::new(MemArkiv::new(CHAIN)),
@@ -166,17 +181,16 @@ impl Arkiv for Net {
         self.mem.transaction(h).await
     }
     async fn mined_tx(&self, h: TxHash) -> Result<Option<charter_store::MinedTx>, StoreError> {
-        use std::sync::atomic::Ordering::SeqCst;
-        self.stats.note(format!("mined_tx {h}"));
-        let now = self.stats.inflight.fetch_add(1, SeqCst) + 1;
-        self.stats.max_inflight_mined.fetch_max(now, SeqCst);
-        // Yield so concurrent callers get polled while this call is "on the wire".
-        for _ in 0..4 {
-            tokio::task::yield_now().await;
-        }
-        let r = self.mem.mined_tx(h).await;
-        self.stats.inflight.fetch_sub(1, SeqCst);
-        r
+        self.on_the_wire(format!("mined_tx {h}"), self.mem.mined_tx(h))
+            .await
+    }
+    async fn tx_at(
+        &self,
+        n: u64,
+        index: u32,
+    ) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.on_the_wire(format!("tx_at {n}:{index}"), self.mem.tx_at(n, index))
+            .await
     }
     async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
         self.mem.block_txs(n).await

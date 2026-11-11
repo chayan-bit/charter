@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use charter_core::{
     AttrValue, Device, DeviceHead, ErrorCode, Hash32, HeadBody, HeadNonce, IdentityChain, Kind,
     Merged, Nid, Observed, PeerInfo, RefsBody, Rid, accept_device_head, accept_own_device_head,
-    devices, merge, merged_refs, verify_entity,
+    devices, merge, merged_refs, open_head_calldata, verify_entity,
 };
 use charter_store::{Arkiv, MinedTx, Pred, tx_rows};
 use futures_util::future::try_join_all;
@@ -296,9 +296,12 @@ pub fn calldata_rows<A: Arkiv>(a: &A, tx: &MinedTx) -> Vec<Observed> {
         .collect()
 }
 
+/// A row carrying the head body `h`: a create or full patch (`ag.kind = 'head'`), or a
+/// format v3 minimal patch that sets only `ag.body` and `ag.h` (head-model 13.2).
 fn is_head_row(o: &Observed, h: &Hash32) -> bool {
-    o.attr("ag.kind") == Some(&AttrValue::Str(Kind::Head.name().to_owned()))
-        && o.attr("ag.h") == Some(&AttrValue::Bytes32(*h))
+    let full = o.attr("ag.kind") == Some(&AttrValue::Str(Kind::Head.name().to_owned()));
+    let minimal = o.attributes.len() == 2 && o.attr("ag.body").is_some();
+    (full || minimal) && o.attr("ag.h") == Some(&AttrValue::Bytes32(*h))
 }
 
 fn landed(tx: &MinedTx) -> LandingJson {
@@ -353,9 +356,18 @@ pub async fn body_at<A: Arkiv>(
     if mined.from.0.0 != dev.control || !ok {
         return Ok(None);
     }
-    let body = calldata_rows(a, &mined).into_iter().find_map(|o| {
-        let e = verify_entity::<HeadBody>(&o, &dev.pk).ok()?;
-        (e.body.rid == *rid).then_some(e.body)
-    });
+    let body = calldata_rows(a, &mined)
+        .into_iter()
+        .find_map(|o| head_body(&o, dev).filter(|b| b.rid == *rid));
     Ok(body.map(|b| (b, landed(&mined))))
+}
+
+/// The head body a calldata row carries, signed by `dev`: a v2 body, or a v3 body (full row
+/// or minimal patch) as its shared fields, which is all the program fold reads.
+fn head_body(o: &Observed, dev: &Device) -> Option<HeadBody> {
+    if let Ok(e) = verify_entity::<HeadBody>(o, &dev.pk) {
+        return Some(e.body);
+    }
+    let (envelope, body, _) = open_head_calldata(o).ok()?;
+    (envelope.signer == dev.nid && envelope.verify(&dev.pk).is_ok()).then(|| body.shared())
 }

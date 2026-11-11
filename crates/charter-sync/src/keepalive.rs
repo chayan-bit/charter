@@ -119,7 +119,11 @@ async fn keep_v2<A: Arkiv>(
         }
         let bulk = BTreeSet::from([d.device.bulk]);
         let found = by_hashes(a, kind(Kind::Manifest), &head.body.snapshot).await?;
-        for m in found.iter().filter(|o| o.creator == d.device.bulk) {
+        // v3 sends a manifest that fits from `C_d` in the head tx (head-model 13.2).
+        let ours = |o: &&charter_core::Observed| {
+            o.creator == d.device.bulk || o.creator == d.device.control
+        };
+        for m in found.iter().filter(ours) {
             let Ok(e) = charter_core::verify_entity::<charter_core::ManifestBody>(m, &d.device.pk)
             else {
                 continue;
