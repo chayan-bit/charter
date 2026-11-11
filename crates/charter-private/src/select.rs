@@ -12,6 +12,7 @@ use charter_sync::{Config, Keys, Result};
 
 use crate::arkiv::Sealed;
 use crate::join::ring_for;
+use crate::keyring::Keyring;
 
 /// `a` itself, or `a` sealed under a private repo's keyring.
 pub enum ForRepo<'a, A> {
@@ -31,6 +32,21 @@ pub async fn for_repo<'a, A: Arkiv>(
         None => ForRepo::Plain(a),
         Some(ring) => ForRepo::Sealed(Sealed::new(a, ring)),
     })
+}
+
+/// [`for_repo`] from the keyring this machine last saved for `rid`, with no group refresh
+/// (no query): for pricing a write, where only sizes and this member's binds matter. The
+/// send that follows calls [`for_repo`], so it seals under the keys current at send time.
+pub async fn for_repo_cached<'a, A: Arkiv>(
+    a: &'a A,
+    cfg: &Config,
+    keys: Option<&Keys>,
+    rid: &Rid,
+) -> Result<ForRepo<'a, A>> {
+    match Keyring::load(&cfg.home, rid)? {
+        Some(ring) => Ok(ForRepo::Sealed(Sealed::new(a, ring))),
+        None => for_repo(a, cfg, keys, rid).await,
+    }
 }
 
 macro_rules! both {

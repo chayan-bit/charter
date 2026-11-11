@@ -23,4 +23,4 @@ pub use group::{
 pub use join::{refresh, ring_for};
 pub use keyring::{Keyring, Role};
 pub use mls::SUITE;
-pub use select::{ForRepo, for_repo};
+pub use select::{ForRepo, for_repo, for_repo_cached};

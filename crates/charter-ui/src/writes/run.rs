@@ -132,7 +132,7 @@ impl<A: Arkiv> Ctx<A> {
         Ok((gas, ops.len()))
     }
 
-    /// The backend for `rid`: sealed for a private repo, so it prices the sealed size.
+    /// The backend that sends to `rid`: sealed under the keys current now for a private repo.
     async fn for_repo<'b, B: Arkiv>(
         &self,
         a: &'b B,
@@ -143,8 +143,12 @@ impl<A: Arkiv> Ctx<A> {
             .map_err(err)
     }
 
+    /// Prices `d` at its sealed size for a private repo. Pricing reads the keyring the last
+    /// sync saved and makes no group query; the send refreshes it once (the CLI's one).
     pub async fn prepare(&self, d: Draft) -> Result<(Draft, Estimate), String> {
-        let b = self.for_repo(&*self.a, &d.rid).await?;
+        let b = charter_private::for_repo_cached(&*self.a, &self.cfg, Some(&self.keys), &d.rid)
+            .await
+            .map_err(err)?;
         let tmp = Keys::from_seed(MasterSeed::generate().map_err(err)?);
         let (mut prev, mut bind) = (ZERO, !self.bound(&b, &d.rid).await?);
         let base_fee = b.base_fee().await.map_err(err)?;
