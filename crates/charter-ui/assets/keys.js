@@ -88,6 +88,15 @@
     if (t && t.tagName === "DETAILS") t.open = true;
     var nav = d.querySelector(".tabs"), a = nav && nav.querySelector("[aria-current]");
     if (a) nav.scrollLeft = a.offsetLeft - (nav.clientWidth - a.offsetWidth) / 2;
+    if (nav && !nav.dataset.fade) {
+      nav.dataset.fade = "1";
+      nav.addEventListener("scroll", function () { fade(nav); }, { passive: true });
+    }
+    fade(nav);
+  }
+  // The tab bar fades its right edge only while more tabs sit past it.
+  function fade(nav) {
+    if (nav) nav.classList.toggle("more", nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 1);
   }
   function theme(b) {
     var next = { "": "light", light: "dark", dark: "" }[root.getAttribute("data-theme") || ""];
@@ -149,6 +158,7 @@
   }
   d.addEventListener("htmx:afterSettle", function () { cur = -1; arrive(); toast(); });
   window.addEventListener("hashchange", arrive);
+  window.addEventListener("resize", function () { fade(d.querySelector(".tabs")); });
   arrive();
   toast();
 })();

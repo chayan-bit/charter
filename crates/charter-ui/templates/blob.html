@@ -8,6 +8,7 @@
 <div class="acts">{% let small = true %}{% include "picker.html" %}<button class="btn btn-sm js" type="button" data-copy="{{ path }}">{{ m::i(l.v, "copy") }}Copy path</button><a class="btn btn-sm" href="/r/{{ r.hex }}/log/{{ rev }}">History</a><a class="btn btn-sm" href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a></div>
 </div>
 <div class="codebox">
+{% include "lastc.html" %}
 {% if binary %}
 <section class="empty"><p>Binary or very large file ({{ m::bytes(size) }}); use <a href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a>.</p></section>
 {% else %}

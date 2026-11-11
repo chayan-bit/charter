@@ -75,8 +75,7 @@ impl ProgramPage {
     }
     /// A bounty amount (wei, as the program keeps it) in tGLM.
     pub fn glm(&self, wei: &str) -> String {
-        charter_store::U256::from_str_radix(wei.trim_matches('"'), 10)
-            .map_or_else(|_| wei.to_owned(), super::write::tglm)
+        super::glm(wei)
     }
     pub fn rejected(&self) -> Vec<&MoveJson> {
         self.p

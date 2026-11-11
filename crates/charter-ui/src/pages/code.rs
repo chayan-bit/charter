@@ -166,11 +166,15 @@ pub struct Blob {
     /// Lines not shown (the "show all" link).
     pub hidden: usize,
     pub picker: Picker,
+    pub last: Option<CommitRow>,
 }
 
 impl Blob {
     pub fn age(&self, secs: &i64) -> String {
         super::age(*secs)
+    }
+    pub fn short(&self, s: &str) -> String {
+        short(s)
     }
 }
 
@@ -208,6 +212,7 @@ fn blob_page(app: &App, pref: &Pref, r: &Repo, rev: &str, path: &str, all: bool)
         total,
         lines,
         binary,
+        last: gitread::last_change(&r.git, &at.commit, &at.path),
         rev: at.rev,
         path: at.path,
     })

@@ -169,7 +169,7 @@ main { padding-block: 36px 96px; }
 .repo-name a { text-decoration: none; }
 .repo-desc { color: var(--ink-2); font-size: var(--t-md); margin-top: 8px; overflow-wrap: anywhere; }
 .perm { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: var(--t-sm); color: var(--ink-3); }
-.perm span { display: inline-flex; gap: 6px; align-items: center; }
+.perm > span { display: inline-flex; gap: 6px; align-items: center; }
 .perm .i { width: 16px; height: 16px; vertical-align: 0; }
 .rh-side { display: flex; gap: 12px; align-items: center; }
 details.pop { position: relative; }
@@ -230,9 +230,10 @@ details.tech > summary { cursor: pointer; font-size: var(--t-sm); font-weight: 6
 .menu a small { font: 12px var(--f-ui); color: var(--ink-3); white-space: nowrap; }
 .menu .foot { border-top: 1px solid var(--rule); margin-top: 6px; padding-top: 6px; }
 .menu .foot a { font-family: var(--f-ui); }
-.lastc { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; padding: 12px 0; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--rule); font-size: 14px; }
-.lastc b { font-weight: 650; }
-.lastc .msg { flex: 1 1 260px; min-width: 0; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lastc { display: flex; gap: 4px 14px; align-items: baseline; padding: 12px 0; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--rule); font-size: 14px; }
+.lastc b { flex: none; font-weight: 650; }
+.lastc .hash, .lastc .num { flex: none; }
+.lastc .msg { flex: 1 1 0; min-width: 0; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .signed { display: inline-flex; gap: 5px; align-items: center; color: var(--proof); font-size: var(--t-sm); font-weight: 600; }
 .signed .i { width: 16px; height: 16px; vertical-align: 0; }
 .hash { display: inline-flex; align-items: center; gap: 2px; font: 500 var(--t-sm) var(--f-mono); color: var(--ink-2); }
@@ -346,7 +347,7 @@ x-f { color: var(--sx-f); } x-t { color: var(--sx-t); } x-o { color: var(--ink-2
 
 /* Forms */
 .fm { display: grid; gap: 8px; max-width: 720px; margin-top: 12px; }
-.fm label .dim, .fm legend .dim { font-weight: 400; }
+.fm label .dim, .fm legend .dim { font-weight: 400; margin-left: 6px; }
 .fm textarea { min-height: 110px; padding: 12px; resize: vertical; }
 .fm .mono { font-family: var(--f-mono); font-size: 13px; }
 .fm .short { max-width: 16ch; }
@@ -466,7 +467,8 @@ dialog.help form { margin-top: 14px; text-align: right; }
   .repo-row { grid-template-columns: minmax(0, 1fr); }
   .repo-row .state { grid-column: 1; grid-row: auto; justify-items: start; text-align: left; display: flex; flex-wrap: wrap; gap: 6px 14px; }
   .attention li, .banner .wrap { flex-wrap: wrap; }
-  .tabs { margin-top: 22px; -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); mask-image: linear-gradient(90deg, #000 85%, transparent); padding-right: 24px; }
+  .tabs { margin-top: 22px; padding-right: 24px; }
+  .tabs.more { -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); mask-image: linear-gradient(90deg, #000 85%, transparent); }
   .tabs a { padding: 9px 8px 11px; }
   .tabs a[aria-current="page"]::after { left: 8px; right: 8px; }
   .tabs a:first-child { padding-left: 0; }

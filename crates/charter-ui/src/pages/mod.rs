@@ -353,11 +353,20 @@ impl Head {
     pub fn short(&self, h: &str) -> String {
         short(h)
     }
+    pub fn glm(&self, wei: &str) -> String {
+        glm(wei)
+    }
     /// Maintainer names, joined: `you, ravi`.
     pub fn maintainers(&self) -> String {
         let names: Vec<String> = self.verify.delegates.iter().map(|d| self.who(d)).collect();
         names.join(", ")
     }
+}
+
+/// A decimal wei amount from an op or program state as tGLM; anything else as it is.
+pub fn glm(wei: &str) -> String {
+    charter_store::U256::from_str_radix(wei.trim_matches('"'), 10)
+        .map_or_else(|_| wei.to_owned(), write::tglm)
 }
 
 /// The people of a page: aliases from the view, nicknames from Settings, "you" from keys.

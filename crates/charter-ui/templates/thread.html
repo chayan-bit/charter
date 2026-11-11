@@ -25,7 +25,7 @@
 {% else if kind == "issues" %}
 <form method="post" action="/r/{{ r.hex }}/write" class="fm">
 <input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="comment"><input type="hidden" name="issue" value="{{ t.id }}"><input type="hidden" name="back" value="{{ back }}">
-<label for="w-body">Comment <span class="dim">markdown</span></label><textarea id="w-body" name="body" rows="4" required></textarea>
+<label for="w-body">Comment <span class="dim">Markdown supported</span></label><textarea id="w-body" name="body" rows="4" required></textarea>
 <p class="help">Comments are public and permanent. You see the cost before anything is sent.</p>
 <div class="acts"><button class="btn btn-ink" type="submit">Comment</button></div>
 </form>
@@ -47,7 +47,7 @@
 {% else %}
 <form method="post" action="/r/{{ r.hex }}/write" class="fm">
 <input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="review"><input type="hidden" name="patch" value="{{ t.id }}"><input type="hidden" name="head" value="{{ self.head() }}"><input type="hidden" name="back" value="{{ back }}">
-<label for="w-review">Review <span class="dim">markdown</span></label><textarea id="w-review" name="body" rows="4"></textarea>
+<label for="w-review">Review <span class="dim">Markdown supported</span></label><textarea id="w-review" name="body" rows="4"></textarea>
 <fieldset class="radios"><legend>Verdict</legend><label><input type="radio" name="verdict" value="approve" checked> Approve commit <code>{{ self.short(self.head()) }}</code></label><label><input type="radio" name="verdict" value="comment"> Comment only</label></fieldset>
 <div class="acts"><button class="btn btn-ink" type="submit">Review</button></div>
 </form>
