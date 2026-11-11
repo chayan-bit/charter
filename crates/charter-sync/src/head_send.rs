@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use charter_core::codec::{self, Codec};
 use charter_core::{
-    Body, DeviceBody, ErrorCode, Hash32, HeadBodyV3, ManifestBody, Pack, PackPieces, PieceRun,
-    ZERO, chunk_count, entity_attributes, head_patch_attributes, resolve_stamps, runs,
+    Body, DeviceBody, ErrorCode, Hash32, HeadBodyV3, MAX_PACK_SIZE, ManifestBody, Pack, PackPieces,
+    PieceRun, ZERO, chunk_count, entity_attributes, head_patch_attributes, resolve_stamps, runs,
 };
 use charter_store::{Arkiv, Operation, TxHash, U256, create_op_flags, patch_op, random_salt};
 use futures_util::future::try_join_all;
@@ -417,10 +417,9 @@ impl<A: Arkiv> HeadPush<'_, A> {
             let tips: Vec<String> = plan.after.values().map(hex::encode).collect();
             let prefix = self.repo.outgoing().join("snap");
             let git = self.repo.git();
-            let files = match (tips.is_empty(), kept.is_empty()) {
-                (true, _) => vec![],
-                (false, true) => git.full_packs_of(&tips, &prefix)?,
-                (false, false) => git.layer_packs(&tips, &plan.keep_layers, &prefix)?,
+            let files = match tips.is_empty() {
+                true => vec![],
+                false => git.snapshot_packs(&tips, &plan.keep_layers, &prefix, MAX_PACK_SIZE)?,
             };
             let mut c = self.snapshot(files).await?;
             c.snapshot = [kept, c.snapshot].concat();
@@ -535,6 +534,13 @@ impl<A: Arkiv> HeadPush<'_, A> {
     /// else the pack itself (`pack_kind = 1`).
     fn manifest_of(&self, raw: &Path) -> Result<(PathBuf, ManifestBody)> {
         let bytes = std::fs::read(raw).map_err(|e| SyncError::io(raw.display(), e))?;
+        // Readers decode at most this much (head-model 13.3); never publish a pack past it.
+        if bytes.len() as u64 > MAX_PACK_SIZE {
+            return Err(SyncError::coded(
+                ErrorCode::BadPack,
+                format!("snapshot pack of {} B exceeds 100 MiB", bytes.len()),
+            ));
+        }
         let (codec, encoded) = codec::encode(&bytes);
         let (stored, pack_kind) = match codec {
             Codec::Brotli => {

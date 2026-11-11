@@ -373,7 +373,10 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
         let exclude: Vec<String> = before.values().map(hex::encode).collect();
         let thin = match tips.is_empty() {
             true => vec![],
-            false => self.repo.git().thin_pack_bytes(&tips, &exclude)?,
+            false => {
+                let max = charter_core::MAX_PACK_SIZE;
+                self.repo.git().thin_pack_bytes(&tips, &exclude, max)?
+            }
         };
         let (codec, stored) = match thin.is_empty() {
             true => (codec::Codec::Raw, vec![]),

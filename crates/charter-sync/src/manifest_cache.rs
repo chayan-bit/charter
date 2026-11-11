@@ -43,7 +43,7 @@ pub fn record(repo: &Repo, facts: &[(Hash32, Facts)]) -> Result<()> {
 }
 
 /// Records the manifests `hashes` of the snapshot packs `files` this push just wrote, in
-/// the same order; `full_packs_of` names each file `<prefix>-<trailer>.pack`.
+/// the same order; `Git::snapshot_packs` names each file `<prefix>-<trailer>.pack`.
 pub fn record_files(
     repo: &Repo,
     hashes: &[Hash32],

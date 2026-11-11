@@ -284,50 +284,64 @@ impl Git {
     /// head-model 13.3); empty when there is nothing to send.
     /// Exclusions this cache lacks (another device's tips it has not fetched) are dropped:
     /// the pack may then repeat objects, but never names one git cannot find.
-    pub fn thin_pack_bytes(&self, tips: &[String], exclude: &[String]) -> Result<Vec<u8>> {
+    /// A pack without zlib larger than `cap` (what readers decode at most) is built again
+    /// with git's zlib, as v0.4.0 sent it.
+    pub fn thin_pack_bytes(
+        &self,
+        tips: &[String],
+        exclude: &[String],
+        cap: u64,
+    ) -> Result<Vec<u8>> {
         let exclude = self.present(exclude)?;
         let input = rev_input(tips, &exclude);
-        let bytes = self.run(
-            &[
-                "pack-objects",
-                "--revs",
-                "-q",
-                "--thin",
-                "--stdout",
-                "--delta-base-offset",
-                "--no-reuse-object",
-                "--compression=0",
-            ],
-            input.as_bytes(),
-        )?;
+        let args = [
+            "pack-objects",
+            "--revs",
+            "-q",
+            "--thin",
+            "--stdout",
+            "--delta-base-offset",
+        ];
+        let mut bytes = self.run(&[&args[..], NO_ZLIB_ARGS].concat(), input.as_bytes())?;
+        if bytes.len() as u64 > cap {
+            bytes = self.run(&args, input.as_bytes())?;
+        }
         let empty = bytes.len() < PACK_HEADER + 20
             || u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) == 0;
         Ok(if empty { vec![] } else { bytes })
     }
 
-    /// Self-contained packs of everything reachable from `tips` (format v2 snapshots), with
-    /// deltas searched afresh: a snapshot is paid for by the byte and kept for 30 days, and
-    /// window 50 cuts it by 9% on Charter's own repo for under 0.5 s (speed-and-cost 2.8).
-    pub fn full_packs_of(&self, tips: &[String], prefix: &Path) -> Result<Vec<PathBuf>> {
-        self.full_packs_with(tips, &[], prefix, SNAPSHOT_PACK_ARGS)
-    }
-
-    /// A snapshot layer: self-contained packs of everything reachable from `tips` that no
-    /// pack in `keep` (git pack trailers of packs in this repo) holds, with the snapshot
-    /// delta search. Objects of `keep` are never delta bases, so each layer indexes alone.
-    pub fn layer_packs(
+    /// Snapshot packs (head-model 4.4 and 13.3): self-contained packs of everything reachable
+    /// from `tips` that no pack in `keep` (git pack trailers of packs in this repo) holds,
+    /// with deltas searched afresh and without per-object zlib. Objects of `keep` are never
+    /// delta bases, so each layer indexes alone. If any pack would decode past `cap` (what
+    /// readers accept), all are built again with git's zlib, as v0.4.0 built them.
+    pub fn snapshot_packs(
         &self,
         tips: &[String],
         keep: &[String],
         prefix: &Path,
+        cap: u64,
     ) -> Result<Vec<PathBuf>> {
         let keep: Vec<String> = keep
             .iter()
             .map(|t| format!("--keep-pack=pack-{t}.pack"))
             .collect();
-        let mut extra: Vec<&str> = SNAPSHOT_PACK_ARGS.to_vec();
-        extra.extend(keep.iter().map(String::as_str));
-        self.full_packs_with(tips, &[], prefix, &extra)
+        let build = |zlib: &[&str]| {
+            let mut extra: Vec<&str> = SNAPSHOT_PACK_ARGS.to_vec();
+            extra.extend_from_slice(zlib);
+            extra.extend(keep.iter().map(String::as_str));
+            self.full_packs_with(tips, &[], prefix, &extra)
+        };
+        let packs = build(NO_ZLIB_ARGS)?;
+        let size = |p: &PathBuf| p.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+        if packs.iter().all(|p| size(p) <= cap) {
+            return Ok(packs);
+        }
+        for p in &packs {
+            let _ = std::fs::remove_file(p);
+        }
+        build(&[])
     }
 
     /// Whether this repo holds the pack with git trailer `trailer`.
@@ -504,9 +518,12 @@ impl Git {
 }
 
 /// `pack-objects` options of snapshot packs: deltas searched afresh with window 50
-/// (MEASURED in speed-and-cost 2.8) and no per-object zlib, since the writer brotli-encodes
-/// the whole pack (head-model 13.3). `--no-reuse-object` implies `--no-reuse-delta`.
-const SNAPSHOT_PACK_ARGS: &[&str] = &["--no-reuse-object", "--compression=0", "--window=50"];
+/// (MEASURED in speed-and-cost 2.8).
+const SNAPSHOT_PACK_ARGS: &[&str] = &["--no-reuse-delta", "--window=50"];
+
+/// Packs the writer brotli-encodes whole (head-model 13.3): no per-object zlib, and objects
+/// never copied from existing (zlib) packs.
+const NO_ZLIB_ARGS: &[&str] = &["--no-reuse-object", "--compression=0"];
 
 /// Largest pack one manifest can name (1,600 chunks of 64 KiB).
 const MAX_PACK_BYTES: u64 = 100 * 1024 * 1024;
@@ -592,6 +609,46 @@ mod tests {
         tmp
     }
 
+    /// A repo whose one commit holds a 3 MB text blob: about 3 MB without zlib, 13 KB with.
+    fn text_blob_repo() -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = tmp.path();
+        sh(d, &["init", "-q"]);
+        let text: Vec<u8> = (0..3_000_000).map(|i| b"fn main() {}\n"[i % 13]).collect();
+        std::fs::write(d.join("big.rs"), &text).expect("write");
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-qm", "one"]);
+        let head = sh(d, &["rev-parse", "HEAD"]);
+        (tmp, head)
+    }
+
+    #[test]
+    fn a_snapshot_pack_that_would_decode_past_the_cap_is_built_with_zlib() {
+        let (tmp, head) = text_blob_repo();
+        let g = Git::work(Some(tmp.path()));
+        let cap = 1 << 20;
+        let packs = g
+            .snapshot_packs(&[head], &[], &tmp.path().join("snap"), cap)
+            .expect("pack");
+        assert!(!packs.is_empty());
+        for p in &packs {
+            let size = p.metadata().expect("meta").len();
+            assert!(size <= cap, "{size} B decodes past the {cap} B reader cap");
+        }
+    }
+
+    #[test]
+    fn a_thin_pack_that_would_decode_past_the_cap_is_built_with_zlib() {
+        let (tmp, head) = text_blob_repo();
+        let g = Git::work(Some(tmp.path()));
+        let small = g
+            .thin_pack_bytes(std::slice::from_ref(&head), &[], 1 << 20)
+            .expect("pack");
+        assert!(small.len() <= 1 << 20, "{} B", small.len());
+        let raw = g.thin_pack_bytes(&[head], &[], 1 << 30).expect("pack");
+        assert!(raw.len() > 2_000_000, "under the cap the pack has no zlib");
+    }
+
     #[test]
     fn a_new_cache_is_configured_without_extra_spawns() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -616,7 +673,7 @@ mod tests {
         let g = Git::work(Some(tmp.path()));
         let head = sh(tmp.path(), &["rev-parse", "HEAD"]);
         let packs = g
-            .full_packs_of(&[head], &tmp.path().join("snap"))
+            .snapshot_packs(&[head], &[], &tmp.path().join("snap"), MAX_PACK_BYTES)
             .expect("pack");
         let size: u64 = packs
             .iter()
@@ -644,7 +701,12 @@ mod tests {
         sh(d, &["commit", "-qm", "three"]);
         let head = sh(d, &["rev-parse", "HEAD"]);
         let layer = g
-            .layer_packs(std::slice::from_ref(&head), &kept, &d.join("layer"))
+            .snapshot_packs(
+                std::slice::from_ref(&head),
+                &kept,
+                &d.join("layer"),
+                MAX_PACK_BYTES,
+            )
             .expect("layer");
         assert_eq!(layer.len(), 1);
         // The new commit, its tree and the new blob; nothing of the kept pack.
