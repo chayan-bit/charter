@@ -220,7 +220,8 @@ Snapshot pack settings, bytes and CPU seconds (MEASURED on this Mac):
 | focus-dock (binary-heavy, 13 MiB) | 12,006,713 | 11,973,110 (0.27 s) | 11,499,578, -4.2% (0.70 s) | 11,498,817 (1.15 s) |
 
 Going from window 10 to 50 saves about 7M gas per CPU second; past 50 it saves under 0.3M gas per CPU second.
-Recomputing deltas of thin packs saves 0 to 0.4% on small pushes (and is slightly worse on some), 2% only on 30-commit pushes, so thin packs keep reusing deltas.
+Recomputing deltas of thin packs saves 0 to 0.4% on small pushes (and is slightly worse on some), 2% only on 30-commit pushes, so v2 thin packs kept reusing deltas.
+Format v3 (2.10) builds thin packs with `--no-reuse-object --compression=0` for brotli, which recomputes their deltas at git's default window 10 as well.
 
 A self-contained layer is 7 to 33% larger than the thin pack of the same commits (Charter `main`, 10 to 60 commits: 786,542 vs 592,193 B and 1,554,014 vs 1,451,613 B), but a v0.4.0 refresh rewrites everything: the full snapshot is 1,645,323 B.
 
@@ -299,6 +300,12 @@ Clones ran from empty homes and match the pusher's `HEAD` and pass `git fsck --f
   After it v0.4.0 stops with `E_UNSUPPORTED_VERSION` on `chart program status` and on `git clone`; v3 clones and fsck pass, the issue op lists, and the fold shows the same state and heads as v0.4.0's fold of the twin repo.
 - Private entities are padded to power-of-two buckets, so a smaller head body only helps across a bucket edge; the private small pushes differ by single zero bytes of ciphertext (12 gas each way, two v0.4.0 inits of identical repos differ by 96 gas).
 - The first push's head tx with its manifest used 1,257,712 gas against 1,370,127 for v0.4.0's manifest tx plus head tx.
+- Snapshot pack cost on a 118 MiB repo (MEASURED on this Mac, 10 cores, 284,496 objects, 12,293 commits, one ref; local only, a live push of it is over the 1 tGLM budget).
+  v0.4.0's first push builds the thin pack it never sends (1.25 s) and two zlib packs reusing deltas (1.95 s; 2.6 CPU s in all): 133.9 MB stored.
+  v3 builds no thin pack, then three raw packs with `--no-reuse-delta --window=50` (11.2 s, 71 CPU s) and brotli q6 (4.4 s): 77.7 MB stored, -42%.
+  Window 10 instead would take 9.8 s (35 CPU s) plus 6.4 s of brotli for 97.4 MB in five packs, so window 50 is both faster end to end and smaller.
+  The 12.4 s of extra CPU buys 56 MB fewer bytes on chain, which at the measured 10 MiB push rate (about 0.1 MB/s, 2.7) is several minutes and about 3.4 tGLM less (3.92M gas per 64 KiB chunk, section 1), so the setting stays unconditional.
+- A push whose snapshot is due however small its pack compresses (64 carried packs, 256 pieces, or carried pieces alone over the refresh threshold) builds the thin pack only to size the decision and skips its brotli.
 - A v3 reader's cache holds text objects without zlib (4.2 MB against 2.9 MB for this repo); repacking them in the fetch would cost the clone time it saves, so it is not done (head-model 13.3).
 
 ## 3. Proposals for a much larger cut (need the user's decision)

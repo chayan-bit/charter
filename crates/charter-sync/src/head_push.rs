@@ -371,22 +371,19 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             .filter_map(|(_, o)| o.as_ref().map(hex::encode))
             .collect();
         let exclude: Vec<String> = before.values().map(hex::encode).collect();
-        let thin = match tips.is_empty() {
+        let has_snapshot = v2
+            .iter()
+            .flat_map(|v| v.heads())
+            .any(|(_, h)| !h.body.snapshot.is_empty());
+        // Without a snapshot this push writes one, so a thin pack would go unused.
+        let thin = match tips.is_empty() || !has_snapshot {
             true => vec![],
             false => {
                 let max = charter_core::MAX_PACK_SIZE;
                 self.repo.git().thin_pack_bytes(&tips, &exclude, max)?
             }
         };
-        let (codec, stored) = match thin.is_empty() {
-            true => (codec::Codec::Raw, vec![]),
-            false => codec::encode(&thin),
-        };
         let carried = carried(prev.as_ref());
-        let has_snapshot = v2
-            .iter()
-            .flat_map(|v| v.heads())
-            .any(|(_, h)| !h.body.snapshot.is_empty());
         let layers = match (&prev, has_snapshot) {
             (Some(p), true) => {
                 let dev = self.own_device(p)?;
@@ -395,7 +392,14 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             }
             _ => vec![],
         };
-        let snapshot = !has_snapshot || snapshot_due(&layers, &carried, stored.len());
+        let due = |new: usize| !has_snapshot || snapshot_due(&layers, &carried, new);
+        // A snapshot due however small the pack compresses never sends it: no brotli.
+        let forced = !thin.is_empty() && due(1);
+        let (codec, stored) = match thin.is_empty() || forced {
+            true => (codec::Codec::Raw, vec![]),
+            false => codec::encode(&thin),
+        };
+        let snapshot = forced || due(stored.len());
         let keep_layers = match snapshot {
             true => layers_to_keep(&layers, |t| self.repo.git().has_pack(t)),
             false => vec![],

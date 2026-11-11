@@ -382,3 +382,52 @@ async fn a_head_patch_that_grows_by_almost_its_whole_calldata_lands_in_one_tx() 
         "one head tx, never a failed one and a resend"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_whose_snapshot_is_due_whatever_it_sends_skips_brotli() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "due").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    commit(&work, &[("a.txt", b"one")], "feat: one");
+    // The repo is opened per plan: an open `Repo` holds the push lock `push2` takes.
+    let plan_of = |work: std::path::PathBuf| {
+        let (net, alice, rid) = (&net, &alice, &rid);
+        async move {
+            let repo = &alice.repo(rid);
+            let hp = Box::pin(prepare2(net, alice, repo, &work, &[upd("refs/heads/main")]))
+                .await
+                .expect("prepare");
+            let state = charter_sync::state::State::load(&repo.state_path()).expect("state");
+            let plan = Box::pin(hp.plan(&state)).await.expect("plan");
+            (plan.snapshot, plan.thin.len(), plan.stored.len())
+        }
+    };
+    let (snapshot, thin, _) = plan_of(work.clone()).await;
+    assert_eq!(
+        (snapshot, thin),
+        (true, 0),
+        "a first push builds no thin pack"
+    );
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("snapshot push");
+    // 15 random pieces, then one small push: 16 pieces, exactly 1 MiB, not yet due.
+    commit(
+        &work,
+        &[("n.bin", &noise(7, 15 * 65_536 - 4_096))],
+        "feat: noise",
+    );
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("piece push");
+    commit(&work, &[("b.txt", b"two")], "feat: two");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("small push");
+    commit(&work, &[("c.txt", b"three")], "feat: three");
+    let (snapshot, thin, stored) = plan_of(work.clone()).await;
+    assert!(snapshot && thin > 0, "due with any new piece");
+    assert_eq!(stored, 0, "the thin pack is never brotli-encoded");
+}
