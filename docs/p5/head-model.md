@@ -154,8 +154,12 @@ The next body of the same device replaces every `stamp = 0` and every zero piece
 
 ### 5.5 Clone and fetch
 
-- Download, for every accepted head of every synced peer: the snapshot manifests (query by `ag.h`, creator `B_d`) and their chunks (P1 chunk paging, creator `B_d`), then the pieces of every pack not yet applied that a live ref of the merged view reaches.
-- A pack no live ref reaches is skipped with a warning when it cannot be indexed (its bases may have expired with an older snapshot); it is fetched again on the next fetch, a known waste for repos that delete many refs.
+- Download, for every accepted head of every synced peer: the snapshot manifests (query by `ag.h`, creator `B_d`) and their chunks (P1 chunk paging, creator `B_d`), then the pieces of every listed pack not yet applied (which objects a pack holds is known only once it is downloaded).
+- A pack that cannot be indexed (its thin bases may have left with a snapshot refresh) is skipped with a warning, and the connectivity check decides whether the live refs needed it.
+- When that peer then passes every check, the reader records the pack in `state.json` (`skipped_packs`), keyed by the `h` of every accepted head of the peer, and later fetches do not download it while those heads are unchanged (issue #25).
+  This is safe from local data alone: the same heads give the same merged live refs, those refs were complete without the pack when it was recorded, and the cache never drops their objects, so every check reaches the same verdict without the download.
+  Any new head of the peer drops the record: the pack is downloaded and tried once more, and recorded again if it still does not index.
+  A fresh clone has no record, so it still downloads such a pack once; marking packs unreachable in the signed head would avoid that, but changes the format and is not done.
 - Bulk pieces are fetched by `eth_getTransactionByHash`, inline pieces through the body transaction (section 5.4); every piece must match its sha256 in the signed head and every pack its `pack_id`.
 - Snapshots are indexed first, then packs with `index-pack --fix-thin`, retried in rounds while progress is made (thin packs only use bases of the same identity, section 7.2).
 - The connectivity check, the canonical-ref quorum and the program fold run on the merged refs exactly as on P1 refs.
@@ -338,7 +342,7 @@ What remains noticeable: a snapshot push is slower and costs more (entity chunks
 Known limits not handled in v0.4.0:
 
 - A device's head holds at most about 550 to 900 refs (section 4.2); a migration or push past that fails with `E_REFS_TOO_LARGE` instead of moving the ref list into a piece.
-- A pack no live ref reaches that cannot be indexed is downloaded again on every fetch (section 5.5).
+- A pack that cannot be indexed is downloaded once per change of the peer's heads, and by every fresh clone (section 5.5); until v0.5.0 it was downloaded on every fetch.
 - A copied `device/seed` makes two machines one device; they serialise on the confirmed nonce of `C_d`, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4).
 - Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can collide on the wallet nonce and one push fails with an RPC error; running it again succeeds.
 

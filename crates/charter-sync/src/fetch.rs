@@ -63,6 +63,8 @@ fn skip_or_fail(view: &mut View, must: &BTreeSet<Nid>, nid: &Nid, e: SyncError) 
 pub struct Applied {
     pub packs: BTreeSet<Hash32>,
     pub manifests: BTreeSet<Hash32>,
+    /// Listed packs of a v2 peer that did not index (head-model 5.5).
+    pub unindexed: BTreeMap<Nid, BTreeSet<Hash32>>,
 }
 
 async fn apply_all<A: Arkiv>(
@@ -85,7 +87,7 @@ async fn apply_all<A: Arkiv>(
         }
     }
     let failed = index_until_stuck(repo, todo, &mut applied);
-    for (nid, e) in failed {
+    for (nid, pack_id, e) in failed {
         // A v2 head may list a pack whose thin bases left with a later snapshot: no live
         // ref needs it then, and the connectivity check below decides (head-model 4.4).
         if view
@@ -93,11 +95,11 @@ async fn apply_all<A: Arkiv>(
             .get(&nid)
             .is_some_and(|p| p.head.is_none() && p.v2.is_some())
         {
-            // shortcut: such a pack is downloaded again on every fetch; record it if that shows up in cost.
             warn(&format!(
                 "peer {}: a listed pack did not index ({e}); checking live refs",
                 to_text(&nid)
             ));
+            applied.unindexed.entry(nid).or_default().insert(pack_id);
             continue;
         }
         if view.peers.contains_key(&nid) {
@@ -130,8 +132,10 @@ async fn download_peer<A: Arkiv>(
     let (mut known, mut fetched) = (vec![], vec![]);
     let v2 = view.peers.get(nid).and_then(|p| p.v2.as_ref());
     if let Some(v2) = v2.filter(|v| v.heads().next().is_some()) {
+        let skip = skipped(state, nid, v2);
         let in_cache = |id: &Hash32| {
-            state.applied_packs.contains(&hex32(id))
+            skip.is_some_and(|s| s.contains(&hex32(id)))
+                || state.applied_packs.contains(&hex32(id))
                 || state.applied_manifests.contains(&hex32(id))
                 || applied.packs.contains(id)
                 || queued.iter().any(|d| d.pack_id == *id)
@@ -189,6 +193,45 @@ async fn download_peer<A: Arkiv>(
     Ok((known, fetched))
 }
 
+/// `h` of every accepted head of `v2`, sorted: what a skip record is valid for.
+fn heads_key(v2: &crate::heads::V2) -> Vec<String> {
+    let mut key: Vec<String> = v2.heads().map(|(_, h)| hex32(&h.h)).collect();
+    key.sort();
+    key
+}
+
+/// Packs of `nid` that did not index while its live refs were complete without them, if
+/// its heads are still the ones they were recorded for. Same heads, same live refs, and
+/// the cache never loses their objects, so those refs stay complete without the packs.
+fn skipped<'s>(state: &'s State, nid: &Nid, v2: &crate::heads::V2) -> Option<&'s BTreeSet<String>> {
+    state
+        .skipped_packs
+        .get(&hex32(nid))
+        .filter(|s| s.heads == heads_key(v2))
+        .map(|s| &s.packs)
+}
+
+/// Records the unindexed packs of every v2 peer that passed every check: they join the
+/// ones already skipped for the same heads; new heads start over.
+fn note_skipped(state: &mut State, view: &View, unindexed: &BTreeMap<Nid, BTreeSet<Hash32>>) {
+    for (nid, pv) in &view.peers {
+        let Some(v2) = pv.v2.as_ref().filter(|_| pv.head.is_none()) else {
+            continue;
+        };
+        let mut packs = skipped(state, nid, v2).cloned().unwrap_or_default();
+        packs.extend(unindexed.get(nid).into_iter().flatten().map(hex32));
+        match packs.is_empty() {
+            true => state.skipped_packs.remove(&hex32(nid)),
+            false => {
+                let heads = heads_key(v2);
+                state
+                    .skipped_packs
+                    .insert(hex32(nid), crate::state::SkippedJson { heads, packs })
+            }
+        };
+    }
+}
+
 /// Indexes downloads in rounds: a thin pack whose delta bases arrive in another peer's pack
 /// fails until that pack is in, so failures are retried while any round makes progress.
 /// Returns the last error of every download that never indexed.
@@ -196,7 +239,7 @@ fn index_until_stuck(
     repo: &Repo,
     mut todo: Vec<Download>,
     applied: &mut Applied,
-) -> Vec<(Nid, SyncError)> {
+) -> Vec<(Nid, Hash32, SyncError)> {
     loop {
         let before = todo.len();
         let mut failed = vec![];
@@ -222,7 +265,7 @@ fn index_until_stuck(
                 .into_iter()
                 .map(|(d, e)| {
                     let _ = std::fs::remove_file(&d.tmp);
-                    (d.nid, e)
+                    (d.nid, d.pack_id, e)
                 })
                 .collect();
         }
@@ -334,6 +377,7 @@ fn commit(repo: &Repo, view: &View, state: &mut State, applied: Applied) -> Resu
     state
         .applied_manifests
         .extend(applied.manifests.iter().map(hex32));
+    note_skipped(state, view, &applied.unindexed);
     state.save(&repo.state_path())
 }
 
