@@ -35,8 +35,9 @@ const RESERVED: [&str; 2] = [BOX_KIND, crate::auth::ATT_KIND];
 pub const GRACE_BLOCKS: u64 = 64;
 /// Kinds that carry git state: their author needs the write role.
 const WRITE_KINDS: [&str; 5] = ["anchor", "refs", "manifest", "device", "head"];
-/// Kinds a device key signs (docs/p5/head-model.md 4.1).
-const DEVICE_SIGNED: [&str; 2] = ["head", "manifest"];
+/// Kinds whose `ag.nid` is a device key, not a member (docs/p5/head-model.md 4.1): a head
+/// names its member in `ag.nid` (the device in `ag.dev`), so only a snapshot manifest is.
+const DEVICE_SIGNED: [&str; 1] = ["manifest"];
 
 fn word(name: &str) -> Result<charter_store::B256> {
     Ident32::encode(name)
@@ -340,8 +341,8 @@ fn role_ok(ring: &Keyring, row: &EntityData, epoch: u64, kind: &str) -> bool {
     };
     match ring.role_at(epoch, &nid) {
         Some(r) => r >= min,
-        // A device key, not a member, signs heads and snapshot manifests; core accepts them
-        // only under that member's device record, which needs write here.
+        // A device key signs a snapshot manifest. It is content addressed and counts only
+        // when an admitted head names it, so its signer's role does not matter.
         None => DEVICE_SIGNED.contains(&kind),
     }
 }
@@ -528,8 +529,16 @@ mod tests {
             "nor can an outsider"
         );
         assert!(
-            admitted(&r, &row(7, 90, 90, false, 1), 1, "head"),
-            "a device signs heads"
+            !admitted(&r, &row(7, 90, 90, false, 1), 1, "head"),
+            "a head names its member, and an outsider holds no role"
+        );
+        assert!(
+            !admitted(&r, &row(6, 90, 90, false, 1), 1, "head"),
+            "nor may a reader's head count"
+        );
+        assert!(
+            admitted(&r, &row(7, 90, 90, true, 1), 1, "manifest"),
+            "a device signs manifests"
         );
         assert!(
             admitted(&r, &row(6, 90, 90, true, 1), 1, "cob"),
