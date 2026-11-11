@@ -22,7 +22,10 @@ fn load(dir: &std::path::Path) -> BTreeSet<String> {
     let text = std::fs::read_to_string(dir.join(FILE)).unwrap_or_default();
     // A torn last line fails the shape check and is ignored.
     text.lines()
-        .filter(|l| l.split_once(' ').is_some_and(|(a, b)| hex_oid(a) && hex_oid(b)))
+        .filter(|l| {
+            l.split_once(' ')
+                .is_some_and(|(a, b)| hex_oid(a) && hex_oid(b))
+        })
         .map(str::to_owned)
         .collect()
 }

@@ -119,8 +119,8 @@ pub(crate) async fn peer_keys_with<A: Arkiv>(
         .filter_map(|n| known.get(n).map(|p| (*n, p.pk.clone())))
         .collect();
     let missing: Vec<Nid> = nids.into_iter().filter(|n| !keys.contains_key(n)).collect();
-    let found = futures_util::future::try_join_all(missing.iter().map(|nid| peer_key_of(a, nid)))
-        .await?;
+    let found =
+        futures_util::future::try_join_all(missing.iter().map(|nid| peer_key_of(a, nid))).await?;
     for (nid, pk) in missing.into_iter().zip(found) {
         if let Some(pk) = pk {
             keys.insert(nid, pk);
@@ -139,7 +139,9 @@ pub async fn peer_key_of<A: Arkiv>(a: &A, nid: &Nid) -> Result<Option<charter_cr
         offset: 0,
         select: crate::observe::full_select(),
     };
-    let page = a.query(&charter_store::Query::from(filter.clone()), &one).await?;
+    let page = a
+        .query(&charter_store::Query::from(filter.clone()), &one)
+        .await?;
     if let Some(pk) = peer_key(nid, &crate::observe::to_observed(page.rows)) {
         return Ok(Some(pk));
     }

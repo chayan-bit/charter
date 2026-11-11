@@ -236,12 +236,7 @@ pub async fn build_from<A: Arkiv>(
     merged(a, rid, views, state).await
 }
 
-async fn merged<A: Arkiv>(
-    a: &A,
-    rid: &Rid,
-    views: Vec<DeviceView>,
-    state: &State,
-) -> Result<V2> {
+async fn merged<A: Arkiv>(a: &A, rid: &Rid, views: Vec<DeviceView>, state: &State) -> Result<V2> {
     let mut landings: BTreeMap<Hash32, LandingJson> = views
         .iter()
         .filter_map(|v| v.head.as_ref())

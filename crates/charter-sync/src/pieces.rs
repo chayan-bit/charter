@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use charter_core::{
-    Address, AttrValue, Device, DeviceHead, ErrorCode, Hash32, HeadPack, Kind, ManifestBody, Observed, Rid,
-    ZERO, verify_entity,
+    Address, AttrValue, Device, DeviceHead, ErrorCode, Hash32, HeadPack, Kind, ManifestBody,
+    Observed, Rid, ZERO, verify_entity,
 };
 use charter_store::{Arkiv, AttributeValue, Operation, TxHash, create_op_flags, random_salt};
 use futures_util::future::{try_join, try_join_all};

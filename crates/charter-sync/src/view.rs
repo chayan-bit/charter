@@ -77,11 +77,8 @@ pub async fn resolve_peer<A: Arkiv>(a: &A, rid: &Rid, nid: &Nid) -> Result<Optio
         b32("ag.nid", nid),
     ]);
     // Independent queries, sent together; the bind chain is only checked once the key is known.
-    let (pk, binds) = try_join(
-        crate::cob::peer_key_of(a, nid),
-        by_seq(a, filter, "ag.seq"),
-    )
-    .await?;
+    let (pk, binds) =
+        try_join(crate::cob::peer_key_of(a, nid), by_seq(a, filter, "ag.seq")).await?;
     let Some(pk) = pk else {
         return Ok(None);
     };

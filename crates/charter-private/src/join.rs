@@ -117,7 +117,10 @@ pub async fn ring_for<A: Arkiv>(
         return Ok(Some(ring));
     }
     // A public identity wins, so a forged marker cannot close a public repo.
-    if ids.iter().any(|o| o.attr("ag.kind") == Some(&AttrValue::Str("id".into()))) {
+    if ids
+        .iter()
+        .any(|o| o.attr("ag.kind") == Some(&AttrValue::Str("id".into())))
+    {
         view::prefetched_identity(rid, ids);
         return Ok(None);
     }
