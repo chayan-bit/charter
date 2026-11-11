@@ -82,7 +82,8 @@ pub struct ManifestBody {
     pub chunk_hashes: Vec<u8>,
     #[n(7)]
     pub requires: Vec<Require>,
-    /// 1 = self-contained git pack; 2 = thin (reserved).
+    /// 1 = self-contained git pack; 2 = thin (reserved); 3 = brotli stream of a
+    /// self-contained pack (format v3: `pack_id`, `size`, chunks describe the stored bytes).
     #[n(8)]
     pub pack_kind: u64,
 }
@@ -117,7 +118,8 @@ impl Body for ManifestBody {
             field("manifest", "chunk_hashes", "must be 32 x chunk count bytes"),
         )?;
         match self.pack_kind {
-            1 => Ok(()),
+            // 3: format v3, the brotli stream of a self-contained pack (head-model 13.1).
+            1 | 3 => Ok(()),
             2 => Err(FormatError::Unsupported {
                 what: "pack kind",
                 value: 2,

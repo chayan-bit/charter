@@ -150,25 +150,51 @@ pub async fn download<A: Arkiv>(
     }
     file.sync_all()
         .map_err(|e| SyncError::io(out.display(), e))?;
-    check_pack(m, out)
+    check_pack(m, out)?;
+    match m.pack_kind {
+        BROTLI_PACK => decode_in_place(m, out),
+        _ => Ok(()),
+    }
 }
 
-/// The assembled pack hashes to `pack_id`, has the declared size and ends with the trailer.
+/// `pack_kind` of a brotli stream of a self-contained pack (head-model 13.1).
+pub const BROTLI_PACK: u64 = 3;
+
+fn bad(m: &ManifestBody, what: &str) -> SyncError {
+    SyncError::coded(
+        ErrorCode::BadPack,
+        format!("pack {}: {what}", hex::encode(m.pack_id)),
+    )
+}
+
+/// The assembled bytes hash to `pack_id` and have the declared size; a raw pack (kind 1)
+/// also ends with the trailer, a brotli one is checked after [`decode_in_place`].
 pub fn check_pack(m: &ManifestBody, path: &Path) -> Result<()> {
     let (pack_id, size, trailer, _) = describe(path)?;
-    let bad = |what: &str| {
-        SyncError::coded(
-            ErrorCode::BadPack,
-            format!("pack {}: {what}", hex::encode(m.pack_id)),
-        )
-    };
     if pack_id != m.pack_id || size != m.size {
-        return Err(bad("assembled bytes do not hash to pack_id"));
+        return Err(bad(m, "assembled bytes do not hash to pack_id"));
     }
-    if !trailer.ends_with(&m.trailer) {
-        return Err(bad("trailer does not match the manifest"));
+    if m.pack_kind != BROTLI_PACK && !trailer.ends_with(&m.trailer) {
+        return Err(bad(m, "trailer does not match the manifest"));
     }
     Ok(())
+}
+
+/// Replaces the checked brotli stream at `path` with the git pack inside, under the 100 MiB
+/// cap, and checks its trailer.
+fn decode_in_place(m: &ManifestBody, path: &Path) -> Result<()> {
+    let err = |e: std::io::Error| SyncError::io(path.display(), e);
+    let stored = std::fs::read(path).map_err(err)?;
+    let pack = charter_core::codec::decode(
+        charter_core::codec::Codec::Brotli,
+        &stored,
+        charter_core::MAX_PACK_SIZE,
+    )
+    .map_err(|e| bad(m, &e.to_string()))?;
+    if !pack.ends_with(&m.trailer) {
+        return Err(bad(m, "trailer does not match the manifest"));
+    }
+    std::fs::write(path, &pack).map_err(err)
 }
 
 /// Reads chunk `i` of a pack file (for uploads; files can be 100 MiB, so no full read).

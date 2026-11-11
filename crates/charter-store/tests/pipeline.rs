@@ -279,6 +279,8 @@ struct Spy {
     lose_reply: Option<(u64, bool)>,
     /// The first send of a tx with one of these nonces is mined as status 0.
     revert_nonces: std::sync::Mutex<std::collections::HashSet<u64>>,
+    /// Balance reads of any address.
+    balances: std::sync::atomic::AtomicUsize,
 }
 
 impl Spy {
@@ -291,7 +293,11 @@ impl Spy {
             refuse: None,
             lose_reply: None,
             revert_nonces: Default::default(),
+            balances: Default::default(),
         }
+    }
+    fn balances(&self) -> usize {
+        self.balances.load(std::sync::atomic::Ordering::Relaxed)
     }
     fn estimates(&self) -> usize {
         self.estimates.load(std::sync::atomic::Ordering::Relaxed)
@@ -322,6 +328,8 @@ impl Arkiv for Spy {
         self.inner.entity_nonce(c).await
     }
     async fn balance(&self, a: Address) -> Result<U256, StoreError> {
+        self.balances
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner.balance(a).await
     }
     async fn tx_count(&self, a: Address) -> Result<u64, StoreError> {
@@ -392,6 +400,81 @@ impl Arkiv for Spy {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_funded_run_reads_no_balance_after_its_last_receipt() {
+    let (fake, key) = setup();
+    let funder = funded(&fake);
+    let spy = Spy::new(fake.clone(), false);
+    let mut p =
+        TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default()).funded_by(funder);
+    let landed = with_miner(fake.clone(), p.run(vec![vec![small("b", 0, 0)]]))
+        .await
+        .expect("run");
+    assert_eq!(landed.len(), 1);
+    assert_eq!(spy.balances(), 1, "one read before the send, none after");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_funded_run_over_many_blocks_reads_the_balance_once() {
+    let (fake, key) = setup();
+    let funder = funded(&fake);
+    let spy = Spy::new(fake.clone(), false);
+    let cfg = PipelineConfig::default().bulk();
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, cfg).funded_by(funder);
+    let jobs: Vec<_> = (0..24).map(|i| vec![blob(65_536, DAY, i)]).collect();
+    let landed = with_miner(fake.clone(), p.run(jobs)).await.expect("run");
+    assert_eq!(landed.len(), 24);
+    assert!(gas_by_block(&landed).len() > 2, "paced over several blocks");
+    assert_eq!(
+        spy.balances(),
+        1,
+        "later windows count on refunds, not reads"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_seeded_run_at_a_fixed_gas_sends_without_a_balance_read_or_an_estimate() {
+    let (fake, key) = setup();
+    let funder = funded(&fake);
+    let spy = Spy::new(fake.clone(), false);
+    let (head, fee) = fake.head_fee().await.expect("fee");
+    let have = fake.balance(key.address()).await.expect("balance");
+    let mut p = TxPipeline::new(
+        &spy,
+        key.clone(),
+        CHAIN,
+        PipelineConfig::default().ordered(),
+    )
+    .funded_by(funder)
+    .at_nonce(0)
+    .seeded(head, fee, std::time::Instant::now(), have)
+    .with_gas(400_000);
+    let landed = with_miner(fake.clone(), p.run(vec![vec![small("s", 0, 0)]]))
+        .await
+        .expect("run");
+    assert_eq!(landed.len(), 1);
+    assert!(landed[0].receipt.success);
+    assert_eq!((spy.estimates(), spy.balances()), (0, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fixed_gas_too_low_is_estimated_when_the_job_is_retried() {
+    let (fake, key) = setup();
+    let spy = Spy::new(fake.clone(), false);
+    let mut p =
+        TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default()).with_gas(22_000);
+    let landed = with_miner(fake.clone(), p.run(vec![vec![small("g", 0, 0)]]))
+        .await
+        .expect("run");
+    assert_eq!(landed.len(), 1);
+    assert!(landed[0].receipt.success);
+    assert_eq!(
+        spy.estimates(),
+        2,
+        "the failed tx is re-estimated, then priced afresh"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn one_estimate_prices_every_chunk_of_a_shape() {
     let (fake, key) = setup();
     let spy = Spy::new(fake.clone(), false);
@@ -417,10 +500,45 @@ async fn one_estimate_prices_every_chunk_of_a_shape() {
     assert_eq!(spy.estimates(), 3, "reuse can be switched off");
 }
 
-#[tokio::test(start_paused = true)]
-async fn bulk_keeps_two_blocks_of_gas_in_flight() {
+/// Blocks a bulk run of 40 chunks lands in under `cfg`.
+async fn bulk_blocks(cfg: PipelineConfig) -> usize {
     let (fake, key) = setup();
-    let cfg = PipelineConfig::default().bulk();
+    let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, cfg.bulk());
+    let jobs: Vec<_> = (0..40).map(|i| vec![blob(65_536, DAY, i)]).collect();
+    let landed = with_miner(fake.clone(), p.run(jobs)).await.expect("run");
+    assert_eq!(landed.len(), 40);
+    gas_by_block(&landed).len()
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_bulk_never_takes_more_blocks_than_v0_4_0_and_economy_trades_blocks_for_fee() {
+    // v0.4.0: up to two blocks of gas unconfirmed, so each block takes all it can hold.
+    let v040 = PipelineConfig {
+        pace_percent: 200,
+        ..PipelineConfig::default()
+    };
+    let economy = PipelineConfig {
+        economy: true,
+        ..PipelineConfig::default()
+    };
+    let (old, now) = (
+        bulk_blocks(v040).await,
+        bulk_blocks(PipelineConfig::default()).await,
+    );
+    assert!(now <= old, "default {now} blocks, v0.4.0 {old}");
+    let slow = bulk_blocks(economy).await;
+    assert!(slow > now, "economy {slow} blocks, default {now}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn economy_bulk_fills_each_block_up_to_the_gas_target_so_the_base_fee_never_rises() {
+    let (fake, key) = setup();
+    let fee0 = fake.base_fee().await.expect("fee");
+    let cfg = PipelineConfig {
+        economy: true,
+        ..PipelineConfig::default()
+    }
+    .bulk();
     let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, cfg);
     let jobs: Vec<_> = (0..40).map(|i| vec![blob(65_536, DAY, i)]).collect();
     let (landed, t) = with_miner(fake.clone(), p.run_measured(jobs))
@@ -428,11 +546,18 @@ async fn bulk_keeps_two_blocks_of_gas_in_flight() {
         .expect("run");
     assert_eq!((landed.len(), t.txs), (40, 40));
     assert!(t.bytes > 40 * 65_536 && t.mb_per_s() > 0.0);
-    let best = gas_by_block(&landed).values().map(|(_, c)| *c).max();
+    let blocks = gas_by_block(&landed);
+    let target = charter_store::BLOCK_GAS_LIMIT / 2;
+    assert!(
+        blocks.values().all(|(gas, _)| *gas <= target),
+        "at most the target per block: {blocks:?}"
+    );
+    let best = blocks.values().map(|(_, c)| *c).max();
     assert!(
         best > Some(4),
         "more than the 4 chunks per block the 40 percent pace allows: {best:?}"
     );
+    assert!(fake.base_fee().await.expect("fee") <= fee0, "no fee spiral");
 }
 
 #[tokio::test(start_paused = true)]

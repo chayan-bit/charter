@@ -1932,6 +1932,7 @@ dependencies = [
 name = "charter-core"
 version = "0.4.0"
 dependencies = [
+ "brotli",
  "charter-crypto",
  "gix-validate",
  "hex",

@@ -79,6 +79,12 @@ impl<A: Arkiv> Arkiv for Sealed<'_, A> {
     async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
         self.inner.block_txs(n).await
     }
+    async fn tx_at(&self, n: u64, i: u32) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.inner.tx_at(n, i).await
+    }
+    fn seals(&self) -> bool {
+        true
+    }
     fn open_rows(&self, rows: Vec<charter_store::EntityData>) -> Vec<charter_store::EntityData> {
         rows.into_iter().map(|r| open_row(&self.ring, r)).collect()
     }

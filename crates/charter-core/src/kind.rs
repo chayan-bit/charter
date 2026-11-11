@@ -19,9 +19,11 @@ pub enum Kind {
     Device,
     /// Format v2: one device's mutable head (docs/p5/head-model.md 4.2).
     Head,
+    /// Format v3: the same head with compact piece runs and pack codecs (head-model 13).
+    HeadV3,
 }
 
-const ALL: [Kind; 12] = [
+const ALL: [Kind; 13] = [
     Kind::Peer,
     Kind::Bind,
     Kind::Id,
@@ -34,6 +36,7 @@ const ALL: [Kind; 12] = [
     Kind::Mls,
     Kind::Device,
     Kind::Head,
+    Kind::HeadV3,
 ];
 
 impl Kind {
@@ -51,6 +54,7 @@ impl Kind {
             Kind::Mls => 10,
             Kind::Device => 11,
             Kind::Head => 12,
+            Kind::HeadV3 => 13,
         }
     }
 
@@ -69,6 +73,8 @@ impl Kind {
             Kind::Mls => "mls",
             Kind::Device => "device",
             Kind::Head => "head",
+            // The content-hash tag; the entity is still stored as `ag.kind = 'head'`.
+            Kind::HeadV3 => "head3",
         }
     }
 
@@ -89,6 +95,7 @@ impl Kind {
             Kind::Mls => b"arkiv-git/mls/v1",
             Kind::Device => b"arkiv-git/device/v1",
             Kind::Head => b"arkiv-git/head/v1",
+            Kind::HeadV3 => b"arkiv-git/head/v3",
         }
     }
 

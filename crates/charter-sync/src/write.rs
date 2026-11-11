@@ -24,6 +24,7 @@ pub struct Signed {
 }
 
 pub fn sign<B: Body>(sk: &SecretKey, body: &B) -> Result<Signed> {
+    let _t = charter_store::trace::span(|| format!("sign {:?}", B::KIND));
     let env = Envelope::sign(sk, B::KIND, body.encode())?;
     let bytes = env.encode();
     Ok(Signed {
@@ -116,6 +117,15 @@ pub async fn send_funded<A: Arkiv>(
     Ok(p.run(jobs).await?)
 }
 
+/// Reads a caller already made, so the pipeline skips them (see [`send_funded_at`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Seed {
+    /// The head, its base fee, when they were read, and the sender's balance then.
+    pub tip: Option<(u64, u128, std::time::Instant, U256)>,
+    /// Price every job at this gas instead of estimating it.
+    pub gas: Option<u64>,
+}
+
 /// [`send_funded`] with the first tx signed at exactly `nonce`; a nonce another sender of
 /// `signer` holds fails with `E_CONCURRENT_PUSH` instead of moving on (head-model 7.4).
 pub async fn send_funded_at<A: Arkiv>(
@@ -124,12 +134,19 @@ pub async fn send_funded_at<A: Arkiv>(
     wallet: &PrivateKeySigner,
     cfg: &PipelineConfig,
     nonce: u64,
+    seed: Seed,
     jobs: Vec<Vec<Operation>>,
 ) -> Result<Vec<Landed>> {
     let chain_id = a.chain_id().await?;
     let mut p = TxPipeline::new(a, signer.clone(), chain_id, cfg.clone())
         .funded_by(wallet.clone())
         .at_nonce(nonce);
+    if let Some((head, fee, at, balance)) = seed.tip {
+        p = p.seeded(head, fee, at, balance);
+    }
+    if let Some(gas) = seed.gas {
+        p = p.with_gas(gas);
+    }
     p.run(jobs).await.map_err(|e| match e {
         charter_store::StoreError::NonceTooLow(m) => SyncError::coded(
             charter_core::ErrorCode::ConcurrentPush,

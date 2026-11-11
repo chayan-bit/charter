@@ -12,8 +12,8 @@ use charter_zk::Public;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::Result;
 use crate::cob::json::to_json;
-use crate::{Result, SyncError};
 
 /// COB type of a receipt chunk op: payload `{ data: <hex> }`, addressed by `sha256` of the
 /// decoded bytes. Hex text, so `op post --payload-json` can write it; a chunk of at most
@@ -48,10 +48,7 @@ impl ProofCache {
         if !self.dirty {
             return Ok(());
         }
-        let bytes = serde_json::to_vec(self).map_err(|e| SyncError::io("proof cache", e))?;
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, bytes).map_err(|e| SyncError::io("proof cache", e))?;
-        std::fs::rename(&tmp, path).map_err(|e| SyncError::io("proof cache", e))
+        crate::state::write_json(path, self)
     }
 }
 

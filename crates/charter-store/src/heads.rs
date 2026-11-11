@@ -13,6 +13,61 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use crate::StoreError;
 use crate::rpc::ACCESS_KEY_HEADER;
 
+/// The process's shared `newHeads` subscription, as every pipeline sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feed {
+    /// No shared socket (never started, or it dropped): pipelines open their own or poll.
+    Down,
+    /// Started, not yet subscribed.
+    Connecting,
+    /// The latest announced block, its base fee and when it arrived.
+    Tip {
+        number: u64,
+        base_fee: u128,
+        at: std::time::Instant,
+    },
+}
+
+static FEED: std::sync::OnceLock<tokio::sync::watch::Sender<Feed>> = std::sync::OnceLock::new();
+
+fn feed_tx() -> &'static tokio::sync::watch::Sender<Feed> {
+    FEED.get_or_init(|| tokio::sync::watch::channel(Feed::Down).0)
+}
+
+/// A view of the shared feed; `changed()` wakes on the next block after the last one
+/// this receiver marked seen.
+pub fn feed() -> tokio::sync::watch::Receiver<Feed> {
+    feed_tx().subscribe()
+}
+
+/// The reader of one shared `newHeads` socket for this process, for the caller to spawn
+/// (this crate has no runtime of its own); `None` while one is already running. Opened at
+/// command start, the 1.4 s handshake (MEASURED on Rabdi) overlaps the reads before a
+/// write instead of delaying its first inclusion wait.
+pub fn start_feed(cfg: WsConfig) -> Option<impl Future<Output = ()> + Send + 'static> {
+    let tx = feed_tx();
+    let started = tx.send_if_modified(|f| match f {
+        Feed::Down => {
+            *f = Feed::Connecting;
+            true
+        }
+        _ => false,
+    });
+    started.then_some(async move {
+        if let Ok(mut h) = subscribe(&cfg).await {
+            while let Ok(Some((number, base_fee))) = h.next_tip().await {
+                let at = std::time::Instant::now();
+                tx.send_replace(Feed::Tip {
+                    number,
+                    base_fee,
+                    at,
+                });
+            }
+        }
+        tx.send_replace(Feed::Down);
+    })
+}
+
 /// Where the socket is and the optional access key, sent as on HTTP.
 #[derive(Clone)]
 pub struct WsConfig {
@@ -94,6 +149,11 @@ impl Heads {
 
     /// The number of the next announced block; `None` once the node closes the socket.
     pub async fn next(&mut self) -> Result<Option<u64>, StoreError> {
+        Ok(self.next_tip().await?.map(|(n, _)| n))
+    }
+
+    /// The next announced block and its base fee (0 when the header has none).
+    pub async fn next_tip(&mut self) -> Result<Option<(u64, u128)>, StoreError> {
         loop {
             let Some(v) = self.message().await? else {
                 return Ok(None);
@@ -101,10 +161,14 @@ impl Heads {
             if v["method"] != "eth_subscription" {
                 continue;
             }
-            let n = v["params"]["result"]["number"].as_str().unwrap_or("");
-            return u64::from_str_radix(n.trim_start_matches("0x"), 16)
-                .map(Some)
-                .map_err(|_| ws_err(format!("bad block number {n:?}")));
+            let head = &v["params"]["result"];
+            let n = head["number"].as_str().unwrap_or("");
+            let number = u64::from_str_radix(n.trim_start_matches("0x"), 16)
+                .map_err(|_| ws_err(format!("bad block number {n:?}")))?;
+            let fee = head["baseFeePerGas"].as_str().unwrap_or("0x0");
+            let base_fee = u128::from_str_radix(fee.trim_start_matches("0x"), 16)
+                .map_err(|_| ws_err(format!("bad base fee {fee:?}")))?;
+            return Ok(Some((number, base_fee)));
         }
     }
 }

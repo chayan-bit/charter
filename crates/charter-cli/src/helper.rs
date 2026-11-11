@@ -103,6 +103,10 @@ impl<'a, A: Arkiv> Session<'a, A> {
                     return Err(e.into());
                 }
                 let nid = Keys::require(&self.cfg.home)?.nid();
+                // The push's inclusion waits share one socket, subscribed while we read.
+                if let Some(feed) = self.a.heads_ws().and_then(charter_store::heads::start_feed) {
+                    tokio::spawn(feed);
+                }
                 let view = self.sync([nid].into()).await?;
                 let refs = own_refs(&view, &nid);
                 self.view = Some(view);
@@ -219,6 +223,12 @@ impl<'a, A: Arkiv> Session<'a, A> {
         input: &mut impl BufRead,
         out: &mut impl Write,
     ) -> Result<Next> {
+        let _t = charter_store::trace::span(|| {
+            format!(
+                "helper {}",
+                line.split(' ').take(2).collect::<Vec<_>>().join(" ")
+            )
+        });
         match line {
             "" => return Ok(Next::Stop),
             "capabilities" => writeln!(out, "option\nfetch\npush\n").map_err(io)?,

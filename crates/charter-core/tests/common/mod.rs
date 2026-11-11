@@ -166,3 +166,4 @@ pub fn manifest_body(chunks: usize) -> ManifestBody {
 }
 
 pub mod history;
+pub mod v040;

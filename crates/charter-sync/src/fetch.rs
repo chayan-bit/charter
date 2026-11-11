@@ -16,16 +16,36 @@ use crate::{Result, SyncError, packs, warn};
 
 /// Runs the fetch sync for `repo`; returns the verified view it committed.
 pub async fn sync<A: Arkiv>(a: &A, repo: &Repo, want: &Want) -> Result<View> {
+    use charter_store::trace::span;
+    let _t = span(|| "sync".into());
     let mut state = State::load(&repo.state_path())?;
-    let mut view = view::build(a, &repo.rid, &state, want).await?;
+    let t = span(|| "sync.view".into());
+    let (mut view, memo) = view::memo::build(a, repo, &state, want).await?;
+    drop(t);
     warn_expiry(&view);
     let must: BTreeSet<Nid> = view.delegates().iter().chain(&want.must).copied().collect();
-    let applied = apply_all(a, repo, &mut view, &state, &must).await?;
+    // The program's Arkiv reads go out with the downloads; its fold waits for the packs.
+    let t = span(|| "sync.download".into());
+    let snapshot = view.clone();
+    let (applied, gathered) = futures_util::future::try_join(
+        apply_all(a, repo, &mut view, &state, &must),
+        crate::program::gather(&memo.backend, &snapshot, repo.git()),
+    )
+    .await?;
+    drop(t);
+    let t = span(|| "sync.checks".into());
     check_connected(repo, &mut view, &must)?;
     check_bases(repo, &mut view, &must)?;
+    drop(t);
     // After the packs are in the cache, so the program sees real git ancestry.
-    view.program = crate::program::enforce(a, &view, repo.git()).await?;
+    let t = span(|| "sync.program".into());
+    view.program = crate::program::finish(gathered, repo.git())?;
+    drop(t);
+    let _c = span(|| "sync.commit".into());
     commit(repo, &view, &mut state, applied)?;
+    if let Err(e) = memo.save(repo, &view) {
+        warn(&format!("sync memo: {e}"));
+    }
     Ok(view)
 }
 
@@ -246,13 +266,24 @@ fn check_bases(repo: &Repo, view: &mut View, must: &BTreeSet<Nid>) -> Result<()>
         let Some(v2) = view.peers.get(&nid).and_then(|p| p.v2.as_ref()) else {
             continue;
         };
-        let bad = v2.merged.iter().find(|(_, w)| {
-            let e = &w.entry;
-            !e.is_tombstone()
-                && !e.base.is_empty()
-                && e.base != e.oid
-                && crate::program::is_ancestor(repo.git(), &e.base, &e.oid) != Some(true)
-        });
+        let signed: Vec<_> = v2
+            .merged
+            .iter()
+            .filter(|(_, w)| {
+                let e = &w.entry;
+                !e.is_tombstone() && !e.base.is_empty() && e.base != e.oid
+            })
+            .collect();
+        let pairs: Vec<(&[u8], &[u8])> = signed
+            .iter()
+            .map(|(_, w)| (w.entry.base.as_slice(), w.entry.oid.as_slice()))
+            .collect();
+        let answers = crate::program::are_ancestors(repo.git(), &pairs);
+        let bad = signed
+            .into_iter()
+            .zip(answers)
+            .find(|(_, ok)| *ok != Some(true))
+            .map(|(x, _)| x);
         if let Some((name, w)) = bad {
             let e = SyncError::coded(
                 ErrorCode::BadRefs,
@@ -326,6 +357,11 @@ fn commit_v2(state: &mut State, pv: &crate::view::PeerView) -> Result<()> {
 pub fn set_namespace(repo: &Repo, nid: &Nid, refs: &RefsBody) -> Result<()> {
     let ns = namespace(nid);
     let current: BTreeMap<String, String> = repo.git().refs(&ns)?.into_iter().collect();
+    repo.git().update_refs(&namespace_ops(&ns, &current, refs))
+}
+
+/// The ref ops that move namespace `ns` from `current` to `refs`.
+pub fn namespace_ops(ns: &str, current: &BTreeMap<String, String>, refs: &RefsBody) -> Vec<RefOp> {
     let desired: BTreeMap<String, String> = refs
         .refs
         .iter()
@@ -348,7 +384,7 @@ pub fn set_namespace(repo: &Repo, nid: &Nid, refs: &RefsBody) -> Result<()> {
             old: old.clone(),
         });
     }
-    repo.git().update_refs(&ops)
+    ops
 }
 
 fn warn_expiry(view: &View) {

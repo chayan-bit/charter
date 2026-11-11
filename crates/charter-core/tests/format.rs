@@ -233,6 +233,14 @@ fn field_rules_are_enforced() {
         ManifestBody::decode(&m.encode()).is_err(),
         "thin packs reserved"
     );
+    let mut m = manifest_body(2);
+    m.pack_kind = 3;
+    assert!(
+        ManifestBody::decode(&m.encode()).is_ok(),
+        "format v3: a brotli stream of a self-contained pack"
+    );
+    m.pack_kind = 4;
+    assert!(ManifestBody::decode(&m.encode()).is_err(), "unknown kind");
 
     let b = bind_body(1, ZERO, addr(1), addr(2));
     assert!(BindBody::decode(&b.encode()).is_err(), "seq 1 needs prev");

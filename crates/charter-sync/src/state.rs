@@ -252,18 +252,31 @@ pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     }
 }
 
+/// Counter of `write_json` temp files: with the process id, one temp file per write, so
+/// concurrent writers never rename each other's half-written file into place.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Temp file, fsync, rename: a crash leaves the old or the new file, never a torn one.
+/// Owner-only (0600): the view memo and program state hold decrypted private rows.
 pub fn write_json<T: Serialize>(path: &Path, v: &T) -> Result<()> {
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    // One temp file per write (process id and a per-process counter), so concurrent
-    // writers never rename each other's half-written file into place.
-    static SEQ: AtomicU64 = AtomicU64::new(0);
+    use std::sync::atomic::Ordering;
     let err = |e: std::io::Error| SyncError::io(path.display(), e);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
     let bytes = serde_json::to_vec_pretty(v).map_err(|e| SyncError::io(path.display(), e))?;
-    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+    let mut o = std::fs::OpenOptions::new();
+    // A fresh file only: an existing one (a crashed run whose pid came back) keeps its mode.
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let (tmp, file) = loop {
+        let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
+        match o.open(&tmp) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            r => break (tmp, r),
+        }
+    };
+    let written = file.and_then(|mut f| {
         f.write_all(&bytes)?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)
@@ -278,6 +291,42 @@ pub fn write_json<T: Serialize>(path: &Path, v: &T) -> Result<()> {
 mod tests {
     use super::*;
     use charter_core::Kind;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_temp_file_at_the_next_name_never_lends_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().expect("tmp");
+        let p = d.path().join("view-memo.json");
+        // A crashed run whose pid came back: its temp files at the next names, 0644.
+        let next = TMP_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+        // Wide enough that the other tests of this binary cannot write past it first.
+        for n in next..next + 1024 {
+            let stale = p.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
+            std::fs::write(&stale, b"stale").expect("stale");
+            std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+        }
+        write_json(&p, &"decrypted rows").expect("write");
+        let mode = std::fs::metadata(&p).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(
+            read_json::<String>(&p).expect("read").as_deref(),
+            Some("decrypted rows")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_files_are_readable_by_their_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().expect("tmp");
+        let p = d.path().join("view-memo.json");
+        write_json(&p, &"decrypted rows").expect("write");
+        write_json(&p, &"again").expect("rewrite");
+        let mode = std::fs::metadata(&p).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     #[test]
     fn concurrent_writes_to_one_file_all_land_whole() {

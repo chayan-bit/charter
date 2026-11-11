@@ -27,14 +27,84 @@ pub struct Net {
     drop: Mutex<Option<(Address, u64)>>,
     /// `(from block, wei)`: the base fee is held at `wei` once the head reaches the block.
     fee: Mutex<Option<(u64, u128)>>,
+    /// Every query's `Debug` form, in order (tests count what a step reads).
+    pub queries: Mutex<Vec<String>>,
+    /// Read-path counters: calls by method, and the most `mined_tx` calls in flight at once.
+    pub stats: Stats,
+}
+
+/// Calls the read path made, for round-trip and concurrency assertions.
+#[derive(Default)]
+pub struct Stats {
+    calls: Mutex<Vec<String>>,
+    inflight: std::sync::atomic::AtomicUsize,
+    pub max_inflight_mined: std::sync::atomic::AtomicUsize,
+    queries_inflight: std::sync::atomic::AtomicUsize,
+    pub max_inflight_queries: std::sync::atomic::AtomicUsize,
+}
+
+impl Stats {
+    fn note(&self, what: String) {
+        self.calls.lock().expect("lock").push(what);
+    }
+
+    /// Forgets every call so far.
+    pub fn reset(&self) {
+        self.calls.lock().expect("lock").clear();
+        self.max_inflight_mined
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.max_inflight_queries
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Every call label so far, in order.
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("lock").clone()
+    }
+
+    /// Calls whose label contains `needle` (method name, or a query fragment).
+    pub fn count(&self, needle: &str) -> usize {
+        let calls = self.calls.lock().expect("lock");
+        calls.iter().filter(|c| c.contains(needle)).count()
+    }
+
+    /// Index of the first and last call whose label contains `needle`.
+    pub fn span(&self, needle: &str) -> Option<(usize, usize)> {
+        let calls = self.calls.lock().expect("lock");
+        let first = calls.iter().position(|c| c.contains(needle))?;
+        let last = calls.iter().rposition(|c| c.contains(needle))?;
+        Some((first, last))
+    }
+
+    pub fn max_mined(&self) -> usize {
+        self.max_inflight_mined
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl Net {
+    /// A tx read counted as in flight while it is "on the wire" (piece reads).
+    async fn on_the_wire<T>(&self, call: String, read: impl std::future::Future<Output = T>) -> T {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.stats.note(call);
+        let now = self.stats.inflight.fetch_add(1, SeqCst) + 1;
+        self.stats.max_inflight_mined.fetch_max(now, SeqCst);
+        // Yield so concurrent callers get polled while this call is "on the wire".
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        let r = read.await;
+        self.stats.inflight.fetch_sub(1, SeqCst);
+        r
+    }
+
     pub fn new() -> Self {
         Self {
             mem: Arc::new(MemArkiv::new(CHAIN)),
             drop: Mutex::new(None),
             fee: Mutex::new(None),
+            queries: Mutex::new(vec![]),
+            stats: Stats::default(),
         }
     }
 
@@ -57,6 +127,11 @@ impl Net {
         self.mem.fund(a, U256::from(10u128.pow(24)));
     }
 
+    /// Takes the queries logged since the last call.
+    pub fn take_queries(&self) -> Vec<String> {
+        std::mem::take(&mut *self.queries.lock().expect("lock"))
+    }
+
     pub fn mine(&self, n: u64) {
         (0..n).for_each(|_| {
             self.mem.mine();
@@ -75,9 +150,22 @@ impl Arkiv for Net {
         self.mem.base_fee().await
     }
     async fn query(&self, q: &Query, o: &QueryOpts) -> Result<QueryPage, StoreError> {
-        self.mem.query(q, o).await
+        self.queries.lock().expect("lock").push(format!("{q:?}"));
+        self.stats
+            .note(format!("query {}", q.render().unwrap_or_default()));
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = self.stats.queries_inflight.fetch_add(1, SeqCst) + 1;
+        self.stats.max_inflight_queries.fetch_max(now, SeqCst);
+        // Yield so concurrent read paths interleave as they would on a real wire.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        let r = self.mem.query(q, o).await;
+        self.stats.queries_inflight.fetch_sub(1, SeqCst);
+        r
     }
     async fn entity_nonce(&self, c: Address) -> Result<u64, StoreError> {
+        self.stats.note(format!("nonce {c}"));
         self.mem.entity_nonce(c).await
     }
     async fn balance(&self, a: Address) -> Result<U256, StoreError> {
@@ -93,7 +181,16 @@ impl Arkiv for Net {
         self.mem.transaction(h).await
     }
     async fn mined_tx(&self, h: TxHash) -> Result<Option<charter_store::MinedTx>, StoreError> {
-        self.mem.mined_tx(h).await
+        self.on_the_wire(format!("mined_tx {h}"), self.mem.mined_tx(h))
+            .await
+    }
+    async fn tx_at(
+        &self,
+        n: u64,
+        index: u32,
+    ) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.on_the_wire(format!("tx_at {n}:{index}"), self.mem.tx_at(n, index))
+            .await
     }
     async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
         self.mem.block_txs(n).await

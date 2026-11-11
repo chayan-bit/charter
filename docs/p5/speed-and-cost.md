@@ -197,6 +197,136 @@ About 11 chunks of 64 KiB fit in a 30M-gas block (DERIVED), so the pipeline now 
 
 Op batching was not measured on chain; with N ops on one pipeline a post waits about one confirmation round instead of N (ESTIMATE).
 
+### 2.8 Encoding, packing and snapshot policy on branch `perf/b-lane-b` (2026-11-11)
+
+No format change: every head this branch writes is a v2 head that v0.4.0 reads.
+
+What changed:
+
+- Manifest facts cache: the size and git pack trailer of each snapshot manifest are kept by `h` in `git/arkiv-manifests.json` (`h` hashes the signed manifest, so its facts never change).
+  The snapshot policy of a push reads them from there, so a piece push no longer queries Arkiv for its own manifests (test `a_piece_push_reads_no_snapshot_manifest_it_signed_itself`).
+- Snapshot packs are built with `--no-reuse-delta --window=50`; thin packs stay as they were (MEASURED below).
+- Layered snapshots: a due refresh adds one self-contained layer (every object reachable from the merged refs that no kept layer holds, `pack-objects --keep-pack`) to the head's `snapshot` list instead of rewriting the snapshot.
+  The 8th refresh, or any refresh whose layer packs are no longer in the local cache, rewrites one compact snapshot instead; that bounds the layer count and the bytes of deleted refs kept alive.
+  The refresh threshold is unchanged and counts every layer: piece bytes over `max(1 MiB, 25 percent of all layers)`, 64 packs or 256 pieces.
+  v0.4.0 already downloads every manifest a head lists, indexes all downloads in rounds and checks connectivity over all of them, and keepalive extends every listed manifest and its chunks, so layers need no reader change (test `a_refresh_adds_a_layer_that_the_v040_reader_clones`, run against the unchanged v0.4.0 reader code).
+- A new cache is configured with one append to its `config` instead of four `git config` spawns.
+
+Snapshot pack settings, bytes and CPU seconds (MEASURED on this Mac):
+
+| Repo | default | `--no-reuse-delta`, window 10 | window 50 | window 250, depth 250 |
+|---|---|---|---|---|
+| Charter `main` | 1,808,689 | 1,681,736 (0.16 s) | 1,646,039, -9.0% (0.46 s) | 1,642,159 (1.29 s) |
+| focus-dock (binary-heavy, 13 MiB) | 12,006,713 | 11,973,110 (0.27 s) | 11,499,578, -4.2% (0.70 s) | 11,498,817 (1.15 s) |
+
+Going from window 10 to 50 saves about 7M gas per CPU second; past 50 it saves under 0.3M gas per CPU second.
+Recomputing deltas of thin packs saves 0 to 0.4% on small pushes (and is slightly worse on some), 2% only on 30-commit pushes, so v2 thin packs kept reusing deltas.
+Format v3 (2.10) builds thin packs with `--no-reuse-object --compression=0` for brotli, which recomputes their deltas at git's default window 10 as well.
+
+A self-contained layer is 7 to 33% larger than the thin pack of the same commits (Charter `main`, 10 to 60 commits: 786,542 vs 592,193 B and 1,554,014 vs 1,451,613 B), but a v0.4.0 refresh rewrites everything: the full snapshot is 1,645,323 B.
+
+Live on Rabdi with the release build of this branch (MEASURED 2026-11-11, own wallet, `CHARTER_TRACE=1`, gas and tGLM from receipts):
+
+| Step | Txs | Gas | tGLM | Seconds | Head `snapshot` |
+|---|---|---|---|---|---|
+| small push (3 runs) | 1 | 271,808 to 277,160 | 0.00027 | 9.6 to 11.9 | 1 layer |
+| 10 MiB push (snapshot due, adds layer 2) | 169 | 623.5M | 1.079 | 42.9 (resume after a funds stop) | 2 layers |
+| 2 MiB push (pieces) | 35 | 85.5M | 0.0887 | 27.6 | 2 layers |
+| 1 MiB push (refresh, adds layer 3 of 3 MiB) | 53 | 187.4M | 0.249 | 35.2 | 3 layers |
+| small push after the refresh | 1 | 274,786 | 0.00027 | 11.2 | 3 layers |
+
+Before (v0.4.0, profiler traces of the same steps): small push 11.9 to 13.8 s; 2 MiB push 84.9M gas, 25.4 s.
+The refresh is the cut: v0.4.0 rewrites the whole 13.1 MiB snapshot, about 210 chunks at 3.88M gas, so about 815M gas and 1.08 tGLM at the same gas price (DERIVED, not run), against 187.4M gas and 0.249 tGLM here, -77%.
+The small push drops one RPC (34 instead of 35; the manifest query took 464 to 605 ms) and spawns as many git processes as before (17); its gas is unchanged, as expected without a format change.
+A clone of the 3-layer repo with the installed v0.4.0 binary (`chart 0.4.0`, fresh home) took 9 s, `git fsck --full` is clean and `HEAD` matches the pusher.
+A v0.4.0 writer on a layered repo is safe (MEASURED on Rabdi with the installed `chart 0.4.0`):
+the same device after a downgrade carries all 3 layers on piece pushes and, at its own refresh threshold (which sums every layer), replaces them with one full snapshot of the identity's refs;
+a second v0.4.0 device writes no snapshot until its first refresh, reads the first device's layers meanwhile, and its refresh writes a full snapshot while the first device's head keeps its layers.
+After each step both readers clone with a clean `git fsck --full`, and `chart keepalive --dry-run` of both versions lists the same keep set, which counts every layer a head lists (and none a head dropped).
+
+### 2.9 Write latency and pacing modes on branch `perf/batch-b` (2026-11-11)
+
+The write path drops round trips without a format change: the chain-id probe rides in the first read's batch, the head tx is signed from what setup and the plan already read (no estimate under 32 KiB, no balance re-read, the tx index from the receipt), the re-check after the head tx reads the peer and the device heads together, the snapshot manifest goes with its last chunks, a first push tops up C_d and the control address in one transfer, and a funded run reads its balance once and counts each landed tx's unused reserve back instead of reading again.
+MEASURED on Rabdi against v0.4.0 (lane A build, own wallet, interleaved runs): small push 12.6 / 11.9 / 10.0 s to 9.5 / 9.4 / 6.6 s, refs-only push 12.6 / 11.9 s to 9.0 / 7.9 s, first push 31.4 s to 23.0 s, each at the same gas.
+
+Big uploads (pieces and snapshot chunks) have two pacing modes; the project rule is that no change may make any operation slower or more expensive, so the default keeps v0.4.0's speed.
+
+- Default: up to two blocks of gas unconfirmed, as in v0.4.0, so each block takes all the chunks it can hold (7 of 3.88M gas in a 30M block) and the next block's chunks already wait in the pool; a push never needs more blocks than in v0.4.0.
+  Holding chunks back to spread them evenly would mean refilling once per block, and a refill that misses the next block costs a whole block (7 of 63 blocks missed on the 10 MiB run below), so the default does not spread.
+  Full blocks raise the base fee 12.5% per block (1.00 to 2.64 gwei over a 10 MiB push), so the default keeps v0.4.0's fee for big pushes; it keeps every saving that costs no time: the single balance read, the manifest with the chunks and the single top-up.
+- Economy, `CHARTER_PACE=economy`: up to the block gas target (15M, half the limit) unconfirmed, refilled as each block lands, so the base fee never rises.
+  MEASURED: a 10 MiB push cost 0.625 tGLM in 134.0 s against v0.4.0's 1.218 tGLM in 96.9 s (-49% fee, +38% time); a 2 MiB push cost 0.127 instead of 0.155 tGLM, its content phase 28.9 s instead of 23.1 s.
+
+Live sanity run of `perf/batch-b` 4e3895d (lanes A, B and C merged, default pacing) against v0.4.0, interleaved on fresh repos in one session (MEASURED 2026-11-11, own wallets, `CHARTER_TRACE=1`, gas and tGLM from receipts):
+
+| Step | v0.4.0 s | batch-b s | v0.4.0 tGLM | batch-b tGLM |
+|---|---|---|---|---|
+| first push (64 KiB) | 34.7 | 24.8 | 0.006659 | 0.006665 |
+| small push (3 runs) | 13.0 / 13.8 / 13.0 | 8.0 / 6.4 / 6.2 | 0.000326 to 0.000328 | 0.000325 to 0.000330 |
+| refs-only push | 14.0 | 7.8 | 0.000260 | 0.000260 |
+| no-op fetch (3 runs) | 5.5 / 4.9 / 5.5 | 2.1 / 2.1 / 1.4 | 0 | 0 |
+| clone | 4.5 | 1.5 | 0 | 0 |
+| 2 MiB push | 37.0 (content 24.6) | 25.4 (content 18.3) | 0.1530 | 0.1513 |
+
+Both clones match the pusher's `HEAD` and pass `git fsck --full`.
+Small-push gas moves by about 2k either way with the random payload; the first push's manifest tx costs about 6k gas more (+0.09% of the push, seen in 2 of 2 runs) when it lands in the block of its chunks, which the 2 MiB push's manifest does not show.
+Cause (found 2026-11-11, head-model 13.2): GolemDB charges an index-term create for every term it does not find in the commit the block started from, so a manifest in its chunks' block pays again for terms those chunks create there (a 2 MiB push's chunks span several blocks, so the terms exist by its last batch); format v3 creates the manifest in the head tx instead, a block later.
+
+Format v3 (brotli, lane B) cuts the bytes of source repos by 28 to 35%; once it lands the default gets both faster and cheaper without any pacing, since fewer chunks need fewer blocks and less gas.
+
+### 2.10 Format v3 on Rabdi (2026-11-11, MEASURED)
+
+`perf/batch-b` with format v3 wired (head-model 13) against the installed v0.4.0, interleaved on fresh repos in one session, one wallet, `CHARTER_TRACE=1`.
+Gas is the sum of `gasUsed` over every tx the run's addresses sent, read from receipts block by block (v0.4.0 traces name no tx hashes); every price was 1 gwei except the random 2 MiB pushes, which filled blocks and paid about 1.22 gwei on average (0.201161 tGLM for v0.4.0, 0.185485 for v3).
+Clones ran from empty homes and match the pusher's `HEAD` and pass `git fsck --full --strict`.
+
+| Operation | v0.4.0 s | v3 s | v0.4.0 gas | v3 gas |
+|---|---|---|---|---|
+| first push (200 KB source tree) | 31.2 | 24.8 | 5,837,736 | 4,843,037 |
+| small push (3 runs) | 9.8 / 9.3 / 9.3 | 4.6 / 6.2 / 6.4 | 312,894 / 313,784 / 316,835 | 299,297 / 300,724 / 301,829 |
+| refs-only push | 9.2 | 4.6 | 258,746 | 223,444 |
+| 2 MiB source push (pieces) | 18.8 | 14.3 | 25,596,016 | 19,004,664 |
+| 2 MiB random push (snapshot refresh; v3 adds a layer) | 34.8 | 24.5 | 165,282,443 | 152,506,363 |
+| no-op fetch (3 runs) | 4.8 / 3.5 / 3.7 | 1.7 / 1.1 / 1.2 | 0 | 0 |
+| clone right after a push | 7.3 | 4.0 | 0 | 0 |
+| clone after the pieces expired (3 runs) | 6.8 / 8.3 / 7.1 | 5.8 / 5.4 / 3.8 | 0 | 0 |
+| migration push (v2 repo with 2 carried packs, issue, pinned `ci-gated`) | 11.4 | 5.9 | 280,840 | 263,191 |
+| program fold after it (`chart program status`) | 5.7 | 2.9 | 0 | 0 |
+| private first push | 28.1 | 21.4 | 7,031,349 | 6,904,631 |
+| private small push (3 runs) | 10.3 / 9.5 / 9.7 | 6.5 / 6.0 / 5.9 | 283,907 / 285,827 / 283,931 | 283,919 / 283,919 / 283,871 |
+| private clone | 5.7 | 3.5 | 0 | 0 |
+
+- The migration push compares with the same push by v0.4.0 on an identical repo; it is 4.5% of v0.4.0's first push (5,837,556 gas).
+  After it v0.4.0 stops with `E_UNSUPPORTED_VERSION` on `chart program status` and on `git clone`; v3 clones and fsck pass, the issue op lists, and the fold shows the same state and heads as v0.4.0's fold of the twin repo.
+- Private entities are padded to power-of-two buckets, so a smaller head body only helps across a bucket edge; the private small pushes differ by single zero bytes of ciphertext (12 gas each way, two v0.4.0 inits of identical repos differ by 96 gas).
+- The first push's head tx with its manifest used 1,257,712 gas against 1,370,127 for v0.4.0's manifest tx plus head tx.
+- Snapshot pack cost on a 118 MiB repo (MEASURED on this Mac, 10 cores, 284,496 objects, 12,293 commits, one ref; local only, a live push of it is over the 1 tGLM budget).
+  v0.4.0's first push builds the thin pack it never sends (1.25 s) and two zlib packs reusing deltas (1.95 s; 2.6 CPU s in all): 133.9 MB stored.
+  v3 builds no thin pack, then three raw packs with `--no-reuse-delta --window=50` (11.2 s, 71 CPU s) and brotli q6 (4.4 s): 77.7 MB stored, -42%.
+  Window 10 instead would take 9.8 s (35 CPU s) plus 6.4 s of brotli for 97.4 MB in five packs, so window 50 is both faster end to end and smaller.
+  The 12.4 s of extra CPU buys 56 MB fewer bytes on chain, which at the measured 10 MiB push rate (about 0.1 MB/s, 2.7) is several minutes and about 3.4 tGLM less (3.92M gas per 64 KiB chunk, section 1), so the setting stays unconditional.
+- A push whose snapshot is due with any new piece (64 carried packs, 256 pieces, or carried pieces alone over the refresh threshold) builds no thin pack and runs no brotli; one `rev-list` object first tells a refs-only push apart, so it refreshes no earlier than in v0.4.0.
+- A thin pack whose zlib fallback still passes the 100 MiB decode cap is sent as a snapshot instead.
+- A v3 reader's cache holds text objects without zlib (4.2 MB against 2.9 MB for this repo); repacking them in the fetch would cost the clone time it saves, so it is not done (head-model 13.3).
+
+#### Rerun after the review fixes (2026-11-11, MEASURED)
+
+Same method, fresh repos, after the fixes for the independent review (fresh `at`, zlib fallback over the decode cap, owner-only state files, op probe, head gas bound).
+
+| Operation | v0.4.0 s | v3 s | v0.4.0 gas | v3 gas |
+|---|---|---|---|---|
+| first push (200 KB source tree) | 32.1 | 22.5 | 5,837,652 | 4,843,463 |
+| small push (2 runs) | 13.8 / 13.9 | 6.8 / 5.7 | 273,146 / 273,625 | 259,834 / 258,963 |
+| no-op fetch (2 runs) | 4.6 / 4.6 | 2.1 / 1.5 | 0 | 0 |
+| clone right after the pushes | 7.8 | 4.1 | 0 | 0 |
+| 10 MiB push, 7 MiB Rust source and 3 MiB random (snapshot due) | 52.7 | 43.5 | 281,697,780 (0.423 tGLM) | 256,186,188 (0.349 tGLM) |
+| private first push | 35.2 | 27.4 | 7,033,155 | 6,904,325 |
+| private small push | 13.3 | 8.0 | 283,847 | 281,843 |
+
+- Both clones match the pusher's `HEAD` and pass `git fsck --full --strict`.
+- The 10 MiB push sent one head tx from `C_d` with status 1; its upload took 36 s (about 18 blocks), so it did not reach the 64-block window the fresh `at` protects, which test `a_push_that_uploads_for_many_blocks_signs_a_fresh_at_and_sends_no_follow_up_head` covers.
+- A 100 MiB push was measured locally (the 118 MiB repo above): live, v0.4.0 alone would store 133.9 MB, about 15 tGLM at this run's 10 MiB rate, far over its 1 tGLM budget.
+
 ## 3. Proposals for a much larger cut (need the user's decision)
 
 ### 3.1 Storage tiers: hot entities, cold calldata

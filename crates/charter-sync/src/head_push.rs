@@ -5,8 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use charter_core::{
-    DeviceHead, ErrorCode, Hash32, HeadPack, HeadRef, Merged, Nid, RefEntry, RefsBody, Winner,
-    ZERO, next_entries, resolve_stamps,
+    DeviceHead, ErrorCode, Hash32, HeadFormat, HeadRef, MAX_PACK_SIZE, Merged, Nid, Pack,
+    PackPieces, PieceRef, PieceRun, RefEntry, RefsBody, Winner, ZERO, codec, is_device_row,
+    next_entries, resolve_stamps,
 };
 use charter_store::Arkiv;
 
@@ -14,6 +15,7 @@ use crate::device::device_keys;
 use crate::git::Git;
 use crate::heads::{self, V2};
 use crate::keys::Keys;
+use crate::manifest_cache;
 use crate::pieces::PIECE_SIZE;
 use crate::push::{Update, stage};
 use crate::repo::{Config, Repo};
@@ -25,6 +27,8 @@ use crate::{Result, SyncError};
 pub const SNAPSHOT_MIN_BYTES: u64 = 1 << 20;
 /// Packs since the snapshot after which the next push snapshots.
 pub const SNAPSHOT_MAX_PUSHES: usize = 64;
+/// Most snapshot layers one head lists; the refresh after that rewrites one snapshot.
+pub const MAX_LAYERS: usize = 8;
 /// Largest pack sent inline in the head tx (larger ones go as bulk pieces first).
 pub const INLINE_MAX: usize = 16 * 1024;
 
@@ -55,11 +59,18 @@ pub struct Plan {
     /// Live refs of the identity before and after this push.
     pub before: BTreeMap<String, Vec<u8>>,
     pub after: BTreeMap<String, Vec<u8>>,
-    /// The thin pack of the pushed objects (empty for refs-only pushes).
+    /// The thin pack of the pushed objects, without per-object zlib (empty for refs-only
+    /// pushes); the cache indexes it on commit.
     pub thin: Vec<u8>,
+    /// `thin` as sent (head-model 13.3): brotli when that is smaller, else `thin` itself.
+    pub stored: Vec<u8>,
+    pub codec: codec::Codec,
     pub snapshot: bool,
-    /// This device's packs since its snapshot, with `tx = 0` made concrete.
-    pub carried: Vec<HeadPack>,
+    /// On a snapshot push: the layers kept, by git pack trailer (empty rewrites them all).
+    pub keep_layers: Vec<String>,
+    /// This device's packs since its snapshot, with `tx = 0` and `PieceRun::HERE` made
+    /// concrete (a v2 head's packs are re-encoded as runs when the push sends them).
+    pub carried: Vec<Pack>,
 }
 
 fn oid_bytes(hex_oid: &str) -> Result<Vec<u8>> {
@@ -164,6 +175,63 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
 
     /// This identity's v2 view, read fresh (`None` before its first device delegation).
     pub(crate) async fn own_v2(&self, state: &State) -> Result<Option<V2>> {
+        let (rid, nid) = (self.rid(), self.nid());
+        let known = self.view.peers.get(&nid).map(|pv| {
+            let rows: Vec<_> = pv
+                .anchors
+                .iter()
+                .filter(|o| is_device_row(o))
+                .cloned()
+                .collect();
+            (pv, rows)
+        });
+        let Some((pv, rows)) = known.filter(|(_, rows)| !rows.is_empty()) else {
+            return self.own_v2_cold(state).await;
+        };
+        // The peer and anchor reads run alongside a build from the inputs the sync verified;
+        // that build stands only if the fresh reads return exactly those inputs.
+        let fresh = async {
+            let Some(info) = view::resolve_peer(self.a, &rid, &nid).await? else {
+                return Ok(None);
+            };
+            let rows = view::anchors(self.a, &rid, &nid, &info).await?;
+            let rows: Vec<_> = rows.into_iter().filter(is_device_row).collect();
+            Ok::<_, SyncError>(Some((info, rows)))
+        };
+        let early = heads::build(
+            self.a,
+            &rid,
+            &nid,
+            &pv.info,
+            &self.view.identity,
+            &rows,
+            state,
+        );
+        let (fresh, early) = futures_util::future::join(fresh, Box::pin(early)).await;
+        let Some((info, fresh_rows)) = fresh? else {
+            return Ok(None);
+        };
+        if fresh_rows.is_empty() {
+            return Ok(None);
+        }
+        if info.binds == pv.info.binds && fresh_rows == rows {
+            return early.map(Some);
+        }
+        let v2 = heads::build(
+            self.a,
+            &rid,
+            &nid,
+            &info,
+            &self.view.identity,
+            &fresh_rows,
+            state,
+        );
+        Ok(Some(Box::pin(v2).await?))
+    }
+
+    /// [`Self::own_v2`] when the sync knows none of this identity's devices: peer, then
+    /// anchors, then the device heads.
+    async fn own_v2_cold(&self, state: &State) -> Result<Option<V2>> {
         let Some(info) = view::resolve_peer(self.a, &self.rid(), &self.nid()).await? else {
             return Ok(None);
         };
@@ -284,9 +352,11 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             .iter()
             .map(|(n, o)| Ok((n.clone(), o.as_deref().map(oid_bytes).transpose()?)))
             .collect::<Result<Vec<_>>>()?;
+        let bases = self.bases(&merged, &updates);
         let with_base: Vec<charter_core::EntryUpdate> = updates
             .iter()
-            .map(|(n, o)| (n.clone(), o.clone(), self.base(&merged, n, o.as_deref())))
+            .zip(bases)
+            .map(|((n, o), b)| (n.clone(), o.clone(), b))
             .collect();
         let refs = next_entries(&self.me(), &prev_refs, &merged, &others, &with_base);
         let before = live(&merged);
@@ -302,26 +372,50 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             .filter_map(|(_, o)| o.as_ref().map(hex::encode))
             .collect();
         let exclude: Vec<String> = before.values().map(hex::encode).collect();
-        let thin = match tips.is_empty() {
-            true => vec![],
-            false => self.repo.git().thin_pack_bytes(&tips, &exclude)?,
-        };
-        let carried = carried(prev.as_ref());
         let has_snapshot = v2
             .iter()
             .flat_map(|v| v.heads())
             .any(|(_, h)| !h.body.snapshot.is_empty());
-        let snapshot = !has_snapshot
-            || self
-                .snapshot_due(prev.as_ref(), &carried, thin.len())
-                .await?;
+        let carried = carried(prev.as_ref());
+        let layers = match (&prev, has_snapshot) {
+            (Some(p), true) => {
+                let dev = self.own_device(p)?;
+                let hashes = &p.head.body.snapshot;
+                manifest_cache::facts(self.a, self.repo, &self.rid(), &dev, hashes).await?
+            }
+            _ => vec![],
+        };
+        let due = |new: usize| !has_snapshot || snapshot_due(&layers, &carried, new);
+        // A push whose snapshot is due with any new piece (always so without a snapshot)
+        // never sends a thin pack, so it neither builds nor encodes one. Only then is it
+        // asked whether it carries new objects: a refs-only push stays a head push.
+        let git = self.repo.git();
+        let forced = !tips.is_empty() && due(1) && git.has_new_objects(&tips, &exclude)?;
+        let thin = match tips.is_empty() || forced {
+            true => vec![],
+            false => git.thin_pack_bytes(&tips, &exclude, MAX_PACK_SIZE)?,
+        };
+        // Its zlib fallback can still pass what readers decode: send a snapshot instead.
+        let oversize = thin.len() as u64 > MAX_PACK_SIZE;
+        let (codec, stored) = match thin.is_empty() || oversize {
+            true => (codec::Codec::Raw, vec![]),
+            false => codec::encode(&thin),
+        };
+        let snapshot = forced || oversize || due(stored.len());
+        let keep_layers = match snapshot {
+            true => layers_to_keep(&layers, |t| git.has_pack(t)),
+            false => vec![],
+        };
         Ok(Plan {
             prev,
             refs,
             before,
             after,
             thin,
+            stored,
+            codec,
             snapshot,
+            keep_layers,
             carried,
         })
     }
@@ -352,57 +446,52 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
         }
     }
 
-    /// The signed `base` of an update (head-model 8): the pinned program's accepted head
-    /// if `new` fast-forwards it, else the merged oid if `new` fast-forwards that, by git
-    /// ancestry in the cache (which holds both), else empty.
-    fn base(&self, merged: &Merged, name: &str, new: Option<&[u8]>) -> Vec<u8> {
-        let Some(new) = new else { return vec![] };
-        let accepted = self
-            .view
-            .program
-            .as_ref()
-            .and_then(|e| e.outcome.heads.get(name));
-        let winner = merged
-            .get(name)
-            .filter(|w| !w.entry.is_tombstone())
-            .map(|w| &w.entry.oid);
-        [accepted, winner]
+    /// The signed `base` of each update (head-model 8): the pinned program's accepted head
+    /// if the new oid fast-forwards it, else the merged oid if it fast-forwards that, by git
+    /// ancestry in the cache (which holds both), else empty. All ancestry checks of the
+    /// push run at once.
+    fn bases(&self, merged: &Merged, updates: &[(String, Option<Vec<u8>>)]) -> Vec<Vec<u8>> {
+        let candidates: Vec<Vec<&Vec<u8>>> = updates
+            .iter()
+            .map(|(name, new)| {
+                if new.is_none() {
+                    return vec![];
+                }
+                let accepted = self
+                    .view
+                    .program
+                    .as_ref()
+                    .and_then(|e| e.outcome.heads.get(name));
+                let winner = merged
+                    .get(name)
+                    .filter(|w| !w.entry.is_tombstone())
+                    .map(|w| &w.entry.oid);
+                [accepted, winner].into_iter().flatten().collect()
+            })
+            .collect();
+        let pairs: Vec<(&[u8], &[u8])> = updates
+            .iter()
+            .zip(&candidates)
+            .flat_map(|((_, new), olds)| {
+                let new = new.as_deref().unwrap_or_default();
+                olds.iter().map(move |old| (old.as_slice(), new))
+            })
+            .collect();
+        let mut answers = crate::program::are_ancestors(self.repo.git(), &pairs).into_iter();
+        candidates
             .into_iter()
-            .flatten()
-            .find(|old| crate::program::is_ancestor(self.repo.git(), old, new) == Some(true))
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Head-model 4.4: piece bytes over max(1 MiB, 25% of the snapshot), 64 packs, or
-    /// more pieces than one head may list.
-    async fn snapshot_due(
-        &self,
-        prev: Option<&Prev>,
-        carried: &[HeadPack],
-        new: usize,
-    ) -> Result<bool> {
-        let new_pieces = new.div_ceil(PIECE_SIZE);
-        let pieces: usize = carried.iter().map(|p| p.pieces.len()).sum::<usize>() + new_pieces;
-        if pieces > charter_core::MAX_HEAD_PIECES
-            || carried.len() + usize::from(new > 0) > SNAPSHOT_MAX_PUSHES
-        {
-            return Ok(true);
-        }
-        let snap_bytes: u64 = match prev {
-            Some(p) => {
-                let dev = self.own_device(p)?;
-                crate::pieces::snapshot_manifests(self.a, &self.rid(), &dev, &p.head.body.snapshot)
-                    .await?
+            .map(|olds| {
+                let ok: Vec<bool> = olds
                     .iter()
-                    .map(|(_, m)| m.size)
-                    .sum()
-            }
-            None => 0,
-        };
-        // shortcut: counts every piece as full, so a refresh comes slightly early.
-        let piece_bytes = (pieces * PIECE_SIZE) as u64;
-        Ok(piece_bytes > SNAPSHOT_MIN_BYTES.max(snap_bytes / 4))
+                    .map(|_| answers.next().flatten() == Some(true))
+                    .collect();
+                olds.into_iter()
+                    .zip(ok)
+                    .find(|(_, ok)| *ok)
+                    .map(|(old, _)| old.clone())
+                    .unwrap_or_default()
+            })
+            .collect()
     }
 
     pub(crate) fn own_device(&self, p: &Prev) -> Result<charter_core::Device> {
@@ -421,23 +510,125 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
     }
 }
 
-/// The previous body's packs with `tx = 0` replaced by the tx that carried it.
-fn carried(prev: Option<&Prev>) -> Vec<HeadPack> {
+/// Head-model 4.4: piece bytes over max(1 MiB, 25% of the snapshot's layers), 64 packs,
+/// or more pieces than one head may list.
+fn snapshot_due(layers: &[manifest_cache::Facts], carried: &[Pack], new: usize) -> bool {
+    let new_pieces = new.div_ceil(PIECE_SIZE);
+    let pieces: usize = carried.iter().map(Pack::piece_count).sum::<usize>() + new_pieces;
+    if pieces > charter_core::MAX_HEAD_PIECES
+        || carried.len() + usize::from(new > 0) > SNAPSHOT_MAX_PUSHES
+    {
+        return true;
+    }
+    let snap_bytes: u64 = layers.iter().map(|f| f.size).sum();
+    // shortcut: counts every piece as full, so a refresh comes slightly early.
+    let piece_bytes = (pieces * PIECE_SIZE) as u64;
+    piece_bytes > SNAPSHOT_MIN_BYTES.max(snap_bytes / 4)
+}
+
+/// Layered refresh policy (speed-and-cost 2.8): keep every current layer and add one while
+/// fewer than [`MAX_LAYERS`] exist and each layer's pack is in the cache (`cached(trailer)`);
+/// otherwise keep none, so the refresh rewrites one compact snapshot. One rewrite in eight
+/// refreshes bounds both the layer count and the bytes of deleted refs kept alive.
+pub fn layers_to_keep(
+    layers: &[manifest_cache::Facts],
+    cached: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let ok = !layers.is_empty()
+        && layers.len() < MAX_LAYERS
+        && layers
+            .iter()
+            .all(|f| !f.trailer.is_empty() && cached(&f.trailer));
+    match ok {
+        true => layers.iter().map(|f| f.trailer.clone()).collect(),
+        false => vec![],
+    }
+}
+
+/// The previous body's packs with `tx = 0` (v2) or `PieceRun::HERE` (v3) replaced by the
+/// tx that carried it.
+fn carried(prev: Option<&Prev>) -> Vec<Pack> {
     let Some(p) = prev else { return vec![] };
+    let l = &p.landing;
     p.head
-        .body
         .packs
         .iter()
-        .map(|pk| HeadPack {
-            pack_id: pk.pack_id,
-            pieces: pk
-                .pieces
-                .iter()
-                .map(|x| charter_core::PieceRef {
-                    tx: if x.tx == ZERO { p.landing.tx } else { x.tx },
-                    sha256: x.sha256,
-                })
-                .collect(),
+        .map(|pk| Pack {
+            pieces: match &pk.pieces {
+                PackPieces::Txs(t) => PackPieces::Txs(
+                    t.iter()
+                        .map(|x| PieceRef {
+                            tx: if x.tx == ZERO { l.tx } else { x.tx },
+                            sha256: x.sha256,
+                        })
+                        .collect(),
+                ),
+                PackPieces::Runs(r) => PackPieces::Runs(here_at(r, l)),
+            },
+            ..pk.clone()
         })
         .collect()
+}
+
+/// `runs` with `PieceRun::HERE` replaced by the landing `l` of the body that listed them.
+pub fn here_at(runs: &[PieceRun], l: &LandingJson) -> Vec<PieceRun> {
+    runs.iter()
+        .map(|r| match *r == PieceRun::HERE {
+            true => PieceRun {
+                block: l.block,
+                index: l.index,
+                count: 1,
+            },
+            false => *r,
+        })
+        .collect()
+}
+
+/// Whether the push after `prev` migrates this device's head to format v3 (head-model 13.4).
+pub fn migrates(prev: Option<&Prev>) -> bool {
+    prev.is_some_and(|p| p.head.format == HeadFormat::V2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use manifest_cache::Facts;
+
+    fn f(size: u64, t: &str) -> Facts {
+        Facts {
+            size,
+            trailer: t.into(),
+        }
+    }
+
+    #[test]
+    fn a_refresh_adds_a_layer_until_the_layer_cap() {
+        let yes = |_: &str| true;
+        assert!(layers_to_keep(&[], yes).is_empty(), "no snapshot: full");
+        assert_eq!(layers_to_keep(&[f(100, "a")], yes), ["a"]);
+        assert_eq!(layers_to_keep(&[f(100, "a"), f(400, "b")], yes), ["a", "b"]);
+        let many: Vec<Facts> = (0..MAX_LAYERS as u64).map(|i| f(i + 1, "x")).collect();
+        assert_eq!(layers_to_keep(&many[1..], yes).len(), MAX_LAYERS - 1);
+        assert!(layers_to_keep(&many, yes).is_empty(), "layer cap: compact");
+    }
+
+    #[test]
+    fn a_layer_whose_pack_left_the_cache_forces_a_full_snapshot() {
+        let layers = [f(100, "a"), f(10, "b")];
+        assert!(layers_to_keep(&layers, |t| t != "b").is_empty());
+        assert!(
+            layers_to_keep(&[f(100, "")], |_| true).is_empty(),
+            "unknown trailer"
+        );
+    }
+
+    #[test]
+    fn snapshot_due_counts_every_layer() {
+        let one = [f(8 << 20, "a")];
+        let two = [f(4 << 20, "a"), f(4 << 20, "b")];
+        let pieces = 2 << 20;
+        assert!(!snapshot_due(&one, &[], pieces), "2 MiB under 25% of 8 MiB");
+        assert!(!snapshot_due(&two, &[], pieces), "the same over two layers");
+        assert!(snapshot_due(&[f(4 << 20, "a")], &[], pieces));
+    }
 }

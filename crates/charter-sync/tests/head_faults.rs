@@ -4,7 +4,7 @@
 
 mod common;
 
-use charter_core::{HeadBody, Observed, Rid};
+use charter_core::{Observed, Rid};
 use charter_store::{Address, Arkiv, SignedTx, TxParams, U256};
 use charter_sync::heads::{LANDING_WINDOW, calldata_rows, landing};
 use charter_sync::keys::Keys;
@@ -42,9 +42,13 @@ async fn device_view(net: &Net, p: &Peer, rid: &Rid) -> charter_sync::heads::Dev
 /// The signed head envelope a mined tx carried.
 async fn head_envelope(net: &Net, tx: [u8; 32]) -> Vec<u8> {
     let mined = net.mem.mined_tx(tx.into()).await.expect("rpc").expect("tx");
+    // A create or full patch names its kind; a v3 minimal patch is `ag.body` and `ag.h` only.
     let row: Observed = calldata_rows(net, &mined)
         .into_iter()
-        .find(|o| o.attr("ag.kind") == Some(&charter_core::AttrValue::Str("head".into())))
+        .find(|o| {
+            o.attr("ag.kind") == Some(&charter_core::AttrValue::Str("head".into()))
+                || charter_core::open_head_calldata(o).is_ok()
+        })
         .expect("head row");
     body_of(&row)
 }
@@ -64,7 +68,7 @@ async fn a_head_patched_back_to_an_older_signed_body_fails_closed() {
     let old = head_envelope(&net, head.body.prev_tx).await;
     let dev = dev_of(&alice);
     net.fund(dev.control_address(&rid));
-    let op = entity_patch_op::<HeadBody>(head.key, &old).expect("op");
+    let op = entity_patch_op::<charter_core::HeadBodyV3>(head.key, &old).expect("op");
     send_ops(&net, &dev.control(&rid), vec![op]).await;
 
     let carol = Peer::new(&net, 3);
@@ -88,7 +92,7 @@ async fn landing_skips_a_reverted_tx_and_a_create_of_another_entity() {
     let mut head = d.head.clone().expect("head");
     // Replays below carry the seq 0 body; search for that body's `h`.
     let env = head_envelope(&net, head.body.prev_tx).await;
-    head.h = charter_core::content_hash(charter_core::Kind::Head, &env);
+    head.h = charter_core::content_hash(charter_core::Kind::HeadV3, &env);
 
     let dev = dev_of(&alice);
     let signer = dev.control(&rid);
@@ -97,7 +101,7 @@ async fn landing_skips_a_reverted_tx_and_a_create_of_another_entity() {
     // 1. A patch of the head carrying this body, mined and reverted (sent by hand: the
     // pipeline would resend a failed tx that re-estimates fine).
     net.mem.revert_next_at(0);
-    let patch = entity_patch_op::<HeadBody>(head.key, &env).expect("op");
+    let patch = entity_patch_op::<charter_core::HeadBodyV3>(head.key, &env).expect("op");
     let c_d = dev.control_address(&rid);
     let params = TxParams {
         nonce: net.mem.tx_count(c_d).await.expect("nonce"),
@@ -122,7 +126,7 @@ async fn landing_skips_a_reverted_tx_and_a_create_of_another_entity() {
     send_ops(
         &net,
         &signer,
-        vec![entity_op::<HeadBody>(&env, 100).expect("op")],
+        vec![entity_op::<charter_core::HeadBodyV3>(&env, 100).expect("op")],
     )
     .await;
     // 3. The real patch.
@@ -282,7 +286,10 @@ async fn raw_head_seq(net: &Net, rid: &Rid) -> u64 {
     let [row] = rows.as_slice() else {
         panic!("one head entity, got {}", rows.len())
     };
-    charter_core::open::<HeadBody>(row).expect("head").body.seq
+    charter_core::open::<charter_core::HeadBodyV3>(row)
+        .expect("head")
+        .body
+        .seq
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -333,6 +340,63 @@ async fn a_copied_seed_with_a_head_tx_in_flight_cannot_land_a_second_head() {
         "E_CONCURRENT_PUSH",
         "B fails instead of landing behind A"
     );
+    net.mine(1);
+    assert_eq!(
+        raw_head_seq(&net, &rid).await,
+        0,
+        "no second head body landed"
+    );
+}
+
+/// H1 with the confirmed count read once, in `setup`: a tx of `C_d` that lands after it
+/// without creating an entity (so `entityNonce` does not move) takes the head tx's nonce,
+/// and the push stops with `E_CONCURRENT_PUSH` instead of signing at the next nonce.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmed_count_gone_stale_after_setup_fails_with_concurrent_push() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "stale-count").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    pushed(&net, &alice, &rid, tmp.path(), 1).await;
+    let work = tmp.path().join("work");
+    commit(&work, &[("f", b"next")], "feat: next");
+    let repo = alice.repo(&rid);
+    let hp = Box::pin(prepare2(
+        &net,
+        &alice,
+        &repo,
+        &work,
+        &[upd("refs/heads/main")],
+    ))
+    .await
+    .expect("prepare");
+    let ready = Box::pin(hp.setup()).await.expect("setup");
+    let c_d = dev_of(&alice).control_address(&rid);
+    let nonce = net.entity_nonce(c_d).await.expect("entityNonce");
+    let state = charter_sync::state::State::load(&repo.state_path()).expect("state");
+    let plan = Box::pin(hp.plan(&state)).await.expect("plan");
+
+    // Another holder of this device seed spends from `C_d` and it lands.
+    let params = TxParams {
+        nonce: net.mem.tx_count(c_d).await.expect("nonce"),
+        to: c_d,
+        value: U256::ZERO,
+        input: Default::default(),
+        gas_limit: 21_000,
+        max_fee_per_gas: 2_000_000_000,
+        max_priority_fee_per_gas: 0,
+    };
+    let tx = SignedTx::sign(&dev_of(&alice).control(&rid), CHAIN, params).expect("sign");
+    net.mem.send(tx).await.expect("send");
+    net.mine(1);
+    assert_eq!(net.entity_nonce(c_d).await.expect("entityNonce"), nonce);
+
+    let pre = charter_sync::head_send::Pre {
+        ready: Some(ready),
+        nonce: Some(nonce),
+    };
+    let r = Box::pin(hp.finish_with(plan, pre)).await;
+    assert_eq!(code(r), "E_CONCURRENT_PUSH");
     net.mine(1);
     assert_eq!(
         raw_head_seq(&net, &rid).await,

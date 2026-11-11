@@ -101,6 +101,12 @@ impl Git {
 
     /// Runs git with `stdin`, returns stdout; a non-zero exit is an error with stderr.
     pub fn run(&self, args: &[&str], stdin: &[u8]) -> Result<Vec<u8>> {
+        let _t = charter_store::trace::span(|| {
+            format!(
+                "git {}",
+                args.join(" ").chars().take(80).collect::<String>()
+            )
+        });
         let mut child = self
             .command(args)
             .stdin(Stdio::piped())
@@ -127,6 +133,12 @@ impl Git {
 
     /// The exit code of `git <args>` (no stdin, output dropped); `None` if killed by a signal.
     pub fn exit_code(&self, args: &[&str]) -> Result<Option<i32>> {
+        let _t = charter_store::trace::span(|| {
+            format!(
+                "git {}",
+                args.join(" ").chars().take(80).collect::<String>()
+            )
+        });
         let status = self
             .command(args)
             .stdin(Stdio::null())
@@ -158,6 +170,12 @@ impl Git {
 
     /// `git <args>` with a file as stdin.
     pub fn run_with_file(&self, args: &[&str], file: &Path) -> Result<Vec<u8>> {
+        let _t = charter_store::trace::span(|| {
+            format!(
+                "git {}",
+                args.join(" ").chars().take(80).collect::<String>()
+            )
+        });
         let f = std::fs::File::open(file).map_err(|e| SyncError::io(file.display(), e))?;
         let out = self
             .command(args)
@@ -190,24 +208,33 @@ impl Git {
         }
         let hooks = dir.join("no-hooks");
         std::fs::create_dir_all(&hooks).map_err(|e| SyncError::io(hooks.display(), e))?;
-        let hooks = hooks.to_string_lossy().into_owned();
-        for (k, v) in [
-            ("uploadpack.allowAnySHA1InWant", "true"),
-            ("core.hooksPath", hooks.as_str()),
-            ("gc.auto", "0"),
-            ("core.logAllRefUpdates", "false"),
-        ] {
-            g.run(&["config", k, v], b"")?;
-        }
+        // One append instead of four `git config` spawns (git reads the last value).
+        let quoted = hooks
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let extra = format!(
+            "[uploadpack]\n\tallowAnySHA1InWant = true\n[core]\n\thooksPath = \"{quoted}\"\n\tlogAllRefUpdates = false\n[gc]\n\tauto = 0\n"
+        );
+        let config = dir.join("config");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config)
+            .and_then(|mut f| f.write_all(extra.as_bytes()))
+            .map_err(|e| SyncError::io(config.display(), e))?;
         Ok(g)
     }
 
     /// `(name, oid)` of every ref under `prefix`.
     pub fn refs(&self, prefix: &str) -> Result<Vec<(String, String)>> {
-        let out = self.run(
-            &["for-each-ref", "--format=%(refname) %(objectname)", prefix],
-            b"",
-        )?;
+        self.refs_under(&[prefix])
+    }
+
+    /// `(name, oid)` of every ref under any of `prefixes`, in one `for-each-ref`.
+    pub fn refs_under(&self, prefixes: &[&str]) -> Result<Vec<(String, String)>> {
+        let mut args = vec!["for-each-ref", "--format=%(refname) %(objectname)"];
+        args.extend_from_slice(prefixes);
+        let out = self.run(&args, b"")?;
         Ok(String::from_utf8_lossy(&out)
             .lines()
             .filter_map(|l| l.split_once(' '))
@@ -253,31 +280,89 @@ impl Git {
     }
 
     /// One thin pack of everything reachable from `tips` and not from `exclude`, in memory
-    /// (format v2 pieces); empty when there is nothing to send.
+    /// and without per-object zlib (format v3 pieces, brotli-encoded by the caller,
+    /// head-model 13.3); empty when there is nothing to send.
     /// Exclusions this cache lacks (another device's tips it has not fetched) are dropped:
     /// the pack may then repeat objects, but never names one git cannot find.
-    pub fn thin_pack_bytes(&self, tips: &[String], exclude: &[String]) -> Result<Vec<u8>> {
+    /// A pack without zlib larger than `cap` (what readers decode at most) is built again
+    /// with git's zlib, as v0.4.0 sent it.
+    pub fn thin_pack_bytes(
+        &self,
+        tips: &[String],
+        exclude: &[String],
+        cap: u64,
+    ) -> Result<Vec<u8>> {
         let exclude = self.present(exclude)?;
         let input = rev_input(tips, &exclude);
-        let bytes = self.run(
-            &[
-                "pack-objects",
-                "--revs",
-                "-q",
-                "--thin",
-                "--stdout",
-                "--delta-base-offset",
-            ],
-            input.as_bytes(),
-        )?;
+        let args = [
+            "pack-objects",
+            "--revs",
+            "-q",
+            "--thin",
+            "--stdout",
+            "--delta-base-offset",
+        ];
+        let mut bytes = self.run(&[&args[..], NO_ZLIB_ARGS].concat(), input.as_bytes())?;
+        if bytes.len() as u64 > cap {
+            bytes = self.run(&args, input.as_bytes())?;
+        }
         let empty = bytes.len() < PACK_HEADER + 20
             || u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) == 0;
         Ok(if empty { vec![] } else { bytes })
     }
 
-    /// Self-contained packs of everything reachable from `tips` (format v2 snapshots).
-    pub fn full_packs_of(&self, tips: &[String], prefix: &Path) -> Result<Vec<PathBuf>> {
-        self.full_packs(tips, &[], prefix)
+    /// Whether anything reachable from `tips` is missing from `exclude` (as for
+    /// [`Self::thin_pack_bytes`]): one object answers, so a refs-only push costs one spawn.
+    pub fn has_new_objects(&self, tips: &[String], exclude: &[String]) -> Result<bool> {
+        let input = rev_input(tips, &self.present(exclude)?);
+        let args = ["rev-list", "--objects", "--max-count=1", "--stdin"];
+        Ok(!self.run(&args, input.as_bytes())?.is_empty())
+    }
+
+    /// Snapshot packs (head-model 4.4 and 13.3): self-contained packs of everything reachable
+    /// from `tips` that no pack in `keep` (git pack trailers of packs in this repo) holds,
+    /// with deltas searched afresh and without per-object zlib. Objects of `keep` are never
+    /// delta bases, so each layer indexes alone. If any pack would decode past `cap` (what
+    /// readers accept), all are built again with git's zlib, as v0.4.0 built them.
+    pub fn snapshot_packs(
+        &self,
+        tips: &[String],
+        keep: &[String],
+        prefix: &Path,
+        cap: u64,
+    ) -> Result<Vec<PathBuf>> {
+        let keep: Vec<String> = keep
+            .iter()
+            .map(|t| format!("--keep-pack=pack-{t}.pack"))
+            .collect();
+        let build = |zlib: &[&str]| {
+            let mut extra: Vec<&str> = SNAPSHOT_PACK_ARGS.to_vec();
+            extra.extend_from_slice(zlib);
+            extra.extend(keep.iter().map(String::as_str));
+            self.full_packs_with(tips, &[], prefix, &extra)
+        };
+        let packs = build(NO_ZLIB_ARGS)?;
+        let size = |p: &PathBuf| p.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+        if packs.iter().all(|p| size(p) <= cap) {
+            return Ok(packs);
+        }
+        for p in &packs {
+            let _ = std::fs::remove_file(p);
+        }
+        build(&[])
+    }
+
+    /// Whether this repo holds the pack with git trailer `trailer`.
+    pub fn has_pack(&self, trailer: &str) -> bool {
+        let dir = match &self.git_dir {
+            Some(d) => d.join("objects/pack"),
+            None => match self.run(&["rev-parse", "--absolute-git-dir"], b"") {
+                Ok(out) => PathBuf::from(String::from_utf8_lossy(&out).trim()).join("objects/pack"),
+                Err(_) => return false,
+            },
+        };
+        trailer.bytes().all(|b| b.is_ascii_hexdigit())
+            && dir.join(format!("pack-{trailer}.pack")).is_file()
     }
 
     /// At most one thin pack; `None` when it would exceed the 100 MiB manifest cap.
@@ -319,19 +404,28 @@ impl Git {
         exclude: &[String],
         prefix: &Path,
     ) -> Result<Vec<PathBuf>> {
+        self.full_packs_with(tips, exclude, prefix, &[])
+    }
+
+    fn full_packs_with(
+        &self,
+        tips: &[String],
+        exclude: &[String],
+        prefix: &Path,
+        extra: &[&str],
+    ) -> Result<Vec<PathBuf>> {
         let input = rev_input(tips, exclude);
         let prefix_s = prefix.to_string_lossy().into_owned();
-        let out = self.run(
-            &[
-                "pack-objects",
-                "--revs",
-                "-q",
-                "--max-pack-size=100m",
-                "--delta-base-offset",
-                &prefix_s,
-            ],
-            input.as_bytes(),
-        )?;
+        let mut args = vec![
+            "pack-objects",
+            "--revs",
+            "-q",
+            "--max-pack-size=100m",
+            "--delta-base-offset",
+        ];
+        args.extend_from_slice(extra);
+        args.push(&prefix_s);
+        let out = self.run(&args, input.as_bytes())?;
         let mut packs = vec![];
         for hash in String::from_utf8_lossy(&out).lines() {
             let pack = PathBuf::from(format!("{prefix_s}-{hash}.pack"));
@@ -431,7 +525,14 @@ impl Git {
     }
 }
 
-/// Object count from a pack header (0 for an empty pack).
+/// `pack-objects` options of snapshot packs: deltas searched afresh with window 50
+/// (MEASURED in speed-and-cost 2.8).
+const SNAPSHOT_PACK_ARGS: &[&str] = &["--no-reuse-delta", "--window=50"];
+
+/// Packs the writer brotli-encodes whole (head-model 13.3): no per-object zlib, and objects
+/// never copied from existing (zlib) packs.
+const NO_ZLIB_ARGS: &[&str] = &["--no-reuse-object", "--compression=0"];
+
 /// Largest pack one manifest can name (1,600 chunks of 64 KiB).
 const MAX_PACK_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -450,6 +551,7 @@ fn rev_input(tips: &[String], exclude: &[String]) -> String {
     input
 }
 
+/// Object count from a pack header (0 for an empty pack).
 pub fn pack_object_count(pack: &Path) -> Result<u32> {
     use std::io::Read;
     let mut f = std::fs::File::open(pack).map_err(|e| SyncError::io(pack.display(), e))?;
@@ -460,4 +562,162 @@ pub fn pack_object_count(pack: &Path) -> Result<u32> {
         return Err(SyncError::coded(ErrorCode::BadPack, "not a git pack"));
     }
     Ok(u32::from_be_bytes([h[8], h[9], h[10], h[11]]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    fn noise(len: usize) -> Vec<u8> {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    }
+
+    /// Two near-identical 200 KB blobs, packed without deltas (as old pushes leave them).
+    fn undeltified_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = tmp.path();
+        sh(d, &["init", "-q"]);
+        let mut blob = noise(200_000);
+        std::fs::write(d.join("a.bin"), &blob).expect("write");
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-qm", "one"]);
+        blob[100] ^= 1;
+        std::fs::write(d.join("a.bin"), &blob).expect("write");
+        sh(d, &["commit", "-qam", "two"]);
+        sh(d, &["repack", "-adq", "--window=0", "--depth=0"]);
+        tmp
+    }
+
+    /// A repo whose one commit holds a 3 MB text blob: about 3 MB without zlib, 13 KB with.
+    fn text_blob_repo() -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = tmp.path();
+        sh(d, &["init", "-q"]);
+        let text: Vec<u8> = (0..3_000_000).map(|i| b"fn main() {}\n"[i % 13]).collect();
+        std::fs::write(d.join("big.rs"), &text).expect("write");
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-qm", "one"]);
+        let head = sh(d, &["rev-parse", "HEAD"]);
+        (tmp, head)
+    }
+
+    #[test]
+    fn a_snapshot_pack_that_would_decode_past_the_cap_is_built_with_zlib() {
+        let (tmp, head) = text_blob_repo();
+        let g = Git::work(Some(tmp.path()));
+        let cap = 1 << 20;
+        let packs = g
+            .snapshot_packs(&[head], &[], &tmp.path().join("snap"), cap)
+            .expect("pack");
+        assert!(!packs.is_empty());
+        for p in &packs {
+            let size = p.metadata().expect("meta").len();
+            assert!(size <= cap, "{size} B decodes past the {cap} B reader cap");
+        }
+    }
+
+    #[test]
+    fn a_thin_pack_that_would_decode_past_the_cap_is_built_with_zlib() {
+        let (tmp, head) = text_blob_repo();
+        let g = Git::work(Some(tmp.path()));
+        let small = g
+            .thin_pack_bytes(std::slice::from_ref(&head), &[], 1 << 20)
+            .expect("pack");
+        assert!(small.len() <= 1 << 20, "{} B", small.len());
+        let raw = g.thin_pack_bytes(&[head], &[], 1 << 30).expect("pack");
+        assert!(raw.len() > 2_000_000, "under the cap the pack has no zlib");
+    }
+
+    #[test]
+    fn a_new_cache_is_configured_without_extra_spawns() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("odd \"dir\\").join("git");
+        let g = Git::init_cache(&dir).expect("init");
+        let get = |k: &str| {
+            String::from_utf8(g.run(&["config", "--get", k], b"").expect(k)).expect("utf8")
+        };
+        assert_eq!(get("uploadpack.allowAnySHA1InWant").trim(), "true");
+        assert_eq!(get("gc.auto").trim(), "0");
+        assert_eq!(get("core.logAllRefUpdates").trim(), "false");
+        assert_eq!(
+            PathBuf::from(get("core.hooksPath").trim()),
+            dir.join("no-hooks")
+        );
+        assert!(Git::init_cache(&dir).is_ok(), "reopening is a no-op");
+    }
+
+    #[test]
+    fn snapshot_packs_recompute_deltas_the_cache_lacks() {
+        let tmp = undeltified_repo();
+        let g = Git::work(Some(tmp.path()));
+        let head = sh(tmp.path(), &["rev-parse", "HEAD"]);
+        let packs = g
+            .snapshot_packs(&[head], &[], &tmp.path().join("snap"), MAX_PACK_BYTES)
+            .expect("pack");
+        let size: u64 = packs
+            .iter()
+            .map(|p| p.metadata().expect("meta").len())
+            .sum();
+        assert!(size < 300_000, "second blob stored as a delta: {size} B");
+    }
+
+    #[test]
+    fn a_layer_leaves_out_every_object_of_the_kept_packs() {
+        let tmp = undeltified_repo();
+        let d = tmp.path();
+        let g = Git::work(Some(d));
+        let pack = sh(d, &["rev-parse", "--git-path", "objects/pack"]);
+        let kept: Vec<String> = std::fs::read_dir(d.join(&pack))
+            .expect("dir")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|n| Some(n.strip_prefix("pack-")?.strip_suffix(".pack")?.to_owned()))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert!(g.has_pack(&kept[0]));
+        assert!(!g.has_pack(&"0".repeat(40)));
+        std::fs::write(d.join("b.txt"), b"new").expect("write");
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-qm", "three"]);
+        let head = sh(d, &["rev-parse", "HEAD"]);
+        let layer = g
+            .snapshot_packs(
+                std::slice::from_ref(&head),
+                &kept,
+                &d.join("layer"),
+                MAX_PACK_BYTES,
+            )
+            .expect("layer");
+        assert_eq!(layer.len(), 1);
+        // The new commit, its tree and the new blob; nothing of the kept pack.
+        assert_eq!(pack_object_count(&layer[0]).expect("count"), 3);
+    }
 }

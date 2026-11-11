@@ -161,6 +161,33 @@ The next body of the same device replaces every `stamp = 0` and every zero piece
 - The connectivity check, the canonical-ref quorum and the program fold run on the merged refs exactly as on P1 refs.
 - A clone therefore costs one snapshot plus at most the piece bytes since it, whatever the history length, and old blocks being pruned loses nothing a user can see once the snapshot exists.
 
+### 5.6 Speculative sync and the head probe
+
+A full sync records every query its view build and program reads sent, with the pages that came back, in `view-memo.json` next to the repo's `state.json`.
+`entityNonce` reads and count-only queries (the completeness counts of design 3.3) are never recorded: they are always sent live, in the build's order, so every nonce is still read after the rows it checks.
+A recorded page is served at most once per sync, so a second read of the same rows (the full bracket of section 6 after the short form failed) always goes to the network.
+
+The next sync of the repo takes one of three paths, falling back to the next on any failure:
+
+1. Replay, when the last full sync is less than 10 minutes old (`CHARTER_PROBE_WINDOW_SECS` overrides, in seconds) and the probe is unchanged.
+   The probe is one paged query for the `(key, $updatedAt)` of every `id`, `idacc`, `bind`, `anchor` and `head` entity of the repo, and, for a repo that pins a program, the `(key, $updatedAt)` of its ops (a count alone misses an extend, or an expiry and a create in one block); both lists go out in one round with the live nonce reads, and the op list adds a round only when it alone runs past one page.
+   Any create, delete, patch, extend or expiry of those entities changes the list, so a new push, a rollback patch, a deleted or hidden head, a new device delegation and an identity revision are all seen at once.
+   Only pages read at or after the probe's block are replayed (anything a page missed then happened after the probe, so it changes the next probe); the rest are sent live.
+2. Speculative: every recorded query is sent at once, and the build is served from those answers; queries it did not record go out as before.
+3. The plain build.
+
+A replayed or speculative sync takes the probe's block as the chain head instead of asking the node for it.
+With `CHARTER_TRACE=1` each sync prints the path it took.
+
+What a replay can miss until the next full sync (at most the window, 10 minutes by default):
+
+- The deletion or expiry of a v1 `refs` entity, a v1 manifest or snapshot chunks: content-addressed entities whose kinds the probe does not list.
+  Chunks are read live by the download anyway; a missed refs or manifest deletion only delays `E_NOT_LIVE` for that peer.
+- The deletion or expiry of a `peer` document (it carries no `ag.rid`).
+  A peer document only binds a key to a nid that hashes it, so no other key can take its place.
+- For a pinned repo, one op deleted and another created in the same window: the op count is unchanged.
+- Anything a lying RPC hides, which is no change from the trust model without the probe.
+
 ## 6. Completeness and the rollback invariant
 
 Rules for the device control address `C_d`:
@@ -169,7 +196,8 @@ Rules for the device control address `C_d`:
 - Every head transaction creates at least one entity from `C_d`.
 - `body.pieces_created = entityNonce(C_d) after the transaction - 1` (the 1 is the head itself).
 
-Check, run on every fetch for every device of every v2 peer: read `n1 = entityNonce(C_d)`, then the heads, then `n2 = entityNonce(C_d)`; retry up to 4 times while `n1 != n2`; then require `head.pieces_created + 1 = n1`, else fail closed with `E_CONTROL_NOT_LIVE`.
+Check, run on every fetch for every device of every v2 peer: read the heads, then `n = entityNonce(C_d)`, and accept the head when `head.pieces_created + 1 = n` (or no head and `n = 0`).
+Anything else falls back to the full bracket: read `n1 = entityNonce(C_d)`, then the heads, then `n2 = entityNonce(C_d)`; retry up to 4 times while `n1 != n2`; then require `head.pieces_created + 1 = n1`, else fail closed with `E_CONTROL_NOT_LIVE`.
 This is the coordinator's invariant `live control-plane entities of C_d + pieces_created = entityNonce(C_d)` with the head as the only control-plane entity of `C_d`, checked at the latest block, because Rabdi cannot answer for older blocks (section 2).
 
 Why a rollback is caught by a fresh client with no checkpoint and no local state:
@@ -180,12 +208,33 @@ Why a rollback is caught by a fresh client with no checkpoint and no local state
 4. So after the rollback `entityNonce(C_d) >= p_old + 2 > p_old + 1`, and the check fails.
 5. The same holds for a body replayed into a second head entity: the extra create raises `entityNonce` past every signed body.
 
+Why one nonce read after the heads is enough:
+
+- Along one device's body chain `pieces_created` strictly increases: a push signs only when `entityNonce(C_d)` equals its previous body's `pieces_created + 1` (section 7.1), and its own transaction adds at least one create; the repair of section 7.4 only raises it further.
+- Once a body lands, `entityNonce(C_d)` is at least its `pieces_created + 1` forever (step 3 above).
+- So a nonce read after the heads that equals the read head's `pieces_created + 1` is below every newer body's `pieces_created + 1`: no newer body had landed when the nonce was read, which is later than the heads were.
+- A push landing between the two reads raises the nonce past the read head's claim, so the short form fails and the full bracket decides, exactly as before.
+- Rabdi answers `entityNonce` only at the latest block, so the read cannot be pinned to the query's block (`arkiv_query` takes `atBlock`, `eth_call` does not); the short form costs two round trips per device instead of three.
+
+The completeness observation of design 3.3 takes the same short form: the live count of the control address, then one `entityNonce` read, accepted when they are equal, else the full (nonce, count, nonce) observation.
+A live count never exceeds what the address created and the nonce never decreases, so a count equal to a later nonce was complete when it was read.
+A peer's completeness observations and its device heads are read at the same time and judged in the old order, so a no-op fetch of a v2 peer costs two sequential round trips after discovery instead of four.
+
+An over-claiming body: a body that records more creates than `C_d` had made when it landed, from a buggy or malicious holder of the device seed.
+
+- While it is current every reader fails closed (`entityNonce(C_d) < pieces_created + 1`), and its own device cannot push past it (section 7.1 needs equality).
+- It can be rolled back to later only from a newer body that records no more than it does, which honest code never signs (first point above): whoever signed that newer body holds the device key and could sign any refs for this device directly, so the rollback adds nothing to that power.
+- The full bracket does not close it either: a holder of `C_d` can create entities until `entityNonce(C_d)` equals the old claim plus 1 and then stop, and `n1 = n2 = pieces_created + 1` holds for the old body.
+  The two reads differ only while creates land between them, which the short form already turns into a fallback.
+- A lying RPC can report any nonce, with either form.
+- Closing it would need the nonce at the old body's landing block, which Rabdi does not serve; readers that saw a newer head reject the old one by seq (section 5.2, rule 5).
+
 Why an honest device never fails it:
 
 - Pieces that must land before the head (big pushes) come from `B_d`, never from `C_d`, so a crash between them and the head leaves `C_d` untouched.
 - The head transaction is one atomic `execute`, so the nonce and the body change together.
 - The writer computes `pieces_created` from `entityNonce(C_d)` read just before signing, so nothing it ever created is miscounted.
-- The `n1, n2` bracket removes the race with a push landing between the reads.
+- A push landing between the reads fails the short form and the `n1, n2` bracket decides.
 
 What it costs an attacker who only holds `C_d`: any create from `C_d` outside a head transaction breaks the check for every reader, which is a denial of service, the same power a stolen P1 control key already has (it can let an anchor expire); it can never produce an older or forged view that passes.
 Deleting the head is caught too: a delegated device with `entityNonce(C_d) > 0` and no head fails closed.
@@ -307,3 +356,98 @@ MEASURED on Rabdi on 2026-11-11 with the v0.4.0 release build rebased on `main` 
 - Private repo: first push 31.9 s, next push 12.2 s, clone 4.2 s; no ref name or content in plaintext calldata; a second device with only `keys/` copied gets `E_NOT_MEMBER` (section 9).
 - Migration of a v0.3.0 repo: one automatic push of 8 transactions (1,134,393 gas, 38.4 s); v0.3.0 fetch and clone of the migrated repo stop with `E_UNSUPPORTED_VERSION`.
 - The re-run on the build with the review fixes (concurrent pushes from a copied seed and from a fresh device, migration under a pinned program) is at the end of `docs/p5/speed-and-cost.md` section 3.15.
+
+## 13. Format v3 (design for v0.5.0, core code on branch `perf/b-lane-b`)
+
+Status: designed 2026-11-11 and wired on `perf/batch-b` the same day: every push writes v3, readers read v2 and v3.
+Format v3 changes only the bytes of the device head and of the packs it names; entities, keys, the rollback rule, the merge and the program fold stay as in sections 4 to 8.
+
+### 13.1 Encoding
+
+```cddl
+HeadBodyV3 = {               ; fields 1 to 8, 10 and 11 exactly as HeadBody (4.2)
+  9: [* PackV3],             ; packs since the snapshot, in apply order
+}
+PackV3   = [pack_id: bstr .size 32, codec: uint, runs: [+ PieceRun]]
+PieceRun = [block: uint, index: uint, count: uint]
+```
+
+- Signed by the device key with envelope kind code 13 and context `arkiv-git/head/v3`; the content hash is `H("head3", envelope)`.
+- Stored as `ag.kind = 'head'` with `ag.v = 3`, plus `ag.rid`, `ag.nid`, `ag.dev` and `ag.h` as in v2.
+- `pack_id = SHA-256(stored bytes)`, the concatenation of the pack's pieces in order, so integrity is checked before any decompression.
+- `codec = 0`: the stored bytes are the git pack; `codec = 1`: they are a brotli stream of it (13.3).
+- A run names `count` consecutive transactions of block `block` from index `index`; each contributes the bodies of its piece creates in op order.
+  `[0, 0, 1]` is the transaction carrying this body (inline pieces).
+  Bulk pieces are one create per transaction from `B_d`, so a 2 MiB push of 34 pieces in two blocks is two runs.
+- The per-piece SHA-256 of v2 is gone: the pack check already covers every byte, and a piece is useless alone.
+- The body rules of 4.2 still hold (strictly ascending refs, counters, stamps, oid lengths, `prev_tx`), plus: every pack has at least one run, every run `count >= 1`, block 0 only as `[0, 0, 1]`, a known codec, and at most 256 piece transactions in all.
+- Snapshot manifests of a v3 head use `pack_kind = 3` (a brotli stream of a self-contained pack): `pack_id`, `size` and the chunk hashes describe the stored bytes, `trailer` the git pack inside.
+
+### 13.2 Smaller head transactions
+
+- A head patch sets only `ag.body` and `ag.h`.
+  Arkiv applies a patch as attribute mutations merged into the stored entity (`arkiv-reth-executor`, `Op::Patch` with `apply_mutations`; `MemArkiv` does the same), so the other attributes stay as the create wrote them.
+  Readers that open a body from calldata (the landing search of 5.4 and the body walk of section 8) accept a row with only those two attributes when `ag.h` matches the envelope (`open_head_calldata`).
+- The marker piece of a push with no inline piece is a create with no attributes and an empty payload from `C_d`: it still raises `entityNonce(C_d)`, which is all the rollback rule needs.
+  A head tx that creates anything else from `C_d` (an inline piece or a snapshot manifest) sends no marker; `pieces_created` counts every create of `C_d` in head txs.
+- Snapshot manifests of up to 32 KiB in all are created by `C_d` in the head tx instead of by `B_d` beside the last chunks; larger ones keep the v2 path.
+  Readers and keepalive accept a manifest created by either device address.
+  Root cause (MEASURED by lane A, explained here): GolemDB charges `write.index_term_create` (about 2,004 units in the genesis weights) for each index term it does not find, and it looks terms up in the commit the block started from (`IndexJoin.create_term = !reader.origin_term_exists(..)` in `golemdb/crates/record/src/plan.rs`).
+  A manifest in the same block as its chunks therefore pays again for terms the chunks create in that block, about 6k gas more than v0.4.0, which sent it a block later.
+  In the head tx it lands a block after the chunks, needs no tx of its own and replaces the marker.
+- Private repos (a backend that seals) send full head patches: the sealing layer seals only ops naming `ag.rid` and `ag.kind`, and refuses a minimal patch rather than sending it in plaintext.
+- ABI framing stays: the node requires the canonical ABI encoding of the precompile call, so the zero padding cannot be cut client-side.
+
+### 13.3 Pack codec
+
+- The writer builds every piece pack and snapshot pack with `--compression=0 --no-reuse-object` (deltas recomputed, objects not zlib-compressed), then compresses the whole pack with brotli (window 2^24).
+  Brotli over today's zlib-compressed packs saves under 2%, because git already compresses each object; without the inner zlib it saves 22 to 35% (MEASURED, 13.6).
+- Quality by size: 11 up to 64 KiB, 9 up to 1 MiB, 6 above (MEASURED with the Python binding of the same encoder on a loaded Mac):
+
+  | Pack (no zlib) | q6 | q9 | q11 |
+  |---|---|---|---|
+  | Charter thin, 3 commits, 403 KB | | 125,108 B, 0.05 s | 116,284 B, 1.1 s |
+  | Charter thin, 10 commits, 1.62 MB | 470,500 B, 0.11 s | 462,534 B, 0.26 s | 423,585 B, 4.5 s |
+  | Charter snapshot, 4.04 MB | 1,263,554 B, 0.28 s | 1,225,900 B, 1.1 s | 1,133,492 B, 12.0 s |
+  | focus-dock snapshot (binary), 12.3 MB | 11,322,899 B, 0.33 s | 11,230,582 B, 8.4 s | 11,118,104 B, 55 s |
+
+  Above 1 MiB q9 costs 4 to 25 times the CPU of q6 for 1 to 3% fewer bytes, and q10 and q11 break the budget of 2 s per 10 MiB, so they are used only for small packs.
+- When the brotli stream is not smaller than the pack (random data, one-commit pushes), the pack is stored raw with `codec = 0`.
+- Readers check `pack_id` first, then decompress with a cap of 100 MiB (the largest pack one manifest can name), so a signed decompression bomb fails with `E_BAD_PACK` instead of filling the disk.
+- Brotli is the pure-Rust `brotli` crate already in `Cargo.lock` through `reqwest`; zstd would have added a C binding.
+- Private repos compress before sealing: the sealed bytes are the stored bytes, so nothing new is in plaintext and the ciphertext length leaks no more than the v2 length did.
+- Reader cache: `index-pack` keeps the pack as given, so the objects of a v3 pack sit in the cache without zlib.
+  For text-heavy packs that is about 2.5 times today's size (Charter snapshot: 4,043,666 B in the cache against 1,646,039 B); binary packs barely grow (focus-dock: 12,345,246 B against 12,006,713 B).
+  A local recompress of the pack's objects by path (`pack-objects --revs <tips> --no-reuse-object --window=10`) brings the Charter snapshot back to 1,647,895 B in 0.5 s on a loaded Mac; without paths (`--batch-all-objects`) it reaches only 2,550,809 B, and for the binary pack it costs 2.6 s to save 6% (MEASURED).
+  Decision (2026-11-11): readers do not repack in the fetch.
+  The repack costs about 0.12 s per decoded MiB, and the project rule is that no operation gets slower than v0.4.0; a clone of Charter's repo downloads the same number of chunk pages either way, so the repack would be pure added time.
+  The cache of a text repo is therefore about 2.5 times larger than v0.4.0's; disk is not part of the speed and cost rule, and a later maintenance command can recompress off the critical path.
+  A device's own snapshot layers keep their indexed pack (the layer policy finds them by git trailer), so the writer never repacks its own snapshot packs.
+
+### 13.4 Migration and old clients
+
+- The first v0.5.0 push of a device migrates its head in that push, with the mechanism of the v1 to v2 migration: the head entity keeps its key, and the migrating patch sets every attribute (`ag.v = 3` included), so the stored entity reads as a v3 head; later patches set only `ag.body` and `ag.h`.
+- The migrating body lists the device's carried packs re-encoded as runs: each v2 piece tx hash maps to its `(block, index)` through the receipt the writer already holds or one `eth_getTransactionByHash`.
+- v0.5.0 reads v1, v2 and v3 and writes only v3; a repo may mix v2 and v3 devices.
+- v0.4.0 meets `ag.kind = 'head'` with `ag.v = 3` from the tracked `C_d`, treats it as an unknown layout version and stops with `E_UNSUPPORTED_VERSION` (`fail_unsupported` in `charter-core/src/chain/head.rs`); it never drops the head or shows stale refs.
+  The test `the_v040_reader_stops_on_a_v3_head_with_unsupported_version` runs the unchanged v0.4.0 acceptance code on a signed v3 row.
+- A migrating patch that left `ag.v = 1` would make v0.4.0 fail closed with `E_CONTROL_NOT_LIVE` instead (an undecodable head); the writer therefore always sets every attribute on the first v3 patch.
+
+### 13.5 Security impact
+
+- Integrity is unchanged: every stored byte is covered by `pack_id`, which the device signs, and git checks every object after decompression.
+- Losing the per-piece hash costs only diagnosis: a corrupt piece is reported for its pack, not for the piece.
+- Naming a piece by `(block, index)` instead of its tx hash depends on that block being final; Rabdi has a single sequencer and every piece receipt lands before the head tx is sent, so a reorg that moved a piece would also have to move the head, and a mismatch fails closed with `E_BAD_PACK`.
+- The minimal patch changes nothing a reader trusts: every attribute is still compared against the values derived from the body.
+- The new signature context and kind code separate v3 bodies from v2 bodies, so a v2 signature can never be replayed as a v3 head or the reverse.
+- A rollback to a v2 body after migration still fails the rule of section 6, and the local mark rejects a lower seq.
+- The decompression cap bounds memory and disk per pack.
+
+### 13.6 Projected savings (DERIVED from the measurements in `speed-and-cost.md` 3.15)
+
+| Push | v2 | v3 | Saving |
+|---|---|---|---|
+| Small push, head tx gas | 340k | about 318k | minimal patch -13k, attribute-less marker -9k |
+| Head after a 2 MiB push (34 carried pieces) | +2,420 B per push | about +40 B | about -95k gas per push, growing to about -700k at 256 pieces |
+| Thin pack of 2 to 30 commits | 100% | 70 to 72% | -28 to -30% of piece gas |
+| Snapshot refresh (Charter's own repo) | 1.81 MB | 1.17 MB | -35% (-29% on top of the 13.3 pack settings) |

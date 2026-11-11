@@ -119,18 +119,33 @@ pub(crate) async fn peer_keys_with<A: Arkiv>(
         .filter_map(|n| known.get(n).map(|p| (*n, p.pk.clone())))
         .collect();
     let missing: Vec<Nid> = nids.into_iter().filter(|n| !keys.contains_key(n)).collect();
-    let docs = futures_util::future::try_join_all(
-        missing
-            .iter()
-            .map(|nid| all(a, Pred::And(vec![kind(Kind::Peer), b32("ag.nid", nid)]))),
-    )
-    .await?;
-    for (nid, docs) in missing.into_iter().zip(docs) {
-        if let Some(pk) = peer_key(&nid, &docs) {
+    let found =
+        futures_util::future::try_join_all(missing.iter().map(|nid| peer_key_of(a, nid))).await?;
+    for (nid, pk) in missing.into_iter().zip(found) {
+        if let Some(pk) = pk {
             keys.insert(nid, pk);
         }
     }
     Ok(keys)
+}
+
+/// The key of `nid` from its self-signed `peer` documents: the first document alone when
+/// it verifies (any valid one gives the same key, since `nid` hashes it), else all of them.
+/// Peer documents carry no `ag.rid`, so a busy peer has many; this reads one row.
+pub async fn peer_key_of<A: Arkiv>(a: &A, nid: &Nid) -> Result<Option<charter_crypto::PublicKey>> {
+    let filter = Pred::And(vec![kind(Kind::Peer), b32("ag.nid", nid)]);
+    let one = charter_store::QueryOpts {
+        limit: 1,
+        offset: 0,
+        select: crate::observe::full_select(),
+    };
+    let page = a
+        .query(&charter_store::Query::from(filter.clone()), &one)
+        .await?;
+    if let Some(pk) = peer_key(nid, &crate::observe::to_observed(page.rows)) {
+        return Ok(Some(pk));
+    }
+    Ok(peer_key(nid, &all(a, filter).await?))
 }
 
 /// New verified ops of `rid`: what [`list_since`] found at or after a block.
