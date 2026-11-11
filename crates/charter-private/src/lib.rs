@@ -15,6 +15,7 @@ pub mod keyring;
 pub mod mls;
 pub mod msg;
 pub mod seal;
+pub mod select;
 
 pub use arkiv::Sealed;
 pub use group::{
@@ -24,3 +25,4 @@ pub use group::{
 pub use join::{refresh, ring_for};
 pub use keyring::{Keyring, Role};
 pub use mls::SUITE;
+pub use select::{ForRepo, for_repo, for_repo_cached};

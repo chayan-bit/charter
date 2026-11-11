@@ -448,7 +448,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 .repo
                 .outgoing()
                 .join(format!("v3-{}.pack", hex32(&pack_id)));
-            std::fs::write(&file, &plan.thin).map_err(|e| SyncError::io(file.display(), e))?;
+            crate::repo::write_owner_only(&file, &plan.thin)?;
             files.push((file, pack_id));
             let pieces = match plan.stored.len() <= INLINE_MAX && inline_fits(plan) {
                 true => {
@@ -562,7 +562,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
             Codec::Brotli => {
                 // `<prefix>-<trailer>.br`, so the manifest cache reads the same trailer.
                 let p = raw.with_extension("br");
-                std::fs::write(&p, &encoded).map_err(|e| SyncError::io(p.display(), e))?;
+                crate::repo::write_owner_only(&p, &encoded)?;
                 (p, packs::BROTLI_PACK)
             }
             Codec::Raw => (raw.to_path_buf(), 1),

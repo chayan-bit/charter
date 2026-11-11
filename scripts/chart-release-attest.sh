@@ -7,6 +7,8 @@
 # Usage: scripts/chart-release-attest.sh --repo <arkiv-url> --tag <tag>
 # Env: CHARTER_HOME  attester identity (listed in the program's attesters(), funded)
 set -euo pipefail
+# Downloads of a private repo's release artifacts stay owner only.
+umask 077
 # shellcheck source=scripts/chart-lib.sh
 . "$(dirname "$0")/chart-lib.sh"
 command -v curl >/dev/null || die "curl not found on PATH"
@@ -45,6 +47,8 @@ attest_one() {
     return 0
   fi
   while read -r loc; do
+    # Locations are chain data: only a URL, never something curl would take as an option.
+    case $loc in http://* | https://* | file://*) ;; *) continue ;; esac
     rm -f "$tmp/artifact"
     curl -fsSL --proto '=http,https,file' -o "$tmp/artifact" "$loc" || continue
     got=$(sha256 "$tmp/artifact")

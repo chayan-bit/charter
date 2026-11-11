@@ -160,6 +160,17 @@ Repo programs are expected to call these through obligations later.
 `chart member list --repo R` prints nids, roles and device counts.
 `git push` and `git clone arkiv::<rid>` on a private repo work for members (a new member joins on first use) and fail with `E_NOT_MEMBER` for anyone else.
 
+## Unsealed-write guard and local permissions
+
+Every repo-scoped `chart` command and the `chart ui` write worker pick their backend with `charter_private::for_repo` (the remote helper with `ring_for`), so a private repo's writes and reads go through `Sealed`.
+As a fail-closed backstop, charter-sync refuses with `E_UNSEALED_PRIVATE` before any control write (identity, binds, ops), any push (chunks, pieces, head txs) and any keepalive when the backend does not seal and `$CHARTER_HOME/private/<rid>.json` exists.
+The check is one `stat` per write and none on a sealed backend; group operations (key packages, commits, welcomes, grants) seal themselves and do not pass through it.
+A machine that reads a private repo only through published grants holds no keyring file, so the guard does not cover it; such readers cannot write anyway.
+Decrypted data stays with its owner: `$CHARTER_HOME`, `repos/` and each repo cache are made 0700 (an existing home is tightened on first use), the cache git is created with `core.sharedRepository=0600`, and packs and fetch temp files are created 0600.
+A cache made before this is tightened once on its first open: every directory 0700, every file 0600, and `core.sharedRepository=0600` added to its git config; an `owner-only` marker file in the cache then makes every later open a single `stat`.
+`scripts/chart-ci.sh` and `scripts/chart-release-attest.sh` run under `umask 077`.
+The cache directory is still named by the rid in hex, which a local user who can list `$CHARTER_HOME` would learn; with the 0700 home nobody else can, so naming caches by a keyed hash of the rid is left as an option.
+
 ## Cost
 
 Push, clone, fetch and sync make no more queries than in 0.5.0, and `tests/query_counts.rs` holds them to the 0.5.0 counts on the fake chain.
