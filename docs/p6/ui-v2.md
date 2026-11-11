@@ -482,7 +482,7 @@ Folio replaced the Geist-based look of section 3.5 and the mockup of section 6: 
   Block numbers, entity keys, sequence numbers and ML-DSA details stay inside Technical details disclosures and tooltips.
 - Slice 3: the cost dialog v2 (what is published, the most it can cost, wallet now and after, how long it takes and how long it is kept, a breakdown and what will be signed), the three-step status card (signed, in a block, visible here) that shows the actual fee from the receipts, the `/wallet` page with Refresh and the spend ledger (`ui/spend.json`, newest first, never overwritten when unreadable), the low-balance warning, and Send disabled when the balance cannot cover the worst case or an RPC quota pause is on.
   The dialog's "Wallet now" is the wallet alone, the same number as the header chip; "After, at least" subtracts only what leaves the wallet (top-ups, escrow deposits and their fees), since the repo's paying address pays the op fees.
-- Also fixed while there: `just now` instead of `0 s ago`, ordered-list markers and large amounts no longer spaced out by tabular figures, the issue-list state column aligned, table cells no longer touching, the status card no longer re-animating on every one-second poll, the author's clock no longer broken mid-phrase in the timeline margin, and `refs/heads/` dropped from ref names outside Technical details.
+- Also fixed while there: `just now` instead of `0 s ago`, ordered-list markers and large amounts no longer spaced out by tabular figures, the issue-list state column aligned, table cells no longer touching, the status card no longer re-animating on every one-second poll, the author's clock no longer broken mid-phrase in the timeline margin, op fields as phrases ("Bounty: 0.5 tGLM", "Closed as fixed"), "Markdown supported" as the composer hint, and `refs/heads/` dropped from ref names outside Technical details.
 
 ### 10.4 Peer aliases
 
@@ -521,16 +521,18 @@ The writer reads the wallet balance once at start, once when pricing (as before)
 
 ### 10.7 Known issues found during the build
 
-- A push from another terminal that only moves refs no longer shows on an open page.
-  The UI's one-query probe (`charter-ui/src/pace.rs`) notices a new or expired entity, not an entity updated in place, and format v3 heads (`8d5f1e4`, v0.5.0) update the peer head in place.
-  Seen on the fake chain: the remote lists the new branch, the probe keeps reporting no change every 10 s, and `view.json` is not rewritten.
-  This predates the redesign and is not changed here; the fix belongs in the probe (for example comparing the newest head's last-modified block) and needs its own query-count measurement against the `pace.rs` bounds.
-- The phone tab strip always fades its right edge, even when scrolled to the end.
-- The blob page has no last-commit bar, to keep it to one git walk.
+- Fixed: a push that only moved refs never reached an open page, nor the UI's sync loop (on main since v0.5.0).
+  Format v3 heads (`8d5f1e4`) are patched in place, and the UI's one-query probe (`charter-ui/src/pace.rs`) saw only the repo's entity count and newest key.
+  The probe now sorts the repo's entities by `ag.dev`, which only heads carry; rows without the sort attribute come first in creation order (Arkiv `docs/api-spec.md` "Sorting", checked on Rabdi), so one page of the same query holds the newest non-head entity and every head with its `$updatedAt`.
+  It stays one query when nothing changed and two when something did, as before; the `tests/pace.rs` counts are unchanged (first sync 9, then 0 with no page open; 17 an hour idle; 365 on screen; 371 with one change), and a refs-only push costs one probe query per 10 s until it is seen, then one round.
+  The `chart` CLI's memo probe (`charter-sync/src/view/memo.rs`) already lists every head's `(key, $updatedAt)` for every repo, and a refs-only push now has a test there too.
+- Fixed: the phone tab strip fades its right edge only while tabs sit past it.
+- Fixed: the blob page has the last-commit bar; it walks history for the one path, as the tree page does.
 - Writes to a private repo are priced and sent sealed only once `sec/private-plumbing` lands; that branch picks the backend inside `writes/run.rs`, and this build left that choice alone.
   The dialog reads every figure from the `Estimate` the writer produces, so it shows the sealed cost with no change here.
 
 ### 10.8 Verification
 
-- Workspace tests, `cargo fmt --check` and `cargo clippy -D warnings` pass; `tests/v2.rs` adds 8 tests (vocabulary and no bare block numbers on 14 pages, aliases, branches and picker, the conflict banner, Settings applied, kept across a restart, mode 0600, bad input and missing CSRF refused, corrupt-file reset, the small-write skip, the dialog fields and the ledger, and the unfunded case).
-- The e2e run on the fake chain: 1,494 checks pass, 3 warn (two synthetic long pages over 20 KB and debug-build timing on one of them), 1 fails (the live update in section 10.7); axe reports 0 WCAG 2.1 A and AA violations on 50 page and state runs, including the confirm dialog with its breakdown open.
+- Workspace tests (578), `cargo fmt --check` and `cargo clippy -D warnings` pass; `tests/pace.rs` adds the refs-only push from another device (it failed before the probe fix); `tests/v2.rs` adds 8 tests (vocabulary and no bare block numbers on 14 pages, aliases, branches and picker, the conflict banner, Settings applied, kept across a restart, mode 0600, bad input and missing CSRF refused, corrupt-file reset, the small-write skip, the dialog fields and the ledger, and the unfunded case).
+- The e2e run on the fake chain: 1,495 checks pass, 3 warn (two synthetic long pages over 20 KB and debug-build timing on one of them), 0 fail, including the live update of section 10.7 and the tab fade at both ends on 76 phone pages; axe reports 0 WCAG 2.1 A and AA violations on 50 page and state runs, including the confirm dialog with its breakdown open.
+- `e2e/run.sh` now exits 0 when every check passes and `E2E_WORK` keeps the work directory (its cleanup trap's last test used to set the exit status to 1).
