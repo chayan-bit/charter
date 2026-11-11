@@ -1904,7 +1904,7 @@ dependencies = [
 
 [[package]]
 name = "charter-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alloy-signer-local",
  "arkiv-git-zk-core",
@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "charter-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "charter-crypto",
  "gix-validate",
@@ -1942,7 +1942,7 @@ dependencies = [
 
 [[package]]
 name = "charter-crypto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -1960,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "charter-escrow"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alloy-signer-local",
  "charter-core",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "charter-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rmcp",
  "serde",
@@ -1986,7 +1986,7 @@ dependencies = [
 
 [[package]]
 name = "charter-private"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alloy-signer-local",
  "arkiv-bindings",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "charter-program"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "charter-crypto",
  "hex",
@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "charter-store"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "charter-sync"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alloy-signer-local",
  "bs58",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "charter-timelock"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "drand_core",
  "hex",
@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "charter-ui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alloy-signer-local",
  "ammonia",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "charter-zk"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arkiv-git-zk-core",
  "bincode",
