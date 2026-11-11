@@ -234,6 +234,10 @@ pub struct TxPipeline<'a, A: Arkiv> {
     /// The sender's balance as the caller last read it, used by the first window instead
     /// of a read (see [`TxPipeline::seeded`]).
     balance: Option<U256>,
+    /// What the sender held beyond its in-flight reserves after the last window, plus the
+    /// unused reserve of each tx landed since: exact while no one else spends from it, so
+    /// later windows skip the balance read.
+    spare: Option<U256>,
     /// Gas to price every execute job at instead of estimating it ([`TxPipeline::with_gas`]).
     fixed_gas: Option<u64>,
     /// The process's shared `newHeads` socket, when one runs (see [`heads::start_feed`]).
@@ -263,6 +267,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             retried: HashSet::new(),
             seen: None,
             balance: None,
+            spare: None,
             fixed_gas: None,
             feed: heads::feed(),
             heads: None,
@@ -531,8 +536,15 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             }
             ready.push((job, body, p));
         }
-        self.send_all(ready, base_fee, sent_at, queue, inflight)
-            .await
+        self.spare = covered;
+        let again = self
+            .send_all(ready, base_fee, sent_at, queue, inflight)
+            .await?;
+        // Someone else sent from this key: the carried balance no longer holds.
+        if again {
+            self.spare = None;
+        }
+        Ok(again)
     }
 
     /// Calldata, recipient, value and gas, checking the byte and gas caps. A create job
@@ -750,6 +762,9 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
 
     /// The sender's balance not already reserved by txs in flight.
     async fn covered(&mut self, inflight: &[InFlight]) -> Result<U256, StoreError> {
+        if let Some(spare) = self.spare.take() {
+            return Ok(spare);
+        }
         let have = match self.balance.take() {
             Some(b) => b,
             None => self.arkiv.balance(self.address()).await?,
@@ -844,6 +859,9 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 .ok_or_else(|| StoreError::Rpc("in-flight tx without a poll slot".into()))?;
             match receipts[pos].take().flatten() {
                 Some(r) if r.success => {
+                    if let Some(spare) = self.spare.as_mut() {
+                        *spare += unused_reserve(f, &r);
+                    }
                     done.push(Landed {
                         job: f.job,
                         receipt: r,
@@ -970,6 +988,16 @@ const PLUG: usize = usize::MAX;
 /// Whether a tx in flight has a nonce above `n`, i.e. waits on it.
 fn above(inflight: &[InFlight], n: u64) -> bool {
     inflight.iter().any(|f| f.tx.nonce() > n)
+}
+
+/// What a landed tx reserved but did not spend: its max cost less its value and fee.
+fn unused_reserve(f: &InFlight, r: &Receipt) -> U256 {
+    let value = match &f.body {
+        Job::Transfer(_, v) => *v,
+        Job::Execute(_) => U256::ZERO,
+    };
+    let fee = U256::from(r.gas_used) * U256::from(r.effective_gas_price);
+    f.tx.max_cost().saturating_sub(value + fee)
 }
 
 /// Sends one signed tx, resending the same bytes on an RPC error: an identical tx can land

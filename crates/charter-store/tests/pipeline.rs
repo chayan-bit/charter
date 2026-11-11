@@ -414,6 +414,24 @@ async fn a_funded_run_reads_no_balance_after_its_last_receipt() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_funded_run_over_many_blocks_reads_the_balance_once() {
+    let (fake, key) = setup();
+    let funder = funded(&fake);
+    let spy = Spy::new(fake.clone(), false);
+    let cfg = PipelineConfig::default().bulk();
+    let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, cfg).funded_by(funder);
+    let jobs: Vec<_> = (0..12).map(|i| vec![blob(65_536, DAY, i)]).collect();
+    let landed = with_miner(fake.clone(), p.run(jobs)).await.expect("run");
+    assert_eq!(landed.len(), 12);
+    assert!(gas_by_block(&landed).len() > 2, "paced over several blocks");
+    assert_eq!(
+        spy.balances(),
+        1,
+        "later windows count on refunds, not reads"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_seeded_run_at_a_fixed_gas_sends_without_a_balance_read_or_an_estimate() {
     let (fake, key) = setup();
     let funder = funded(&fake);
