@@ -35,8 +35,17 @@ fn fail(code: i64, message: &str, data: Option<String>) -> Reply {
 
 const RABDI_HEX: &str = "0x76edaf";
 
-/// Serve `h` on a local port; returns the URL and every (request head, body) seen.
+/// Serve `h` on a local port, one call at a time (a batch is split); returns the URL and
+/// every (request head, body) seen.
 async fn mock(h: impl Fn(&Json) -> Reply + Send + Sync + 'static) -> (String, Seen) {
+    mock_with(true, h).await
+}
+
+/// As [`mock`]; with `batches` false `h` sees each request body whole, batches included.
+async fn mock_with(
+    batches: bool,
+    h: impl Fn(&Json) -> Reply + Send + Sync + 'static,
+) -> (String, Seen) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
     let seen: Seen = Arc::default();
@@ -44,13 +53,18 @@ async fn mock(h: impl Fn(&Json) -> Reply + Send + Sync + 'static) -> (String, Se
     tokio::spawn(async move {
         while let Ok((conn, _)) = listener.accept().await {
             let (h, log) = (h.clone(), log.clone());
-            tokio::spawn(async move { serve(conn, &*h, &log).await });
+            tokio::spawn(async move { serve(conn, batches, &*h, &log).await });
         }
     });
     (url, seen)
 }
 
-async fn serve(mut conn: TcpStream, h: &(dyn Fn(&Json) -> Reply + Send + Sync), log: &Seen) {
+async fn serve(
+    mut conn: TcpStream,
+    batches: bool,
+    h: &(dyn Fn(&Json) -> Reply + Send + Sync),
+    log: &Seen,
+) {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let (head, body) = loop {
@@ -81,7 +95,7 @@ async fn serve(mut conn: TcpStream, h: &(dyn Fn(&Json) -> Reply + Send + Sync), 
             );
         }
     };
-    let (status, headers, reply) = h(&body);
+    let (status, headers, reply) = if batches { answer(h, &body) } else { h(&body) };
     log.lock()
         .unwrap_or_else(|p| p.into_inner())
         .push((head, body));
@@ -98,6 +112,26 @@ async fn serve(mut conn: TcpStream, h: &(dyn Fn(&Json) -> Reply + Send + Sync), 
         payload.len()
     );
     let _ = conn.write_all(resp.as_bytes()).await;
+}
+
+/// One reply per call of a batch, ids echoed; a call that fails at the HTTP level (429,
+/// a drop) fails the whole request, as a real node's edge does.
+fn answer(h: &(dyn Fn(&Json) -> Reply + Send + Sync), body: &Json) -> Reply {
+    let Some(calls) = body.as_array() else {
+        return h(body);
+    };
+    let mut headers = vec![];
+    let mut replies = vec![];
+    for call in calls {
+        let (status, more, mut reply) = h(call);
+        if status != 200 {
+            return (status, more, reply);
+        }
+        headers.extend(more);
+        reply["id"] = call["id"].clone();
+        replies.push(reply);
+    }
+    (200, headers, Json::Array(replies))
 }
 
 fn cfg(url: &str) -> RpcConfig {
@@ -134,24 +168,75 @@ fn signed(chain_id: u64, input: Bytes) -> SignedTx {
 }
 
 #[tokio::test]
-async fn connect_checks_the_chain_and_sends_the_access_key() {
-    let (rpc, seen) = client(|_| ok(json!(null))).await;
-    let head = seen.lock().expect("log")[0].0.clone();
-    assert!(head.contains("x-api-key: sekret"), "{head}");
+async fn the_first_read_carries_the_chain_probe_in_one_request() {
+    let (rpc, seen) = client(|_| ok(json!("0x10"))).await;
+    assert!(
+        seen.lock().expect("log").is_empty(),
+        "connect sends nothing"
+    );
+    assert_eq!(rpc.head().await.expect("head"), 16);
+    assert_eq!(rpc.head().await.expect("head"), 16);
+    let log = seen.lock().expect("log").clone();
+    let methods: Vec<Json> = log.iter().map(|(_, b)| b.clone()).collect();
+    assert_eq!(log.len(), 2, "{methods:?}");
+    assert_eq!(log[0].1[0]["method"], "eth_chainId", "{methods:?}");
+    assert_eq!(log[0].1[1]["method"], "eth_blockNumber", "{methods:?}");
+    assert_eq!(
+        log[1].1["method"], "eth_blockNumber",
+        "verified once: {methods:?}"
+    );
+    assert!(log[0].0.contains("x-api-key: sekret"), "{}", log[0].0);
     assert!(
         !format!("{rpc:?}").contains("sekret"),
         "the key never reaches Debug output"
     );
-    let (url, _) = mock(|_| ok(json!("0x1"))).await;
-    let err = RpcArkiv::connect(cfg(&url)).await.expect_err("wrong chain");
-    assert_eq!(
-        err,
-        StoreError::WrongChain {
-            expected: RABDI_CHAIN_ID,
-            got: 1
-        }
-    );
     assert_eq!(RpcConfig::rabdi(Some(String::new())).access_key, None);
+}
+
+#[tokio::test]
+async fn a_wrong_chain_withholds_the_first_read_and_blocks_every_send() {
+    let (url, seen) = mock(|b| {
+        if b["method"] == "eth_chainId" {
+            ok(json!("0x1"))
+        } else {
+            ok(json!("0x10"))
+        }
+    })
+    .await;
+    let rpc = RpcArkiv::connect(cfg(&url)).await.expect("connect");
+    let wrong = StoreError::WrongChain {
+        expected: RABDI_CHAIN_ID,
+        got: 1,
+    };
+    assert_eq!(rpc.head().await, Err(wrong.clone()));
+    assert_eq!(
+        rpc.send(signed(RABDI_CHAIN_ID, Bytes::new())).await,
+        Err(wrong)
+    );
+    let log = seen.lock().expect("log").clone();
+    assert!(
+        log.iter()
+            .all(|(_, b)| b["method"] != "eth_sendRawTransaction"),
+        "the send never left: {log:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_node_without_batches_gets_the_probe_then_the_call() {
+    let (url, seen) = mock_with(false, |b| match b {
+        Json::Array(_) => fail(-32600, "batch requests are not supported", None),
+        _ if b["method"] == "eth_chainId" => ok(json!(RABDI_HEX)),
+        _ => ok(json!("0x10")),
+    })
+    .await;
+    let rpc = RpcArkiv::connect(cfg(&url)).await.expect("connect");
+    assert_eq!(rpc.head().await.expect("head"), 16);
+    assert_eq!(rpc.head().await.expect("head"), 16);
+    assert_eq!(
+        seen.lock().expect("log").len(),
+        4,
+        "batch, probe, call, call"
+    );
 }
 
 #[tokio::test]
@@ -444,10 +529,9 @@ async fn send_guards_chain_id_and_size_before_any_request() {
         rpc.send(big).await.map_err(|e| e.code()),
         Err("E_TX_TOO_LARGE")
     );
-    assert_eq!(
-        seen.lock().expect("log").len(),
-        1,
-        "only the connect probe reached the node"
+    assert!(
+        seen.lock().expect("log").is_empty(),
+        "nothing reached the node"
     );
 }
 
