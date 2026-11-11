@@ -1,6 +1,6 @@
 # P2: private repos
 
-Date: 2026-11-07, hardened 2026-11-11 (format 2, charter 0.5.1).
+Date: 2026-11-07, hardened 2026-11-11 (format 2, charter 0.6.0).
 Crate: `crates/charter-private`.
 
 ## What a private repo is
@@ -33,7 +33,7 @@ Each commit carries a lockbox with only what the members applying it lack: the n
 Each welcome carries the whole keyring (id keys, all epoch keys so far, the role history, the admin set of each epoch, commit blocks and pinned heads) sealed under the history key of its epoch, so a new member can read history.
 So a published grant for epoch E, which opens E's commit lockbox, opens no other epoch, and opens no welcome.
 A removed member cannot open either lockbox, because it cannot derive the new epoch's keys.
-Lockboxes written before 0.5.1 hold the full keyring under the epoch key, so a grant for such an epoch still opens the epochs before it.
+Lockboxes written before 0.6.0 hold the full keyring under the epoch key, so a grant for such an epoch still opens the epochs before it.
 The lockbox is sealed with the AAD kind `box`, and the welcome attestation with `att`; both are reserved, so no repo entity can be sealed under the same AAD.
 
 ## Sealing
@@ -76,13 +76,16 @@ The MLS credential is a basic credential naming the nid and the device (`nid || 
 The adversary controls any number of wallets, may have been a member or admin earlier, and can write any entity to Arkiv.
 It cannot break ML-DSA-65, Ed25519, ML-DSA-44, X-Wing or XChaCha20-Poly1305, and cannot forge the root identity of the repo.
 Content and membership must stay confidential to current members, and members must accept only state an authorized member made.
-The fixes below are named after the findings of the 2026-11 review (F) and of its follow-up review of the fixes (N).
+The fixes below are named after the findings of the 2026-11 review (F), of its follow-up review of the fixes (N) and of the final review before 0.6.0 (R).
 
 ### Join (F2)
 
 A welcome is accepted only if it carries an attestation: the composite signature of an admin over `rid || epoch || sha256(welcome) || sha256(lockbox) || kp id`, sealed under the new epoch key.
 Every commit carries a public attestation: the signer's nid, `A = HMAC(epoch key, "epoch" || rid)`, the new epoch's admin set sealed under `HMAC(generation-0 id key, "admin-set" || rid)` (AAD kind `adm`), and the signer's composite signature over `rid || epoch || sha256(commit) || sha256(lockbox) || A || admin nids`.
 Anyone holding the generation-0 id key finds every commit by `ag.ct`, reads its admin set and can check these signatures, so the admin chain needs no epoch key; only holders of that epoch's key can compute `A`.
+The signed message also names the commit row's creator, the signer's control address for the repo, and a commit counts only if the row was created by that address (R2).
+Without it, anyone could copy an attested commit into a new row with the same annotations, and a copy landing after the original's row expired would be taken for the commit and place the epoch's end at its own block.
+Welcomes and grants need no such binding: a member places an epoch's start only from the canonical commit, never from a welcome's block, and a grant carries no block at all, so a copy of either changes nothing.
 A joiner replays the admin history from the root before it accepts a welcome for epoch E.
 It starts at the first commit signed by a delegate of the root identity (whose hash is the rid, and whose generation-0 blinding pins the welcome's generation-0 id key).
 At each epoch from there to E it takes the first commit in Arkiv order signed by an admin of the epoch before, as the previous commit's attested admin set names them, and requires that commit's admin set and `A` to match the welcome keyring's admin set and key for that epoch.
@@ -126,15 +129,27 @@ A second leaf for a nid that already holds a role is added only by `chart member
 ### Revoked devices (head-model 15.7)
 
 Every leaf names its device, so a device revoke (`chart device revoke`, docs/p5/head-model.md section 15) names exactly one leaf.
-When an admin's client refreshes the group (every private-repo command and every push, fetch and clone does), it reads the repo's revoke records in the same query as the commits.
-For each record signed by a leaf's member, for this repo, that names the leaf's device, it commits the removal of that leaf, which rotates the epoch key and the id-key generation as a member removal does; the member keeps its role and its other devices.
+When an admin's client refreshes the group (every private-repo command and every push, fetch and clone does), it reads the repo's revoke records in the same query as the commits and counts the leaves whose member and device a record names, from their plaintext annotations, with no further query.
+A removal opens those records and keeps only the ones `charter_core::revocations` accepts, the same rule readers apply to heads: signed by the leaf's member, for this repo, created by one of its control addresses (R5); a record that fails it removes nothing.
+A refresh never sends anything: removing a leaf is a paid commit, so it happens only on an explicit write by an admin (R4).
+`chart device revoke` by an admin removes the leaf at once; otherwise an admin runs `chart member sync --repo R`, which removes every revoked leaf in one commit and prints the cost, or confirms the priced "Remove from the group" write that `chart ui` shows on the repo page while a revoked leaf is left.
+The removal rotates the epoch key and the id-key generation, as a member removal does; the member keeps its role and its other devices.
 An admin whose own device is revoked has that removal made by its remaining device, and a client whose own device is revoked removes nothing.
-Two admins may both remove the same leaf: each checks after landing whether its commit is the first for that epoch signed by an admin of the epoch before, and the one that is not undoes its commit and applies the other (first commit wins), so the group makes exactly one removal.
+Two admins may both remove the same leaf; the pending-commit rule below makes exactly one removal land in the group.
 From the revoke on, the device's later heads are ignored by every reader (head-model 15.2), so what it writes after the cut is refused before the removal lands.
-What it can still do is decrypt: every row sealed before the removal commit lands, which is until an admin's client next syncs the repo plus one commit tx.
-`chart device revoke` removes the leaf at once when the revoking identity is an admin, and otherwise says how long this gap lasts.
+What it can still do is decrypt every row sealed before the removal commit lands.
+`chart device revoke` says so and names `chart member sync` when the revoking identity is not an admin.
 The revoke record lives as long as other control rows (`control_lifetime`), so the removal must happen within that time.
 Leaves made before 0.6.0 name no device: a revoke cannot find them, `chart member list` marks them, and the fix is to remove the member (`chart member remove`) and add its remaining devices again (`chart member keypackage` on each, then `chart member add` and `chart member add --device`).
+
+### Pending commits (R1)
+
+MLS state (`$CHARTER_HOME/private/mls.json`) is shared by every repo of a home, so every command that reads or changes it (add, remove, a revoked-leaf removal, the format migration, a refresh, a key package, init) takes the home's lock file (`private/lock`) for its whole run.
+Two commands on one machine therefore never both commit, and a refresh never saves over a commit made meanwhile.
+A membership change leaves its MLS commit pending instead of merging it, and records the block where it was sent (or the head, when the send failed).
+The next refresh merges it only when its commit row is the first valid commit for that epoch (recognised by its lockbox opening under the pending epoch's key, since MLS cannot decrypt its own commit); when another admin's commit landed first, it drops its own and applies that one, so the group never forks.
+This costs no query: the refresh reads the commit rows anyway.
+While a commit is pending and less than `PENDING_BLOCKS` (64 blocks, about two minutes) old, a new membership change is refused with `E_CONCURRENT_PUSH` and the block to retry after; an older pending commit that never landed is dropped.
 
 ### Key package claims (F5)
 
@@ -147,7 +162,8 @@ A grant is `id_key || key || public key || signature || (nid || role)*`, signed 
 A reader picks the root-epoch grant whose keys open the root identity row (its hash is the rid), preferring a signed one.
 That gives it the generation-0 id key, so it finds the commit records by `ag.ct`.
 It then builds the canonical commit chain from the attestations alone, as a joiner does: from the first commit signed by a root delegate, at each epoch the first commit signed by an admin of the epoch before, as the previous commit's attested admin set names them.
-A grant for an epoch on that chain counts only if the epoch's commit authenticates its key (`A`) and its signer was an admin of the epoch before.
+A grant for an epoch on that chain counts only if the epoch's commit authenticates its key (`A`), its signer was an admin of the epoch before, and the admins among its roles are exactly the commit's attested admin set (R8).
+Roles below admin are not attested on chain, so a grant is trusted for those as its signer states them.
 A grant for an epoch before the chain starts (a legacy epoch) needs only a root delegate's signature.
 The chain also places the start of every epoch, including the end of the newest granted one.
 A root delegate that another admin removed from the group therefore cannot publish a grant for an epoch it never held, and a grant published first by anyone can neither block nor replace the real one.
@@ -172,18 +188,33 @@ Key material is zeroized on drop.
 The lockbox and the attestation have their own reserved AAD kinds.
 A welcome names its key package in plaintext (`ag.kp`), and key packages, commits and welcomes come from members' wallets, so an observer can link a joiner's wallet to the time it joined a group (not to the rid); relayers would remove this (see TODO).
 
+## Lost or stolen machine
+
+A device revoke stops a device seed (`device/seed`), not an identity.
+If the machine also held this identity's `keys/` directory, it holds the identity key: it can sign as you, revoke your other devices, and read every private repo you can, since `keys/` and `private/` usually travel together.
+Revoking its device does not stop that, and `chart device revoke` prints this warning in public and private repos alike.
+Recovery:
+
+1. From a machine you still trust, revoke the lost device (`chart device revoke`), so its later heads stop counting at once.
+2. In each private repo, have another admin remove the identity (`chart member remove --member <nid>`); this rotates the epoch key and the id-key generation, so the lost machine reads nothing new.
+   If the lost identity is the repo's only admin, the lost machine holds the same powers as you, so the group cannot be taken back: start a new private repo from the new identity (step 4) and push the content there.
+3. In each public repo, have a delegate set that no longer names the lost identity take over (a new root identity or delegate set).
+4. Start a new identity on a clean machine (a fresh `$CHARTER_HOME`) and have an admin add it again with `chart member keypackage` and `chart member add`.
+
+Until step 2 lands, the lost machine can also revoke your other devices and remove members as you, so act from the machine that still holds the keys first.
+
 ## Migration
 
-A repo created before 0.5.1 has keyring format 1: no attestations, admin sets, role history or commit blocks.
-A 0.5.1 client reads such a repo as before, deriving the role history and commit blocks from the commits it can open, and accepts unattested commits only while the format is 1.
-The first membership change on 0.5.1 must be made by a root delegate; any other admin is refused with a clear upgrade message.
+A repo created before 0.6.0 has keyring format 1: no attestations, admin sets, role history or commit blocks.
+A 0.6.0 client reads such a repo as before, deriving the role history and commit blocks from the commits it can open, and accepts unattested commits only while the format is 1.
+The first membership change on 0.6.0 must be made by a root delegate; any other admin is refused with a clear upgrade message.
 Members enforce this too: they apply the migrating commit only if its signer is a delegate of the root identity, so an admin whose client skips the check cannot migrate the repo (N3).
 That commit sets format 2, records the admin set, pins the heads, and is attested; it is the first commit a joiner's replay starts from.
 From then on every client requires attestations, admission and the blinded pack.
 The same tx writes a `stop` row: an identity row under the generation-0 blinded rid whose `ag.v` no client supports.
-A pre-0.5.1 member then fails with `E_UNSUPPORTED_VERSION` on its next read instead of accepting forged state, and 0.5.1 clients skip the stopper.
+A pre-0.6.0 member then fails with `E_UNSUPPORTED_VERSION` on its next read instead of accepting forged state, and 0.6.0 clients skip the stopper.
 Keepalive extends the stopper with the rest of the root delegate's control plane, so it lives as long as the repo is kept alive.
-A grant reader on a migrated repo needs 0.5.1 as well.
+A grant reader on a migrated repo needs 0.6.0 as well.
 
 ## API
 
@@ -192,6 +223,8 @@ A grant reader on a migrated repo needs 0.5.1 as well.
 `add_member(a, cfg, keys, rid, kp_id, role) -> nid`, `add_device(a, cfg, keys, rid, kp_id) -> nid` and `remove_member(a, cfg, keys, rid, nid)` issue commits.
 `members(home, rid) -> (epoch, [(nid, role, devices, devices made before 0.6.0)])` lists the current members.
 `revoked::leaf_state(a, cfg, keys, rid, device)` refreshes the group and says whether a leaf still names the device.
+`revoked::remove_revoked(a, cfg, keys, rid) -> count` removes every revoked leaf in one commit (admins only), and `revoked::removal_ops(a, cfg, keys, rid)` builds that commit's operations without sending or saving anything, for pricing.
+A keyring's `revoked_leaves` says how many revoked leaves its last refresh found still in the group.
 `refresh` and `ring_for` bring a member's keyring up to date, joining from a welcome when needed, and return `E_NOT_MEMBER` for a private repo the caller cannot read.
 `publish_epoch_key(a, cfg, keys, rid, epoch) -> grant` publishes one epoch's signed grant in plaintext, so anyone who knows the rid can read what was sealed in that epoch, and nothing else (sponsorware, source escrow).
 `publish_epoch_keys(a, cfg, keys, rid, range) -> [grant]` publishes one grant per epoch of a range, one tx each.
@@ -206,6 +239,8 @@ Repo programs are expected to call these through obligations later.
 `chart member add --repo R --key-package <id> --device` adds another device of an existing member.
 `chart member remove --repo R --member <nid>` removes a member and all its devices.
 `chart member list --repo R` prints nids, roles and device counts, and how many devices of each member predate device binding.
+`chart member sync --repo R` removes every revoked device's leaf in one commit and prints its cost, or says there is nothing to remove.
+`chart device revoke` by an admin of a private repo does the same at once.
 `git push` and `git clone arkiv::<rid>` on a private repo work for members (a new member joins on first use) and fail with `E_NOT_MEMBER` for anyone else.
 
 ## Unsealed-write guard and local permissions
@@ -224,7 +259,7 @@ The cache directory is still named by the rid in hex, which a local user who can
 
 Push, clone, fetch and sync make no more queries than in 0.5.0, and `tests/query_counts.rs` holds them to the 0.5.0 counts on the fake chain.
 
-| Operation | 0.5.0 | 0.5.1 |
+| Operation | 0.5.0 | 0.6.0 |
 | --- | --- | --- |
 | push | 20 | 20 |
 | clone (member, warm) | 3 | 3 |
@@ -242,7 +277,9 @@ A grant reader saves one query (the `group` and `pub` lookups are merged) and sp
 Its chain check looks up the key of each committing admin that signed no grant (none when, as usual, the root delegate both commits and publishes) and checks one commit signature per epoch on the chain.
 A removed member's refresh also looks for a re-add's welcome, one query per key package it published.
 The refresh's commit query also returns the repo's device records (delegations and revokes), so finding a pending revoke costs no query.
-Only an admin with a revoke naming a leaf still in the group pays more: one peer-key lookup per revoking identity, the add and remove path's queries, one commit tx, and one commit query to see which admin's removal landed first.
+A refresh never sends: the count of revoked leaves it reports is local.
+A removal (`chart member sync`, an admin's `chart device revoke`, or the UI write) costs one peer-key lookup per revoking identity, the remove path's queries and one commit tx, and its pricing in the UI runs the same queries without the tx.
+The commit stays pending until the next refresh, which reads the commit rows anyway, so seeing which admin's commit landed first costs no extra query; the first refresh after any removal may query commits once more for the new id-key generation, as for every member.
 Each attestation and signed grant costs one composite signature to make and one to check, and a join checks one commit signature per epoch it replays.
 Each commit and welcome grows by an attestation (about 3.4 KB), and the welcome's lockbox by a few bytes per role change, admin set, commit and pinned head.
 A commit's lockbox no longer grows with history: with 1 to 9 members it is 1,068 to 2,092 B, against 2,092 to 4,140 B for the full keyring, so each commit row is 1,024 to 2,048 B smaller in the box.
@@ -257,14 +294,18 @@ Knowing the rid reveals that a private repo exists, through the `group` marker, 
 A public identity for the rid takes precedence over the marker, so a forged marker cannot close a public repo.
 A published grant covers one epoch, so readers also need the grants of the epochs that sealed the identity and binds.
 In a repo migrated from 0.5.0, the lockboxes written before the migration hold the full keyring, so a grant for one of those epochs still reveals the epochs before it.
-Concurrent admins committing at the same epoch fork the group; the first commit in Arkiv order wins and the other admin must rejoin.
-An admin can still commit at an epoch before she is removed (the concurrent-admins fork above); the first commit in Arkiv order wins, as for members.
+Concurrent admins committing at the same epoch do not fork the group: the first commit in Arkiv order wins and the other admin's pending commit is dropped on its next refresh ("Pending commits").
+An admin can still commit at an epoch before she is removed; the first commit in Arkiv order wins, as for members.
+A pending commit whose send result was lost and that lands more than `PENDING_BLOCKS` after it was sent is dropped locally while members apply it; the admin then rejoins from a welcome or is added again.
+Commits made before 0.6.0 carry no attestation, so their creator cannot be checked; they are accepted only while the keyring format is 1.
 A delegate of the root identity is trusted for good where no admin set is on record yet: it can sign the first commit of a replay while none exists, and in a migrated repo a junk record it signs for a legacy epoch makes joins fail until the row expires (the replay ignores records for epoch 0, which no commit makes).
 After the first attested commit it is an admin only while the admin sets say so, for joiners, members and grant readers alike.
 In a repo with no attested commit, a grant reader cannot place the end of its newest granted epoch.
-Anyone who ever held the generation-0 id key (every member, past or present, and grant readers) can count later commits, see when they landed, which admin signed each and the admin set each made, though not what they changed or who else is a member.
-A pre-0.5.1 client that first reads a migrated repo after its keepalive lapsed sees no stopper, though it still cannot open anything sealed under a later id-key generation.
-Leaves added before 0.5.1 were never checked against a leaf binding; an admin who doubts one should remove that member and add it again.
+Anyone who sees a commit row can count a repo's commits, see when they landed and which admin signed each: `ag.ct` is the same on every commit of a repo, and the attestation names the signer's nid in plaintext (R6).
+Sealing that nid would not help, because the row's creator is the signer's control address, which its bind rows already link to its nid in plaintext; relayers would (see TODO).
+Only holders of the generation-0 id key (every member, past or present, and grant readers) can also read the admin set each commit made, and nobody else learns what a commit changed or who else is a member.
+A pre-0.6.0 client that first reads a migrated repo after its keepalive lapsed sees no stopper, though it still cannot open anything sealed under a later id-key generation.
+Leaves added before 0.6.0 were never checked against a leaf binding; an admin who doubts one should remove that member and add it again.
 Libcrux ML-DSA and X-Wing overflow 2 MiB stacks in debug builds, so the tests run on 64 MiB worker stacks.
 
 ## TODO
