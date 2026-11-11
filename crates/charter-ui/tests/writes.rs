@@ -80,7 +80,7 @@ async fn write(app: &axum::Router, kv: &[(&str, &str)]) -> Vec<VerifiedOp> {
             .await
             .text();
         assert!(!part.contains("Write failed"), "{part}");
-        if part.contains("Confirmed in block") {
+        if part.contains("toast t-confirmed") {
             assert!(!part.contains("hx-trigger"), "polling stops once confirmed");
             break;
         }
@@ -90,7 +90,7 @@ async fn write(app: &axum::Router, kv: &[(&str, &str)]) -> Vec<VerifiedOp> {
     }
     let page = send(app.clone(), req(&status)).await.text();
     assert!(
-        page.contains("Confirmed in block") && page.contains("<code>0x"),
+        page.contains("toast t-confirmed") && page.contains("<dt>Block</dt><dd><code>"),
         "{page}"
     );
     let again = send(app.clone(), form(&status, &[])).await;
@@ -307,22 +307,25 @@ async fn the_confirm_view_counts_the_control_top_up_the_send_makes() {
     let hex = hex32(&rid);
     let kv = [("kind", "issue"), ("title", "needs a top-up")];
     let (html, sent) = priced_and_sent(&app, &w, &hex, &kv).await;
-    assert!(html.contains("<dt>Transactions</dt><dd>2</dd>"), "{html}");
     assert!(
-        html.contains("<dt>Wallet top-up</dt><dd class=\"mono\">"),
+        html.contains("<li><span>Transactions</span><span>2</span></li>"),
         "{html}"
     );
     assert!(
-        html.contains("to the control address, fee at most"),
+        html.contains("<li><span>Wallet top-up</span><span>0.")
+            && html.contains("to the repo&#39;s paying address, fee at most"),
         "{html}"
     );
     assert_eq!(sent, 2, "the top-up, then the op");
     net.fund(control);
     let kv = [("kind", "issue"), ("title", "covered")];
     let (html, sent) = priced_and_sent(&app, &w, &hex, &kv).await;
-    assert!(html.contains("<dt>Transactions</dt><dd>1</dd>"), "{html}");
     assert!(
-        html.contains("<dt>Wallet top-up</dt><dd>none needed"),
+        html.contains("<li><span>Transactions</span><span>1</span></li>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<li><span>Wallet top-up</span><span>none needed"),
         "{html}"
     );
     assert_eq!(sent, 1);

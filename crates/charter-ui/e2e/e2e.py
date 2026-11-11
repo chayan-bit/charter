@@ -67,7 +67,7 @@ def first_page():
         m = re.search(rb"/r/([0-9a-f]{64})", body)
         if s == 200 and m:
             s2, _, b2, _ = get(f"/r/{m.group(1).decode()}", cookie)
-            if s2 == 200 and b"vp-verified" in b2:
+            if s2 == 200 and b"seal verified" in b2:
                 break
         time.sleep(0.005)
     else:
@@ -106,7 +106,8 @@ def discover(cookie):
     # (name, path, expected substrings in the JS-less main text, expected status)
     return rid, [
         ("home", "/", ["charter-demo"], 200),
-        ("repo", r, ["Charter demo", "Branches and tags"], 200),
+        ("repo", r, ["Charter demo", "2 branches"], 200),
+        ("branches", f"{r}/branches", ["Branches and tags", "main"], 200),
         ("tree", f"{r}/tree/main", ["README.md"], 200),
         ("tree-nested", f"{r}/tree/main/src", ["lib.rs"], 200),
         ("blob", f"{r}/blob/main/src/main.rs", ["println"], 200),
@@ -123,7 +124,9 @@ def discover(cookie):
         ("releases", f"{r}/releases", ["v0.1.0"], 200),
         ("issue-new", f"{r}/issues/new", ["New issue", "Title"], 200),
         ("release-new", f"{r}/releases/new", ["New release", "Artifacts"], 200),
-        ("program", f"{r}/program", ["Pinned program"], 200),
+        ("program", f"{r}/rules", ["Rules and CI", "Bounties"], 200),
+        ("wallet", "/wallet", ["Balance", "Spent from this computer"], 200),
+        ("settings", "/settings", ["Peer names", "Small writes", "Theme"], 200),
         ("not-found", f"{r}/nope", ["Nothing here"], 404),
     ]
 
@@ -185,7 +188,7 @@ CARD_JS = """() => {
   const bad = [], name = e => e.tagName.toLowerCase() + (typeof e.className === 'string' && e.className ? '.' + e.className.split(' ')[0] : '');
   const scrolls = e => { for (let a = e; a && a !== document.body; a = a.parentElement)
     if (['auto', 'scroll'].includes(getComputedStyle(a).overflowX)) return true; return false; };
-  const cards = document.querySelectorAll('main .box, main .readme, main .ops > li, main .vp, main .art, main .clone, dialog[open]');
+  const cards = document.querySelectorAll('main .cost, main .popover, main .clonebox, main .notice, main .codebox, main .readme, dialog[open]');
   for (const c of cards) {
     const cr = c.getBoundingClientRect();
     for (const e of c.querySelectorAll('*')) {
@@ -201,11 +204,12 @@ CARD_JS = """() => {
 LAYOUT_JS = """() => {
   const q = s => document.querySelector(s), r = e => e && e.getBoundingClientRect();
   const out = {};
-  const bar = q('.bar'), main = q('main'), br = r(bar), mr = r(main);
+  const bar = q('header.top'), main = q('main'), br = r(bar), mr = r(main);
   out.barH = Math.round(br.height);
   out.barClipped = [...bar.children].filter(c => { const x = r(c);
     return x.height && (x.top < br.top - 0.5 || x.bottom > br.bottom + 0.5); }).map(c => c.className || c.tagName);
   const btns = [...bar.querySelectorAll('.btn')].filter(b => r(b).width);
+  out.navTops = [...new Set([...bar.querySelectorAll('.primary a, .top-right > *')].filter(e => r(e).width).map(e => Math.round(r(e).top + r(e).height / 2)))];
   out.left = [Math.round(r(q('.mark')).left), Math.round(mr.left + parseFloat(getComputedStyle(main).paddingLeft))];
   out.right = btns.length ? [Math.round(r(btns[btns.length - 1]).right),
     Math.round(mr.right - parseFloat(getComputedStyle(main).paddingRight))] : null;
@@ -213,10 +217,11 @@ LAYOUT_JS = """() => {
   if (tabs) {
     const links = [...tabs.querySelectorAll('a')].filter(a => r(a).width);
     out.tabTops = [...new Set(links.map(a => Math.round(r(a).top)))];
-    out.tabScrollbar = tabs.offsetHeight - tabs.clientHeight;
-    out.repoBottom = Math.round(r(q('.repo')).bottom);
-    const vs = q('.vp > summary'); out.vpH = vs ? Math.round(r(vs).height) : null;
-    out.vpChev = vs ? getComputedStyle(vs, '::after').content !== 'none' : null;
+    const tcs = getComputedStyle(tabs);
+    out.tabScrollbar = tabs.offsetHeight - tabs.clientHeight - parseFloat(tcs.borderTopWidth) - parseFloat(tcs.borderBottomWidth);
+    out.tabHint = tabs.scrollWidth > tabs.clientWidth ? getComputedStyle(tabs).maskImage || getComputedStyle(tabs).webkitMaskImage : 'fits';
+    out.repoBottom = Math.round(r(q('.repo-head')).bottom);
+    const vs = q('#verify > summary'); out.vpH = vs ? Math.round(r(vs).height) : null;
   }
   out.gutters = [...document.querySelectorAll('.diff')].map(t => {
     const row = t.querySelector('tr:not(.hunk)'); const lc = row && row.querySelector('.lc');
@@ -410,7 +415,7 @@ def writes(browser, pages, axe_src, cookie):
             comment_to_confirm(page, issue_url, text)
             state_checks(page, sink, f"{scope}/confirm")
             shot(page, "write-confirm", theme, vp, full=False)
-            page.locator("details.signed > summary").click()
+            page.locator(".cd details > summary").click()
             shot(page, "write-confirm", theme, vp, "signed", full=False)
             if vp == "desktop":
                 run_axe(page, axe_src, "write-confirm", theme)
@@ -422,14 +427,14 @@ def writes(browser, pages, axe_src, cookie):
 
 
 def sent_status(page, sink, scope, theme, vp, axe_src):
-    """The status page right after sending (sent, with the tx hash), then confirmed in place."""
+    """The status page right after sending, then confirmed in place; no tx hash on the way."""
     try:
         page.wait_for_selector(".toast.t-sent", timeout=10000)
     except Exception:
         pass
     toast = page.locator(".toast").inner_text() if page.locator(".toast").count() else ""
-    rec("sent: the toast shows Sent and the tx hash at once", scope,
-        toast.startswith("Sent") and "tx " in toast, f"{toast[:80]!r} at {page.url}")
+    rec("sent: the status says Sent at once, with no tx hash", scope,
+        toast.startswith("Sent") and "0x" not in page.locator(".wp .steps").inner_text(), f"{toast[:80]!r} at {page.url}")
     state_checks(page, sink, f"{scope}/sent")
     shot(page, "write-sent", theme, vp, full=False)
     if vp == "desktop":
@@ -437,8 +442,10 @@ def sent_status(page, sink, scope, theme, vp, axe_src):
     page.evaluate("window.__same = 1")
     page.wait_for_selector(".toast.t-confirmed", timeout=30000)
     toast = page.locator(".toast").inner_text()
-    rec("confirmed in block N replaces sent without a reload", scope,
-        page.evaluate("window.__same === 1") and toast.startswith("Confirmed in block"), toast[:80])
+    shown = page.locator(".wp .steps").inner_text() + page.locator(".wp > .cd > p").first.inner_text()
+    rec("published replaces sent without a reload and shows the actual cost", scope,
+        page.evaluate("window.__same === 1") and toast.startswith("Published") and "Cost 0." in shown and "0x" not in shown,
+        toast[:80])
     state_checks(page, sink, f"{scope}/confirmed")
     shot(page, "write-confirmed", theme, vp, full=False)
     if vp == "desktop":
@@ -464,7 +471,7 @@ def writes_nojs(browser, pages, cookie):
         states.append(page.locator(".toast").get_attribute("class").split()[-1])
         if states[-1] in ("t-confirmed", "t-failed"):
             break
-        hint = hint or page.get_by_text("Reload to see the receipt").is_visible()
+        hint = hint or page.get_by_text("Reload to see the next step").is_visible()
         if states[-1] == "t-sent" and "t-sent" not in states[:-1]:
             page.wait_for_timeout(400)  # the toast's rise animation
             page.screenshot(path=str(OUT / "write-sent-nojs-light-desktop.png"))
@@ -483,7 +490,7 @@ def writes_nojs(browser, pages, cookie):
 def live_update(browser, pages):
     """A push from another process shows on an open page without a reload (ui.md 4.5)."""
     scope = "live/light/desktop"
-    repo = next(p for n, p, *_ in pages if n == "repo")
+    repo = next(p for n, p, *_ in pages if n == "branches")
     ctx, page, sink = context(browser, "light", "desktop", live=True)
     page.goto(f"http://{HOST}:{PORT}{repo}", wait_until="load")
     page.wait_for_timeout(300)
@@ -503,8 +510,9 @@ def live_update(browser, pages):
         shown and page.evaluate("window.__same === 1"),
         f"push took {pushed - t:.1f} s, shown {time.time() - pushed:.1f} s after it" if shown else "never shown")
     state_checks(page, sink, scope)
-    page.locator("#live code", has_text="e2e-live").first.scroll_into_view_if_needed()
-    shot(page, "repo-live", "light", "desktop", full=False)
+    if shown:
+        page.locator("#live code", has_text="e2e-live").first.scroll_into_view_if_needed()
+    shot(page, "branches-live", "light", "desktop", full=False)
     ctx.close()
 
 
@@ -514,18 +522,19 @@ def layout_checks(page, name, scope, vp, rid):
     over = page.evaluate(CARD_JS)
     rec("no card child overflows or is clipped by its card", scope, not over, "; ".join(over))
     m = page.evaluate(LAYOUT_JS)
-    rec("top bar: nothing clipped, height sane", scope, not m["barClipped"] and m["barH"] <= (56 if vp == "phone" else 48),
-        f'height {m["barH"]}, clipped {m["barClipped"]}')
+    rec("top bar: nothing clipped, one line, height sane", scope,
+        not m["barClipped"] and m["barH"] <= 64 and len({round(t / 8) for t in m["navTops"]}) == 1,
+        f'height {m["barH"]}, clipped {m["barClipped"]}, item centres {m["navTops"]}')
     if vp == "desktop":
         rec("top bar and content share left and right edges", scope,
             m["left"][0] == m["left"][1] and (m["right"] is None or abs(m["right"][0] - m["right"][1]) <= 1), f'left {m["left"]}, right {m["right"]}')
     if "tabTops" in m:
         rec("repo tabs sit on one row, no scrollbar artifact", scope, len(m["tabTops"]) == 1 and m["tabScrollbar"] == 0,
             f'rows at {m["tabTops"]}, scrollbar {m["tabScrollbar"]}px')
-        rec("verification summary is one line and shows a chevron", scope, m["vpH"] is not None and m["vpH"] <= 40 and m["vpChev"],
-            f'height {m["vpH"]}, chevron {m["vpChev"]}')
+        rec("tabs that scroll show a fade as the scroll hint", scope, m["tabHint"] == "fits" or "gradient" in m["tabHint"], m["tabHint"])
+        rec("verification seal fits its two lines", scope, m["vpH"] is not None and m["vpH"] <= 56, f'height {m["vpH"]}')
         if vp == "phone":
-            rec("phone: content starts in the first 300 px", scope, m["repoBottom"] <= 300, f'repo header ends at y={m["repoBottom"]}')
+            rec("phone: content starts in the first 360 px", scope, m["repoBottom"] <= 360, f'repo header ends at y={m["repoBottom"]}')
     if name == "repo":
         rec("README images resolve to /raw/ and load", scope,
             any(f"/r/{rid}/raw/main/docs/diagram.png" == s and w > 0 for s, w in m["imgs"]), str(m["imgs"]))
@@ -564,19 +573,20 @@ def extra(page, name, theme, vp):
 
 
 def theme_toggle(page, scope, name, theme, vp):
-    """system -> light -> dark -> system, each step with its attribute, cookie and a screenshot."""
+    """system -> light -> dark -> system, each step with its attribute and a screenshot; the
+    choice is saved to Settings (prefs.json), so a reload keeps it."""
     seen = []
     for _ in range(3):
-        page.locator("[data-theme-toggle]").click()
-        page.wait_for_timeout(60)
-        seen.append(page.evaluate("document.documentElement.getAttribute('data-theme')"))
-        ck = page.evaluate("document.cookie")
-        seen.append("cookie" if "theme=" in ck else "nocookie")
-        if seen[-2] in ("light", "dark"):
-            shot(page, name, theme, vp, f"toggled-{seen[-2]}", full=False)
-    rec("theme toggle cycles light, dark, system and sets the cookie", scope,
-        seen == ["light", "cookie", "dark", "cookie", None, "cookie"], str(seen))
-    page.evaluate("document.cookie = 'theme=; Path=/; Max-Age=0'")
+        with page.expect_response(lambda r: r.url.endswith("/settings/theme")) as resp:
+            page.locator("[data-theme-toggle]").click()
+        attr = page.evaluate("document.documentElement.getAttribute('data-theme')")
+        page.reload(wait_until="load")
+        kept = page.evaluate("document.documentElement.getAttribute('data-theme')")
+        seen.append(f"{attr}/{resp.value.status}/{'kept' if kept == attr else kept}")
+        if attr in ("light", "dark"):
+            shot(page, name, theme, vp, f"toggled-{attr}", full=False)
+    rec("theme toggle cycles light, dark, system and Settings keeps it", scope,
+        seen == ["light/204/kept", "dark/204/kept", "None/204/kept"], str(seen))
 
 
 def cursor_check(page, name, theme, vp):
@@ -596,6 +606,24 @@ def cursor_check(page, name, theme, vp):
     rec("row cursor is visibly tinted with the accent bar", scope, "rgba(0, 0, 0, 0)" not in bg.split(" rgb")[0] and "inset" in bg, bg)
     shot(page, name, theme, vp, "cursor", full=False)
     page.evaluate("document.querySelector('[data-list] .cur').classList.remove('cur')")
+
+
+def header_1024(browser, pages):
+    """ui-v2 slice 0: at 1024 px the header (mark, nav, sync, wallet, buttons) fits one line."""
+    ctx = browser.new_context(viewport={"width": 1024, "height": 768})
+    page = ctx.new_page()
+    page.goto(URL, wait_until="load")
+    for name, path, _, want in pages:
+        if name not in ("home", "repo", "wallet", "settings"):
+            continue
+        page.goto(f"http://{HOST}:{PORT}{path}", wait_until="load")
+        m = page.evaluate(LAYOUT_JS)
+        rec("header fits one line at 1024 px", f"{name}/1024", not m["barClipped"] and m["barH"] <= 64
+            and len({round(t / 8) for t in m["navTops"]}) == 1, f'height {m["barH"]}, item centres {m["navTops"]}')
+        if name == "repo":
+            page.screenshot(path=str(OUT / "repo-light-1024.png"))
+            SHOTS.append("repo-light-1024.png")
+    ctx.close()
 
 
 def nojs(browser, pages):
@@ -715,6 +743,7 @@ def main():
         except Exception:  # nix-provided browsers, if the system Chrome is missing
             browser = p.chromium.launch(headless=True)
         nojs(browser, pages)
+        header_1024(browser, pages)
         visit_all(browser, pages, axe_src, cookie, rid)
         writes(browser, pages, axe_src, cookie)  # last: the comments change the issue page
         writes_nojs(browser, pages, cookie)

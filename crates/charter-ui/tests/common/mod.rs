@@ -119,7 +119,9 @@ async fn pin(net: &Net, alice: &Peer, rid: &Rid) {
 
 async fn build() -> Fixture {
     let net = Net::new();
-    let alice = Peer::new(&net, 1);
+    let mut alice = Peer::new(&net, 1);
+    // Published in her peer document, so pages can name her.
+    alice.cfg.alias = "alice".into();
     let rid = init(&net, &alice, "demo").await;
     let dir = tempfile::tempdir().expect("work");
     let work = work_repo(dir.path(), "w");

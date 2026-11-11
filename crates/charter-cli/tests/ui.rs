@@ -137,9 +137,9 @@ fn chart_ui_fetches_a_named_repo_and_serves_it_behind_the_session_cookie() {
     assert_eq!(get(port, "/", None).0, 401, "no cookie, no page");
     let cookie = login(port, &path);
     let rid = url.trim_start_matches("arkiv::");
-    let body = wait_for(port, &cookie, &format!("/r/{rid}"), "vp-verified");
+    let body = wait_for(port, &cookie, &format!("/r/{rid}"), "seal verified");
     assert!(
-        body.contains("uidemo") && body.contains("<h1>uidemo</h1>"),
+        body.contains("uidemo") && body.contains(">uidemo</a></h1>"),
         "{body}"
     );
     let issue = wait_for(port, &cookie, &format!("/r/{rid}/issues/new"), "New issue");
@@ -194,7 +194,7 @@ fn ui_write(port: u16, cookie: &str, rid: &str, kv: &[(&str, &str)]) {
         port,
         cookie,
         &format!("{status_path}?part=1"),
-        "Confirmed in block",
+        "<dt>Block</dt><dd><code>",
     );
 }
 
@@ -222,7 +222,7 @@ fn writes_made_in_the_ui_verify_with_chart_op_list_and_chart_release_verify() {
     let cookie = login(port, &path);
     let rid =
         hex::encode(charter_sync::ids::parse_id(url.trim_start_matches("arkiv::")).expect("rid"));
-    wait_for(port, &cookie, &format!("/r/{rid}"), "vp-verified");
+    wait_for(port, &cookie, &format!("/r/{rid}"), "seal verified");
 
     ui_write(
         port,
@@ -330,7 +330,7 @@ fn writes_made_in_the_ui_verify_with_chart_op_list_and_chart_release_verify() {
         port,
         &cookie,
         &format!("/r/{rid}/releases"),
-        "valid under the pinned program",
+        "Allowed by the repo's rules",
     );
 }
 
@@ -378,7 +378,7 @@ fn a_push_from_another_process_reaches_an_open_event_stream_within_one_round() {
     let cookie = login(port, &path);
     let rid =
         hex::encode(charter_sync::ids::parse_id(url.trim_start_matches("arkiv::")).expect("rid"));
-    wait_for(port, &cookie, &format!("/r/{rid}"), "vp-verified");
+    wait_for(port, &cookie, &format!("/r/{rid}"), "seal verified");
     let mut events = stream(port, &cookie, &format!("/r/{rid}/events"));
     while next_event(&mut events) != "sync" {}
 
