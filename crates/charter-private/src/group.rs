@@ -210,7 +210,7 @@ async fn add<A: Arkiv>(
         ring,
         pre,
         commit,
-        Some((*kp_id, welcome)),
+        Some((*kp_id, welcome, mls.history_key(&g, rid)?)),
     )
     .await?;
     Ok(nid)
@@ -293,7 +293,7 @@ async fn finish<A: Arkiv>(
     mut ring: Keyring,
     pre: Pre,
     commit: Vec<u8>,
-    welcome: Option<(Hash32, Vec<u8>)>,
+    welcome: Option<Welcome>,
 ) -> Result<()> {
     if pre.migrate {
         ring.format = FORMAT;
@@ -317,9 +317,14 @@ async fn finish<A: Arkiv>(
     ring.save(&cfg.home)
 }
 
-/// One tx from the admin's control address: `extra` (a missing peer document), the commit,
-/// and the Welcome if any, both carrying the keyring sealed under the new epoch key and this
-/// admin's attestation; and on a migration, the stopper. Returns the block it landed in.
+/// A Welcome for key package `.0` and the epoch's history key (`.2`).
+type Welcome = (Hash32, Vec<u8>, crate::seal::Key);
+
+/// One tx from the admin's control address: `extra` (a missing peer document), the commit
+/// with only the new epoch's part of the keyring ([`Keyring::delta`]) sealed under the new
+/// epoch key and this admin's public attestation, the Welcome if any with the whole keyring
+/// sealed under the epoch's history key (which a published content key does not give) and
+/// its sealed attestation; and on a migration, the stopper. Returns the block it landed in.
 #[allow(clippy::too_many_arguments)]
 async fn publish_commit<A: Arkiv>(
     a: &A,
@@ -327,39 +332,37 @@ async fn publish_commit<A: Arkiv>(
     keys: &Keys,
     ring: &Keyring,
     commit: Vec<u8>,
-    welcome: Option<(Hash32, Vec<u8>)>,
+    welcome: Option<Welcome>,
     stop: bool,
     extra: Vec<charter_store::Operation>,
 ) -> Result<Option<u64>> {
     let (epoch, key) = ring.current()?;
     let rid = &ring.rid;
-    let bx = msg::seal_box(ring, epoch, key)?;
+    let bx = msg::seal_box(&ring.delta(epoch), epoch, key)?;
     let ep = || ("ag.ep", AttributeValue::U64(epoch), true);
-    let lockbox = || ("ag.box", AttributeValue::Bytes(bx.clone()), false);
-    let att = |ctx, body: &[u8], kp: Option<&Hash32>| -> Result<_> {
-        let msg = att_msg(rid, epoch, body, &bx, kp);
-        let sealed = auth::seal_att(keys, ctx, key, rid, epoch, &msg)?;
-        Ok(("ag.att", AttributeValue::Bytes(sealed), false))
-    };
+    let lockbox = |b: &[u8]| ("ag.box", AttributeValue::Bytes(b.to_vec()), false);
     let prev = epoch.saturating_sub(1);
     let rid_attr = ("ag.rid", b32(blinded_rid_at(ring, prev)), true);
     let admins = ring.adm_log.get(&epoch).cloned().unwrap_or_default();
-    let signed = auth::sign_commit(keys, rid, epoch, key, &commit, &bx, &admins)?;
+    let signed = auth::sign_commit(keys, rid, &ring.id_key, epoch, key, &commit, &bx, &admins)?;
     let commit_att = ("ag.att", AttributeValue::Bytes(signed), false);
     let ct = ("ag.ct", b32(auth::commits_tag(&ring.id_key, rid)), true);
     let mut ops = extra;
     ops.push(msg::op(
         T_COMMIT,
-        vec![rid_attr, ct, ep(), lockbox(), commit_att],
+        vec![rid_attr, ct, ep(), lockbox(&bx), commit_att],
         commit,
         cfg.control_lifetime,
     )?);
-    if let Some((kp, w)) = welcome {
+    if let Some((kp, w, history)) = welcome {
+        let hbx = msg::seal_box(ring, epoch, &history)?;
+        let msg = att_msg(rid, epoch, &w, &hbx, Some(&kp));
+        let att = auth::seal_att(keys, CTX_WELCOME, key, rid, epoch, &msg)?;
         let attrs = vec![
             ("ag.kp", b32(kp), true),
             ep(),
-            lockbox(),
-            att(CTX_WELCOME, &w, Some(&kp))?,
+            lockbox(&hbx),
+            ("ag.att", AttributeValue::Bytes(att), false),
         ];
         ops.push(msg::op(T_WELCOME, attrs, w, cfg.control_lifetime)?);
     }
@@ -372,8 +375,8 @@ async fn publish_commit<A: Arkiv>(
 }
 
 /// Root delegate only: publishes epoch `epoch`'s grant, signed, with that epoch's roles, so
-/// anyone who knows the rid can read what was sealed in that epoch (sponsorware, source
-/// escrow release) and no one else can substitute a grant.
+/// anyone who knows the rid can read what was sealed in that epoch, and no earlier one
+/// (sponsorware, source escrow release), and no one else can substitute a grant.
 pub async fn publish_epoch_key<A: Arkiv>(
     a: &A,
     cfg: &Config,
@@ -381,6 +384,19 @@ pub async fn publish_epoch_key<A: Arkiv>(
     rid: &Rid,
     epoch: u64,
 ) -> Result<Grant> {
+    let mut grants = publish_epoch_keys(a, cfg, keys, rid, epoch..=epoch).await?;
+    Ok(grants.remove(0))
+}
+
+/// [`publish_epoch_key`] for every epoch in `epochs`: a grant covers exactly the one epoch
+/// it signs, so a range is one grant per epoch, each in its own tx.
+pub async fn publish_epoch_keys<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    rid: &Rid,
+    epochs: std::ops::RangeInclusive<u64>,
+) -> Result<Vec<Grant>> {
     let (_, ring) = member_ring(a, cfg, keys, rid).await?;
     ring.require(&keys.nid(), Role::Admin)?;
     let roots = root_rows(a, &ring).await?.map(|r| r.0).unwrap_or_default();
@@ -390,25 +406,28 @@ pub async fn publish_epoch_key<A: Arkiv>(
             "only a delegate of the root identity can publish a grant readers can verify",
         ));
     }
-    let g = grant(&ring, epoch)?;
-    let roles: Vec<(Nid, Role)> = ring.roles_at(epoch).into_iter().collect();
-    let (id_key, key) = (ring.id_key_at(epoch), &g[32..]);
-    let key: crate::seal::Key = key.try_into().map_err(|_| not_member(rid))?;
-    let body = auth::encode_grant(keys, rid, epoch, id_key, &key, &roles)?;
-    let attrs = vec![
-        ("ag.tag", b32(tag(rid)), true),
-        ("ag.ep", AttributeValue::U64(epoch), true),
-    ];
-    let op = msg::op(T_PUB, attrs, body, cfg.control_lifetime)?;
+    let (mut grants, mut batches) = (vec![], vec![]);
+    for epoch in epochs {
+        let g = grant(&ring, epoch)?;
+        let roles: Vec<(Nid, Role)> = ring.roles_at(epoch).into_iter().collect();
+        let key: crate::seal::Key = g[32..].try_into().map_err(|_| not_member(rid))?;
+        let body = auth::encode_grant(keys, rid, epoch, ring.id_key_at(epoch), &key, &roles)?;
+        let attrs = vec![
+            ("ag.tag", b32(tag(rid)), true),
+            ("ag.ep", AttributeValue::U64(epoch), true),
+        ];
+        batches.push(vec![msg::op(T_PUB, attrs, body, cfg.control_lifetime)?]);
+        grants.push(g);
+    }
     write::send_funded(
         a,
         &keys.control(rid),
         &keys.wallet(),
         &cfg.pipeline,
-        vec![vec![op]],
+        batches,
     )
     .await?;
-    Ok(g)
+    Ok(grants)
 }
 
 /// Epoch `epoch`'s grant from the local keyring, for an escrow agent or a timelock.

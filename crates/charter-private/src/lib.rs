@@ -20,7 +20,7 @@ pub mod select;
 pub use arkiv::Sealed;
 pub use group::{
     Grant, add_device, add_member, export_epoch_key, init, member_ring, members, publish_epoch_key,
-    publish_key_package, remove_member,
+    publish_epoch_keys, publish_key_package, remove_member,
 };
 pub use join::{refresh, ring_for};
 pub use keyring::{Keyring, Role};

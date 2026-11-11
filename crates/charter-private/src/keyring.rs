@@ -69,7 +69,7 @@ pub struct Keyring {
     #[serde(default)]
     pub pinned: BTreeSet<String>,
     /// The admins (hex nids) of each epoch since format 2, as its committer recorded them;
-    /// each commit's public attestation pins its epoch's set ([`crate::auth::admins_digest`]).
+    /// each commit's public attestation pins its epoch's set ([`crate::auth::sign_commit`]).
     #[serde(default)]
     pub adm_log: BTreeMap<u64, BTreeSet<String>>,
     /// [`FORMAT`] once a root delegate on 0.5.1 or later wrote a commit.
@@ -220,6 +220,24 @@ impl Keyring {
             self.adm_log.entry(*e).or_insert_with(|| a.clone());
         }
         self.format = self.format.max(newer.format);
+    }
+
+    /// What a commit for `epoch` hands the members who apply it: that epoch's key, id-key
+    /// generation, roles, admin set and pinned heads, and nothing older (they hold it), so
+    /// a grant for `epoch`, which opens the commit's lockbox, opens no other epoch.
+    pub fn delta(&self, epoch: u64) -> Keyring {
+        fn at<V: Clone>(m: &BTreeMap<u64, V>, e: u64) -> BTreeMap<u64, V> {
+            m.get(&e).map(|v| (e, v.clone())).into_iter().collect()
+        }
+        let mut d = Keyring::new(self.rid, *self.id_key_at(epoch), self.group.clone());
+        d.epochs = at(&self.epochs, epoch);
+        d.id_rot = at(&self.id_rot, epoch);
+        d.role_log = at(&self.role_log, epoch);
+        d.adm_log = at(&self.adm_log, epoch);
+        d.roles.clone_from(&self.roles);
+        d.pinned.clone_from(&self.pinned);
+        d.format = self.format;
+        d
     }
 
     pub fn path(home: &Path, rid: &Rid) -> PathBuf {

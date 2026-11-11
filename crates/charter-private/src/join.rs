@@ -130,8 +130,8 @@ async fn verify_welcome<A: Arkiv>(
     let Some(staged) = mls.stage(body)? else {
         return Ok(None);
     };
-    let (epoch, key) = mls.staged_key(&staged, rid)?;
-    let Some(mut ring) = open_box(rid, epoch, &key, bx) else {
+    let (epoch, key, history) = mls.staged_key(&staged, rid)?;
+    let Some(mut ring) = open_box(rid, epoch, &history, bx) else {
         return Ok(None);
     };
     let Some((signer, sig)) = bytes(w, "ag.att").and_then(|s| open_att(&key, rid, epoch, s)) else {
@@ -171,15 +171,14 @@ async fn verify_welcome<A: Arkiv>(
 }
 
 /// Whether the welcome for epoch `epoch` (attested by `signer`) continues the commits on
-/// record. From the first commit a root delegate attested, each epoch's commit is the
-/// first one in Arkiv order signed by an admin of the epoch before, as `ring`'s admin log
-/// says; and each such commit's admin digest and epoch authenticator, which only that
-/// epoch's key holders can compute, must match `ring`. So `ring`'s whole admin history up
-/// to `epoch` is the one the admins committed to, a removed admin is out of it, and a
-/// welcome she forges with keys she never held fails at the first epoch she was not in,
-/// even before any genuine welcome exists. `signer`, if given, must have made the commit
-/// of `epoch`. Sets `rotated` from those commits. Reads `rows` (the commit rows); costs one
-/// key lookup per admin who committed (`pks` holds those already looked up).
+/// record: the [`canonical`] commits reach `epoch`, and each one's admin set and epoch
+/// authenticator (which only that epoch's key holders can compute) match `ring`. So
+/// `ring`'s whole admin history up to `epoch` is the one the admins committed to, a removed
+/// admin is out of it, and a welcome she forges with keys she never held fails at the
+/// first epoch she was not in, even before any genuine welcome exists. `signer`, if given,
+/// must have made the commit of `epoch`. Sets `rotated` from those commits. Reads `rows`
+/// (the commit rows); costs one key lookup per admin who committed (`pks` holds those
+/// already looked up).
 async fn on_record<A: Arkiv>(
     a: &A,
     ring: &mut Keyring,
@@ -189,37 +188,22 @@ async fn on_record<A: Arkiv>(
     rows: &[Observed],
     mut pks: BTreeMap<Nid, Option<PublicKey>>,
 ) -> Result<bool> {
-    let by_ep = records(rows);
+    let by_ep = records(rows, &ring.id_key, &ring.rid);
     let roots: BTreeSet<Nid> = roots.iter().copied().collect();
-    let mut base = None;
-    // No commit makes epoch 0 (the creating one), so a record naming it is junk.
-    for (ep, cands) in by_ep.range(1..=epoch) {
-        if first_signed(a, &mut pks, &ring.rid, *ep, cands, &roots)
-            .await?
-            .is_some()
-        {
-            base = Some(*ep);
-            break;
+    let chain = canonical(a, &mut pks, &ring.rid, &by_ep, &roots, epoch).await?;
+    if chain.last().map(|(k, _, _)| *k) != Some(epoch) {
+        return Ok(false);
+    }
+    for (k, _, att) in &chain {
+        let (Some(key), Some(adm)) = (ring.epochs.get(k), ring.adm_log.get(k)) else {
+            return Ok(false);
+        };
+        let pinned = att.admins == *adm && att.auth == auth::epoch_auth(key, &ring.rid);
+        if !pinned || (*k == epoch && signer.is_some_and(|s| att.signer != *s)) {
+            return Ok(false);
         }
     }
-    let Some(base) = base else { return Ok(false) };
-    for k in base..=epoch {
-        let admins: BTreeSet<Nid> = match k == base {
-            true => roots.clone(),
-            false => nids(ring.adm_log.get(&(k - 1))),
-        };
-        let cands = by_ep.get(&k).map_or(&[][..], Vec::as_slice);
-        let Some((c, att)) = first_signed(a, &mut pks, &ring.rid, k, cands, &admins).await? else {
-            return Ok(false);
-        };
-        let (Some(key), Some(adm)) = (ring.epochs.get(&k), ring.adm_log.get(&k)) else {
-            return Ok(false);
-        };
-        let pinned = att.admins == auth::admins_digest(key, adm)
-            && att.auth == auth::epoch_auth(key, &ring.rid);
-        if !pinned || (k == epoch && signer.is_some_and(|s| att.signer != *s)) {
-            return Ok(false);
-        }
+    for (k, c, _) in chain {
         ring.rotated.insert(k, c.block);
     }
     Ok(true)
@@ -227,18 +211,55 @@ async fn on_record<A: Arkiv>(
 
 type Records<'c> = BTreeMap<u64, Vec<(&'c Observed, CommitAtt)>>;
 
-/// The commit rows of `rows` that carry a public attestation, by epoch, in Arkiv order.
-fn records(rows: &[Observed]) -> Records<'_> {
+/// The commit rows of `rows` whose public attestation opens under the generation-0 id key
+/// `gen0`, by epoch, in Arkiv order.
+fn records<'c>(rows: &'c [Observed], gen0: &Key, rid: &Rid) -> Records<'c> {
     let mut by_ep: Records = BTreeMap::new();
     for c in rows {
-        if let (Some(ep), Some(att)) = (
-            u64_of(c, "ag.ep"),
-            bytes(c, "ag.att").and_then(parse_commit_att),
-        ) {
+        let Some(ep) = u64_of(c, "ag.ep") else {
+            continue;
+        };
+        if let Some(att) = bytes(c, "ag.att").and_then(|b| parse_commit_att(b, gen0, rid, ep)) {
             by_ep.entry(ep).or_default().push((c, att));
         }
     }
     by_ep
+}
+
+/// One canonical commit: its epoch, row and attestation.
+type Canon<'c> = (u64, &'c Observed, &'c CommitAtt);
+
+/// The canonical commit of each epoch, from the first one a root delegate signed, up to
+/// `upto`: at each epoch the first in Arkiv order validly signed by an admin of the epoch
+/// before (the root's delegates before the first one), whose attested admin set names the
+/// admins of its own epoch. No commit makes epoch 0, so a record naming it is junk. Stops
+/// at the first epoch with none. Needs no epoch key, so a grant reader can follow it too.
+async fn canonical<'c, A: Arkiv>(
+    a: &A,
+    pks: &mut BTreeMap<Nid, Option<PublicKey>>,
+    rid: &Rid,
+    by_ep: &'c Records<'c>,
+    roots: &BTreeSet<Nid>,
+    upto: u64,
+) -> Result<Vec<Canon<'c>>> {
+    let mut chain: Vec<Canon<'c>> = vec![];
+    for (ep, cands) in by_ep.range(1..=upto) {
+        if let Some((c, att)) = first_signed(a, pks, rid, *ep, cands, roots).await? {
+            chain.push((*ep, c, att));
+            break;
+        }
+    }
+    while let Some(&(k, _, att)) = chain.last()
+        && k < upto
+    {
+        let cands = by_ep.get(&(k + 1)).map_or(&[][..], Vec::as_slice);
+        let admins = nids(Some(&att.admins));
+        let Some((c, next)) = first_signed(a, pks, rid, k + 1, cands, &admins).await? else {
+            break;
+        };
+        chain.push((k + 1, c, next));
+    }
+    Ok(chain)
 }
 
 /// The first of `cands` (one epoch's commits, in Arkiv order) validly signed by one of
@@ -379,14 +400,12 @@ async fn commit_attested<A: Arkiv>(
         bytes(c, "ag.body").unwrap_or_default(),
         bytes(c, "ag.box").unwrap_or_default(),
     );
-    let Some(att) = bytes(c, "ag.att").and_then(parse_commit_att) else {
+    let att = bytes(c, "ag.att").and_then(|b| parse_commit_att(b, &ring.id_key, &ring.rid, epoch));
+    let Some(att) = att else {
         return Ok(ring.format < FORMAT);
     };
     let prev = epoch.saturating_sub(1);
-    let pinned = newer
-        .adm_log
-        .get(&epoch)
-        .is_some_and(|adm| att.admins == auth::admins_digest(key, adm))
+    let pinned = newer.adm_log.get(&epoch) == Some(&att.admins)
         && att.auth == auth::epoch_auth(key, &ring.rid);
     if att.signer != *sender || !pinned {
         return Ok(false);
@@ -559,15 +578,15 @@ fn remember_public(home: &std::path::Path, rid: &Rid) -> Result<()> {
 const MAX_ID_CANDIDATES: usize = 16;
 
 /// A read-only keyring from published grants that authenticate. The grant whose keys open
-/// the root identity (content hash = rid) gives the generation-0 id key; then the newest
-/// root-delegate grant whose epoch's commit lockbox opens under it and continues the commit
-/// record from the root ([`on_record`], as a joiner checks a welcome) fixes every epoch key
-/// and admin set up to it, and a grant counts only if its keys are those and its signer was
-/// an admin of the epoch before. So a root delegate removed from the group cannot publish
-/// a grant for an epoch it did not hold. A repo with no attested commit (legacy, or never
-/// changed) falls back to grants signed by a root delegate. Costs the identity query the
-/// view then skips and one commit query, plus a key lookup per committing admin that
-/// signed no grant.
+/// the root identity (content hash = rid) gives the generation-0 id key, which opens the
+/// public commit attestations; the [`canonical`] commit chain they form (no epoch key
+/// needed) fixes each epoch's authenticator and admin set, and a grant counts only if its
+/// key is the one its epoch's commit authenticates and its signer was an admin of the
+/// epoch before. So a root delegate removed from the group cannot publish a grant for an
+/// epoch it did not hold, and a grant opens only its own epoch. A repo with no attested
+/// commit (legacy, or never changed) falls back to grants signed by a root delegate.
+/// Costs the identity query the view then skips and one commit query, plus a key lookup
+/// per committing admin that signed no grant.
 async fn published<A: Arkiv>(a: &A, rid: &Rid, grants: &[Observed]) -> Result<Option<Keyring>> {
     let cands: Vec<(u64, auth::SignedGrant)> = grants
         .iter()
@@ -608,12 +627,10 @@ async fn published<A: Arkiv>(a: &A, rid: &Rid, grants: &[Observed]) -> Result<Op
         .iter()
         .filter(|(ep, g)| auth::grant_signed(g, rid, *ep, &roots))
         .collect();
-    let mut ring = match records(&commits).is_empty() {
+    let by_ep = records(&commits, &root.id_key, rid);
+    let mut ring = match by_ep.is_empty() {
         true => legacy_grants(root, &signed),
-        false => match verified_history(a, rid, &root, &roots, &signed, &commits).await? {
-            Some(full) => granted(full, &root, &roots, &signed),
-            None => root,
-        },
+        false => attested_grants(a, rid, root, &roots, &signed, &by_ep).await?,
     };
     derive_history(&mut ring, &commits);
     let rows = crate::arkiv::open_all(&ring, raw);
@@ -621,99 +638,76 @@ async fn published<A: Arkiv>(a: &A, rid: &Rid, grants: &[Observed]) -> Result<Op
     Ok(Some(ring))
 }
 
+/// Adds grant `g` for epoch `ep` (its keys and the roles it signs) to `ring`.
+fn take_grant(ring: &mut Keyring, ep: u64, g: &auth::SignedGrant) {
+    ring.epochs.insert(ep, g.key);
+    if g.id_key != ring.id_key {
+        ring.id_rot.insert(ep, g.id_key);
+    }
+    let roles = g.roles.iter().map(|(n, r)| (hex::encode(n), *r)).collect();
+    ring.record_roles(ep, &roles);
+}
+
 /// Before any attested commit, every root-delegate grant counts (the first per epoch).
 fn legacy_grants(mut ring: Keyring, signed: &[&(u64, auth::SignedGrant)]) -> Keyring {
     for (ep, g) in signed {
-        if ring.epochs.contains_key(ep) {
-            continue;
+        if !ring.epochs.contains_key(ep) {
+            take_grant(&mut ring, *ep, g);
         }
-        ring.epochs.insert(*ep, g.key);
-        if g.id_key != ring.id_key {
-            ring.id_rot.insert(*ep, g.id_key);
-        }
-        let roles = g.roles.iter().map(|(n, r)| (hex::encode(n), *r)).collect();
-        ring.record_roles(*ep, &roles);
     }
     ring
 }
 
-/// The keyring of the newest grant in `signed` whose epoch's commit lockbox opens under it
-/// and passes [`on_record`] against `commits`, with the end of that epoch placed from the
-/// first commit of the next one signed by one of its admins.
-async fn verified_history<A: Arkiv>(
+/// `ring` (the root grant's) with each grant of `signed` whose key the [`canonical`]
+/// commit of its epoch authenticates and whose signer was an admin of the epoch before,
+/// and with the start of every epoch on record. A grant for an epoch before the first
+/// attested commit (a legacy one) needs only the root delegate's signature. Costs a key
+/// lookup per committing admin that signed no grant.
+async fn attested_grants<A: Arkiv>(
     a: &A,
     rid: &Rid,
-    root: &Keyring,
+    mut ring: Keyring,
     roots: &[Nid],
     signed: &[&(u64, auth::SignedGrant)],
-    commits: &[Observed],
-) -> Result<Option<Keyring>> {
-    let mut pks: BTreeMap<Nid, Option<PublicKey>> = BTreeMap::new();
-    for (_, g) in signed {
-        if let Some(pk) = g
-            .sig
-            .as_ref()
-            .and_then(|(pk, _)| PublicKey::from_bytes(charter_crypto::Alg::MlDsa65Ed25519, pk).ok())
-        {
-            pks.insert(pk.nid(), Some(pk));
-        }
-    }
-    let mut newest_first: Vec<_> = signed.to_vec();
-    newest_first.sort_by_key(|(ep, _)| std::cmp::Reverse(*ep));
-    for (ep, g) in newest_first {
-        let boxes = commits
-            .iter()
-            .filter(|c| u64_of(c, "ag.ep") == Some(*ep))
-            .filter_map(|c| open_box(rid, *ep, &g.key, bytes(c, "ag.box")?));
-        for mut full in boxes {
-            let fits = full.epochs.get(ep) == Some(&g.key) && full.id_key == root.id_key;
-            if fits && on_record(a, &mut full, roots, *ep, None, commits, pks.clone()).await? {
-                let by_ep = records(commits);
-                let next = by_ep.get(&(ep + 1)).map_or(&[][..], Vec::as_slice);
-                let admins = nids(full.adm_log.get(ep));
-                if let Some((c, _)) = first_signed(a, &mut pks, rid, ep + 1, next, &admins).await? {
-                    full.rotated.insert(ep + 1, c.block);
-                }
-                full.rotated.retain(|e, _| *e <= ep + 1);
-                return Ok(Some(full));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// `full` (a verified history) holding only the epochs of grants whose keys it confirms
-/// and whose signer was an admin of the epoch before (a root delegate for an epoch with no
-/// admin set on record), plus the root grant's epoch.
-fn granted(
-    mut full: Keyring,
-    root: &Keyring,
-    roots: &[Nid],
-    signed: &[&(u64, auth::SignedGrant)],
-) -> Keyring {
-    let admin_before = |ep: u64, g: &auth::SignedGrant| {
-        let signer = g.sig.as_ref().and_then(|(pk, _)| {
-            PublicKey::from_bytes(charter_crypto::Alg::MlDsa65Ed25519, pk).ok()
-        });
-        let before = ep.checked_sub(1).and_then(|p| full.adm_log.get(&p));
-        signer.is_some_and(|pk| match before {
-            Some(set) => set.contains(&hex::encode(pk.nid())),
-            None => roots.contains(&pk.nid()),
-        })
+    by_ep: &Records<'_>,
+) -> Result<Keyring> {
+    let signer = |g: &auth::SignedGrant| {
+        let (pk, _) = g.sig.as_ref()?;
+        PublicKey::from_bytes(charter_crypto::Alg::MlDsa65Ed25519, pk).ok()
     };
-    let mut keep: BTreeSet<u64> = root.epochs.keys().copied().collect();
+    let mut pks: BTreeMap<Nid, Option<PublicKey>> = signed
+        .iter()
+        .filter_map(|(_, g)| signer(g))
+        .map(|pk| (pk.nid(), Some(pk)))
+        .collect();
+    let root_set: BTreeSet<Nid> = roots.iter().copied().collect();
+    let chain = canonical(a, &mut pks, rid, by_ep, &root_set, u64::MAX).await?;
+    let base = chain.first().map(|(k, _, _)| *k);
+    let admins_before = |ep: u64| match chain.iter().find(|(k, _, _)| k + 1 == ep) {
+        Some((_, _, att)) => nids(Some(&att.admins)),
+        None => root_set.clone(),
+    };
     for (ep, g) in signed {
-        if full.epochs.get(ep) == Some(&g.key)
-            && full.id_key_at(*ep) == &g.id_key
-            && admin_before(*ep, g)
-        {
-            keep.insert(*ep);
+        if ring.epochs.contains_key(ep) {
+            continue;
+        }
+        let counts = match base {
+            Some(b) if *ep >= b => chain.iter().any(|(k, _, att)| {
+                k == ep
+                    && att.auth == auth::epoch_auth(&g.key, rid)
+                    && signer(g).is_some_and(|pk| admins_before(*ep).contains(&pk.nid()))
+            }),
+            Some(_) => true,
+            None => false,
+        };
+        if counts {
+            take_grant(&mut ring, *ep, g);
         }
     }
-    full.epochs
-        .retain(|e, k| keep.contains(e) && root.epochs.get(e).is_none_or(|r| r == k));
-    full.group.clear();
-    full
+    for (k, c, _) in &chain {
+        ring.rotated.insert(*k, c.block);
+    }
+    Ok(ring)
 }
 
 /// The keyring of the grant whose keys open the root identity (one a root delegate also

@@ -50,6 +50,7 @@ fn a_removed_members_forged_welcome_does_not_hijack_the_join() {
         let mut g = fake.create().expect("group");
         let (_commit, welcome, _) = fake.add(&mut g, &kp_bytes).expect("add bob");
         let (ep, key) = fake.epoch_key(&g, &rid).expect("epoch key");
+        let history = fake.history_key(&g, &rid).expect("history key");
         let mut forged = mallory_old.clone();
         forged.epochs.insert(1_000_000, key);
         forged.roles = [
@@ -58,7 +59,7 @@ fn a_removed_members_forged_welcome_does_not_hijack_the_join() {
             (hex::encode(bob.keys.nid()), Role::Write),
         ]
         .into();
-        let bx = seal_box(&forged, ep, &key).expect("box");
+        let bx = seal_box(&forged, ep, &history).expect("box");
         let op = msg::op(
             T_WELCOME,
             vec![
@@ -723,7 +724,8 @@ fn an_ex_admins_forged_welcome_is_refused_even_without_a_genuine_one() {
             welcome = w;
         }
         let (ep, key) = fake.epoch_key(&g, &rid).expect("key");
-        let bx = seal_box(&forged, ep, &key).expect("box");
+        let history = fake.history_key(&g, &rid).expect("history key");
+        let bx = seal_box(&forged, ep, &history).expect("box");
         let att_msg = charter_private::auth::att_msg(&rid, ep, &welcome, &bx, Some(&kp_id));
         let att = charter_private::auth::seal_att(
             &mallory.keys,
@@ -740,6 +742,7 @@ fn an_ex_admins_forged_welcome_is_refused_even_without_a_genuine_one() {
             let signed = charter_private::auth::sign_commit(
                 &mallory.keys,
                 &rid,
+                &old.id_key,
                 e,
                 &k,
                 &commit,

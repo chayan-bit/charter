@@ -25,6 +25,9 @@ pub const SUITE: Ciphersuite = Ciphersuite::MLS_128_MLKEM768X25519_CHACHA20POLY1
 pub const CONTENT_LABEL: &str = "arkiv-git content"; // protocol constant: unchanged by the Charter rename
 /// MLS exporter label of the id-blinding key, taken once at the creating epoch.
 pub const ID_LABEL: &str = "arkiv-git id"; // protocol constant: unchanged by the Charter rename
+/// MLS exporter label of the key a welcome's history lockbox is sealed under: only members
+/// of that epoch derive it, not holders of its published content key.
+pub const HISTORY_LABEL: &str = "charter history";
 
 fn mls_err(what: &str, e: impl std::fmt::Debug) -> SyncError {
     SyncError::coded(ErrorCode::BadFormat, format!("mls {what}: {e:?}"))
@@ -268,13 +271,19 @@ impl Mls {
         }
     }
 
-    /// `(epoch, content key)` of a staged Welcome.
-    pub fn staged_key(&self, s: &StagedWelcome, rid: &Rid) -> Result<(u64, Key)> {
-        let k = s
-            .export_secret(self.provider.crypto(), CONTENT_LABEL, rid, 32)
-            .map_err(|e| mls_err("export", e))?;
-        let k = k.as_slice().try_into().map_err(|e| mls_err("export", e))?;
-        Ok((s.group_context().epoch().as_u64(), k))
+    /// `(epoch, content key, history key)` of a staged Welcome.
+    pub fn staged_key(&self, s: &StagedWelcome, rid: &Rid) -> Result<(u64, Key, Key)> {
+        let export = |label| -> Result<Key> {
+            let k = s
+                .export_secret(self.provider.crypto(), label, rid, 32)
+                .map_err(|e| mls_err("export", e))?;
+            k.as_slice().try_into().map_err(|e| mls_err("export", e))
+        };
+        Ok((
+            s.group_context().epoch().as_u64(),
+            export(CONTENT_LABEL)?,
+            export(HISTORY_LABEL)?,
+        ))
     }
 
     pub fn finish(&self, s: StagedWelcome) -> Result<MlsGroup> {
@@ -326,6 +335,11 @@ impl Mls {
 
     pub fn id_key(&self, g: &MlsGroup, rid: &Rid) -> Result<Key> {
         self.export(g, ID_LABEL, rid)
+    }
+
+    /// The key the current epoch's welcomes seal their history lockbox under.
+    pub fn history_key(&self, g: &MlsGroup, rid: &Rid) -> Result<Key> {
+        self.export(g, HISTORY_LABEL, rid)
     }
 }
 
