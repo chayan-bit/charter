@@ -208,15 +208,20 @@ impl Git {
         }
         let hooks = dir.join("no-hooks");
         std::fs::create_dir_all(&hooks).map_err(|e| SyncError::io(hooks.display(), e))?;
-        let hooks = hooks.to_string_lossy().into_owned();
-        for (k, v) in [
-            ("uploadpack.allowAnySHA1InWant", "true"),
-            ("core.hooksPath", hooks.as_str()),
-            ("gc.auto", "0"),
-            ("core.logAllRefUpdates", "false"),
-        ] {
-            g.run(&["config", k, v], b"")?;
-        }
+        // One append instead of four `git config` spawns (git reads the last value).
+        let quoted = hooks
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let extra = format!(
+            "[uploadpack]\n\tallowAnySHA1InWant = true\n[core]\n\thooksPath = \"{quoted}\"\n\tlogAllRefUpdates = false\n[gc]\n\tauto = 0\n"
+        );
+        let config = dir.join("config");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config)
+            .and_then(|mut f| f.write_all(extra.as_bytes()))
+            .map_err(|e| SyncError::io(config.display(), e))?;
         Ok(g)
     }
 
@@ -545,6 +550,24 @@ mod tests {
         sh(d, &["commit", "-qam", "two"]);
         sh(d, &["repack", "-adq", "--window=0", "--depth=0"]);
         tmp
+    }
+
+    #[test]
+    fn a_new_cache_is_configured_without_extra_spawns() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("odd \"dir\\").join("git");
+        let g = Git::init_cache(&dir).expect("init");
+        let get = |k: &str| {
+            String::from_utf8(g.run(&["config", "--get", k], b"").expect(k)).expect("utf8")
+        };
+        assert_eq!(get("uploadpack.allowAnySHA1InWant").trim(), "true");
+        assert_eq!(get("gc.auto").trim(), "0");
+        assert_eq!(get("core.logAllRefUpdates").trim(), "false");
+        assert_eq!(
+            PathBuf::from(get("core.hooksPath").trim()),
+            dir.join("no-hooks")
+        );
+        assert!(Git::init_cache(&dir).is_ok(), "reopening is a no-op");
     }
 
     #[test]
