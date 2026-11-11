@@ -123,6 +123,18 @@ pub fn require_mem() -> Result<(), CliError> {
     }
 }
 
+/// The backend for repo `rid`: `a` itself, or `a` sealed for a private repo this machine's
+/// identity can read (the remote helper's rule), so every repo command seals and blinds
+/// what it writes and reads.
+pub async fn for_repo<'a, A: Arkiv>(
+    a: &'a A,
+    cfg: &Config,
+    rid: &charter_core::Rid,
+) -> Result<charter_private::ForRepo<'a, A>, CliError> {
+    let keys = charter_sync::Keys::load(&cfg.home)?;
+    Ok(charter_private::for_repo(a, cfg, keys.as_ref(), rid).await?)
+}
+
 /// Dev faucet: credits `wei` to `wallet` on the `mem:` fake chain and returns the new
 /// balance. Any other backend refuses, since real chains are funded from a faucet.
 pub async fn dev_fund(b: &Backend, wallet: Address, wei: U256) -> Result<U256, CliError> {

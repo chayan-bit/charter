@@ -2,6 +2,7 @@
 //! ML-DSA-44 signatures. State (signature key, key package secrets, groups) persists under
 //! `$CHARTER_HOME/private/mls.json`, mode 600.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use charter_core::{ErrorCode, Hash32, Nid, Rid};
@@ -12,6 +13,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_libcrux_crypto::Provider;
 use openmls_traits::OpenMlsProvider;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::keyring::write_private;
 use crate::seal::Key;
@@ -44,6 +46,9 @@ struct Saved {
     kps: Vec<Hash32>,
 }
 
+/// OpenMLS storage contents, from [`Mls::snapshot`].
+pub struct Snapshot(HashMap<Vec<u8>, Vec<u8>>);
+
 pub struct Mls {
     provider: Provider,
     signer: SignatureKeyPair,
@@ -67,16 +72,20 @@ impl Mls {
         let path = home.join("private").join("mls.json");
         let provider = Provider::default();
         let (signer, kps) = match std::fs::read(&path) {
-            Ok(b) => {
-                let s: Saved = serde_json::from_slice(&b).map_err(|e| mls_err("state file", e))?;
+            Ok(mut b) => {
+                let s = serde_json::from_slice::<Saved>(&b);
+                b.zeroize();
+                let s = s.map_err(|e| mls_err("state file", e))?;
                 let mut values = provider
                     .storage()
                     .values
                     .write()
                     .map_err(|_| mls_err("storage", "poisoned"))?;
-                for (k, v) in s.storage {
+                for (k, mut v) in s.storage {
                     let k = hex::decode(k).map_err(|e| mls_err("state file", e))?;
-                    values.insert(k, hex::decode(v).map_err(|e| mls_err("state file", e))?);
+                    let decoded = hex::decode(&v).map_err(|e| mls_err("state file", e));
+                    v.zeroize();
+                    values.insert(k, decoded?);
                 }
                 (s.signer, s.kps)
             }
@@ -111,8 +120,10 @@ impl Mls {
                 .collect(),
             kps: &self.kps,
         };
-        let bytes = serde_json::to_vec(&saved).map_err(|e| mls_err("state file", e))?;
-        write_private(&self.path, &bytes)
+        let mut bytes = serde_json::to_vec(&saved).map_err(|e| mls_err("state file", e))?;
+        let r = write_private(&self.path, &bytes);
+        bytes.zeroize();
+        r
     }
 
     fn credential(&self) -> CredentialWithKey {
@@ -167,42 +178,118 @@ impl Mls {
         Ok((ser(&commit)?, ser(&welcome)?, nid))
     }
 
-    /// Removes `nid`'s leaf; returns the commit.
+    /// Removes every leaf naming `nid` (all of its devices); returns the commit.
     pub fn remove(&self, g: &mut MlsGroup, nid: &Nid) -> Result<Vec<u8>> {
-        let leaf = g
+        let leaves: Vec<LeafNodeIndex> = g
             .members()
-            .find(|m| nid_of(&m.credential).is_ok_and(|n| n == *nid))
+            .filter(|m| nid_of(&m.credential).is_ok_and(|n| n == *nid))
             .map(|m| m.index)
-            .ok_or_else(|| SyncError::coded(ErrorCode::NotMember, "no such member in the group"))?;
+            .collect();
+        if leaves.is_empty() {
+            return Err(SyncError::coded(
+                ErrorCode::NotMember,
+                "no such member in the group",
+            ));
+        }
         let (commit, _, _) = g
-            .remove_members(&self.provider, &self.signer, &[leaf])
+            .remove_members(&self.provider, &self.signer, &leaves)
             .map_err(|e| mls_err("remove", e))?;
         g.merge_pending_commit(&self.provider)
             .map_err(|e| mls_err("merge", e))?;
         ser(&commit)
     }
 
-    /// Joins from a Welcome; fails unless it was made for one of this member's key packages.
-    pub fn join(&self, welcome: &[u8]) -> Result<MlsGroup> {
+    /// Leaves per nid (a member on several devices has several).
+    pub fn leaves(g: &MlsGroup) -> BTreeMap<Nid, usize> {
+        let mut out = BTreeMap::new();
+        for m in g.members() {
+            if let Ok(n) = nid_of(&m.credential) {
+                *out.entry(n).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
+    /// This member's MLS signature public key (what its leaf binding signs).
+    pub fn signature_key(&self) -> Vec<u8> {
+        self.signer.to_public_vec()
+    }
+
+    /// The nid a key package claims and the MLS signature key it carries.
+    pub fn kp_identity(&self, kp: &[u8]) -> Result<(Nid, Vec<u8>)> {
+        let kp = KeyPackageIn::tls_deserialize_exact(kp)
+            .map_err(|e| mls_err("key package", e))?
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|e| mls_err("key package", e))?;
+        let leaf = kp.leaf_node();
+        Ok((
+            nid_of(leaf.credential())?,
+            leaf.signature_key().as_slice().to_vec(),
+        ))
+    }
+
+    /// A copy of the OpenMLS storage, to undo a join or commit that fails a later check.
+    pub fn snapshot(&self) -> Result<Snapshot> {
+        let v = self.provider.storage().values.read();
+        Ok(Snapshot(
+            v.map_err(|_| mls_err("storage", "poisoned"))?.clone(),
+        ))
+    }
+
+    pub fn restore(&self, s: Snapshot) -> Result<()> {
+        let mut v = self.provider.storage().values.write();
+        *v.as_deref_mut()
+            .map_err(|_| mls_err("storage", "poisoned"))? = s.0;
+        Ok(())
+    }
+
+    /// Decrypts a Welcome for one of this member's key packages without joining yet.
+    /// OpenMLS consumes the key package here: take a [`Self::snapshot`] first. Joining
+    /// replaces this member's old state of the same group (left when it was removed), so a
+    /// re-add can be joined; callers join only a Welcome they verified. `None`: the Welcome
+    /// is for none of this member's unused key packages; any other failure is an error.
+    pub fn stage(&self, welcome: &[u8]) -> Result<Option<StagedWelcome>> {
         let body = MlsMessageIn::tls_deserialize_exact(welcome)
             .map_err(|e| mls_err("welcome", e))?
             .extract();
         let MlsMessageBodyIn::Welcome(w) = body else {
             return Err(mls_err("welcome", "not a Welcome"));
         };
-        StagedWelcome::new_from_welcome(&self.provider, create_config().join_config(), w, None)
-            .map_err(|e| mls_err("welcome", e))?
-            .into_group(&self.provider)
+        let built =
+            StagedWelcome::build_from_welcome(&self.provider, create_config().join_config(), w);
+        match built {
+            Err(WelcomeError::NoMatchingKeyPackage) => Ok(None),
+            Err(e) => Err(mls_err("welcome", e)),
+            Ok(b) => b
+                .replace_old_group()
+                .build()
+                .map(Some)
+                .map_err(|e| mls_err("welcome", e)),
+        }
+    }
+
+    /// `(epoch, content key)` of a staged Welcome.
+    pub fn staged_key(&self, s: &StagedWelcome, rid: &Rid) -> Result<(u64, Key)> {
+        let k = s
+            .export_secret(self.provider.crypto(), CONTENT_LABEL, rid, 32)
+            .map_err(|e| mls_err("export", e))?;
+        let k = k.as_slice().try_into().map_err(|e| mls_err("export", e))?;
+        Ok((s.group_context().epoch().as_u64(), k))
+    }
+
+    pub fn finish(&self, s: StagedWelcome) -> Result<MlsGroup> {
+        s.into_group(&self.provider)
             .map_err(|e| mls_err("welcome", e))
     }
 
-    /// Processes a commit; merges it only if `allow(sender nid)`. Returns whether it merged.
+    /// Processes a commit; merges it only if `allow(sender nid)`. Returns the sender if it
+    /// merged.
     pub fn process(
         &self,
         g: &mut MlsGroup,
         commit: &[u8],
         allow: impl Fn(&Nid) -> bool,
-    ) -> Result<bool> {
+    ) -> Result<Option<Nid>> {
         let msg = MlsMessageIn::tls_deserialize_exact(commit)
             .map_err(|e| mls_err("commit", e))?
             .try_into_protocol_message()
@@ -217,12 +304,12 @@ impl Mls {
         let ProcessedMessageContent::StagedCommitMessage(sc) = processed.into_content() else {
             return Err(mls_err("commit", "not a commit"));
         };
-        if !sender.is_some_and(|n| allow(&n)) {
-            return Ok(false);
-        }
+        let Some(sender) = sender.filter(|n| allow(n)) else {
+            return Ok(None);
+        };
         g.merge_staged_commit(&self.provider, *sc)
             .map_err(|e| mls_err("merge", e))?;
-        Ok(true)
+        Ok(Some(sender))
     }
 
     fn export(&self, g: &MlsGroup, label: &str, rid: &Rid) -> Result<Key> {

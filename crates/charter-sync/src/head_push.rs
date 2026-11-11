@@ -124,6 +124,8 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
         work: &Git,
         updates: &[Update],
     ) -> Result<Self> {
+        // Every chunk, piece and head tx of this push leaves through `Self`.
+        crate::guard::require_sealed(a, &cfg.home, &repo.rid)?;
         let planned = stage(repo, &keys.nid(), work, updates)?;
         Ok(Self {
             a,

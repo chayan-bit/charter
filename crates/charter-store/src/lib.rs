@@ -125,6 +125,12 @@ pub trait Arkiv: Send + Sync {
     fn seals(&self) -> bool {
         false
     }
+    /// Whether this backend seals under the keys of repo `rid` itself: only then may the
+    /// write guard let a private repo's rows through it.
+    fn seals_for(&self, rid: &[u8; 32]) -> bool {
+        let _ = rid;
+        false
+    }
     /// Opens rows read from calldata the way `query` opens its rows. Identity by default;
     /// P2 private repos decrypt sealed rows here.
     fn open_rows(&self, rows: Vec<EntityData>) -> Vec<EntityData> {

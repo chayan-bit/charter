@@ -40,6 +40,8 @@ pub enum ErrorCode {
     RoleDenied,
     /// The identity revoked this device (head-model 15).
     DeviceRevoked,
+    /// P2: a write to a private repo was about to leave without sealing (a caller bug).
+    UnsealedPrivate,
     Internal,
 }
 
@@ -77,6 +79,7 @@ impl ErrorCode {
             NotMember => "E_NOT_MEMBER",
             RoleDenied => "E_ROLE_DENIED",
             DeviceRevoked => "E_DEVICE_REVOKED",
+            UnsealedPrivate => "E_UNSEALED_PRIVATE",
             Internal => "E_INTERNAL",
         }
     }

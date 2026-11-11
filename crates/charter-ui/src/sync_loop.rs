@@ -303,7 +303,10 @@ pub async fn round<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<Outcome, 
     let keys = Keys::load(&cfg.home)?;
     match charter_private::ring_for(a, cfg, keys.as_ref(), rid).await? {
         None => locked_round(a, cfg, rid).await,
-        Some(ring) => locked_round(&charter_private::Sealed::new(a, ring), cfg, rid).await,
+        Some(ring) => {
+            let sealed = charter_private::Sealed::new(a, ring).caching(&cfg.home);
+            locked_round(&sealed, cfg, rid).await
+        }
     }
 }
 

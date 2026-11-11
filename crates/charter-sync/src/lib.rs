@@ -10,6 +10,7 @@ pub mod device;
 mod error;
 pub mod fetch;
 pub mod git;
+pub mod guard;
 pub mod head_push;
 pub mod head_send;
 pub mod heads;

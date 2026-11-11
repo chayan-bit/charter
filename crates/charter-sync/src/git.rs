@@ -199,7 +199,8 @@ impl Git {
             c.env_remove(v);
         });
         let out = c
-            .args(["init", "--bare", "-q"])
+            // Objects, packs and refs owner-only (0600 files, 0700 dirs).
+            .args(["init", "--bare", "-q", "--shared=0600"])
             .arg(dir)
             .output()
             .map_err(|e| SyncError::io("git init", e))?;
@@ -394,7 +395,7 @@ impl Git {
         }
         let trailer = hex::encode(&bytes[bytes.len() - 20..]);
         let pack = PathBuf::from(format!("{}-{trailer}.pack", prefix.to_string_lossy()));
-        std::fs::write(&pack, &bytes).map_err(|e| SyncError::io(pack.display(), e))?;
+        crate::repo::write_owner_only(&pack, &bytes)?;
         Ok(Some(vec![pack]))
     }
 
