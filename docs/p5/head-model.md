@@ -349,7 +349,10 @@ Known limits not handled in v0.4.0:
 - A device's head holds at most about 550 to 900 refs (section 4.2); a migration or push past that fails with `E_REFS_TOO_LARGE` instead of moving the ref list into a piece.
 - A pack that cannot be indexed is downloaded once per change of the peer's heads, and by every fresh clone (section 5.5); until v0.5.0 it was downloaded on every fetch.
 - A copied `device/seed` makes two machines one device; they serialise on the confirmed nonce of `C_d`, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4); the retry reuses the bulk pieces the refused push landed.
-- Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can collide on the wallet nonce and one push fails with an RPC error; running it again succeeds.
+- Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can sign the same wallet nonce (issue #28).
+  After v0.5.0 the one that reaches the node second recovers instead of failing: when the node refuses its transfer with `replacement transaction underpriced` (the other transfer holds the nonce in the pool, MEASURED on Rabdi 2026-11-11) or `nonce too low` (it already landed), and the node does not hold the refused transfer, the client reads the wallet's pending nonce again and signs the transfer anew, up to four times; the prefund's wallet pipeline re-reads the nonce the same way.
+  The source of truth is the node's pending nonce, so clients with different retry timing never leave a gap; a transfer is only re-signed after the node confirmed it does not hold the first one, so nothing is sent twice.
+  Without a collision nothing changes: no extra read or transaction.
 
 ## 12. Measurements
 

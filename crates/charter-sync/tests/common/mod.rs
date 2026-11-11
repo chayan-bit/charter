@@ -31,6 +31,9 @@ pub struct Net {
     pub queries: Mutex<Vec<String>>,
     /// Read-path counters: calls by method, and the most `mined_tx` calls in flight at once.
     pub stats: Stats,
+    /// A shared wallet: the next read of its nonce is raced by another device's top-up,
+    /// which signs the same nonce and reaches the node first.
+    race: Mutex<Option<PrivateKeySigner>>,
 }
 
 /// Calls the read path made, for round-trip and concurrency assertions.
@@ -105,7 +108,36 @@ impl Net {
             fee: Mutex::new(None),
             queries: Mutex::new(vec![]),
             stats: Stats::default(),
+            race: Mutex::new(None),
         }
+    }
+
+    /// The next read of `wallet`'s nonce is raced by another top-up from it (issue #28).
+    pub fn race_wallet(&self, wallet: PrivateKeySigner) {
+        *self.race.lock().expect("lock") = Some(wallet);
+    }
+
+    /// The other device's top-up at `nonce`, sent before the reader's own.
+    async fn racing_top_up(&self, a: Address, nonce: u64) -> Result<(), StoreError> {
+        let wallet = {
+            let mut race = self.race.lock().expect("lock");
+            match race.as_ref().is_some_and(|w| w.address() == a) {
+                true => race.take(),
+                false => None,
+            }
+        };
+        let Some(wallet) = wallet else { return Ok(()) };
+        let p = charter_store::TxParams {
+            nonce,
+            to: PrivateKeySigner::random().address(),
+            value: U256::from(10u128.pow(15)),
+            input: Default::default(),
+            gas_limit: 21_000,
+            max_fee_per_gas: 4 * self.mem.base_fee().await?,
+            max_priority_fee_per_gas: 0,
+        };
+        let tx = SignedTx::sign(&wallet, CHAIN, p)?;
+        self.mem.send(tx).await.map(|_| ())
     }
 
     /// Accept but never mine every send from `sender` after the next `after` ones.
@@ -172,7 +204,9 @@ impl Arkiv for Net {
         self.mem.balance(a).await
     }
     async fn tx_count(&self, a: Address) -> Result<u64, StoreError> {
-        self.mem.tx_count(a).await
+        let n = self.mem.tx_count(a).await?;
+        self.racing_top_up(a, n).await?;
+        Ok(n)
     }
     async fn tx_count_mined(&self, a: Address) -> Result<u64, StoreError> {
         self.mem.tx_count_mined(a).await
