@@ -75,11 +75,12 @@ async fn landed_by<A: Arkiv>(
     Ok(false)
 }
 
-/// The signed `at` of a head envelope, v3 or v2.
+/// The signed `at` of a head envelope, v4, v3 or v2.
 fn head_at(envelope: &[u8]) -> Option<u64> {
-    use charter_core::{Body, HeadBody, HeadBodyV3, Kind};
+    use charter_core::{Body, HeadBody, HeadBodyV3, HeadBodyV4, Kind};
     let e = charter_core::Envelope::decode(envelope).ok()?;
     match e.kind {
+        Kind::HeadV4 => HeadBodyV4::decode(&e.body).ok().map(|b| b.0.at),
         Kind::HeadV3 => HeadBodyV3::decode(&e.body).ok().map(|b| b.at),
         Kind::Head => HeadBody::decode(&e.body).ok().map(|b| b.at),
         _ => None,
