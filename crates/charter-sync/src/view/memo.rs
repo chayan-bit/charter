@@ -261,12 +261,18 @@ async fn probe_rows<A: Arkiv>(a: &A, filter: Pred) -> Result<(u64, Vec<(B256, u6
     Ok((block, rows))
 }
 
-/// Both lists go out together, so the op list costs no round trip of its own unless it
-/// alone runs past one page.
-async fn probe<A: Arkiv>(a: &A, rid: &Rid) -> Result<Probe> {
-    let ops = Pred::And(vec![b32("ag.rid", rid), kind(Kind::Cob)]);
-    let ((block, rows), (ops_block, ops)) =
-        try_join(probe_rows(a, probe_filter(rid)), probe_rows(a, ops)).await?;
+/// The op list is read only for a repo the last full sync saw pinned (`with_ops`): it is
+/// compared only then. Both lists go out together, so it costs no round trip of its own
+/// unless it alone runs past one page. A repo pinned since its memo was written has an
+/// empty op list in it, so its next probe differs and that sync is a full one.
+async fn probe<A: Arkiv>(a: &A, rid: &Rid, with_ops: bool) -> Result<Probe> {
+    let ops = async {
+        match with_ops {
+            true => probe_rows(a, Pred::And(vec![b32("ag.rid", rid), kind(Kind::Cob)])).await,
+            false => Ok((0, vec![])),
+        }
+    };
+    let ((block, rows), (ops_block, ops)) = try_join(probe_rows(a, probe_filter(rid)), ops).await?;
     Ok(Probe {
         block: block.max(ops_block),
         rows,
@@ -452,7 +458,7 @@ pub async fn build<'a, A: Arkiv>(
         // A first clone reads its identity rows through the private-repo check, so its
         // record may lack them: read them live, once, with the probe.
         let missing = !pages.contains_key(&key(&q, &o));
-        let (fresh, ident) = futures_util::future::join(probe(a, &rid), async {
+        let (fresh, ident) = futures_util::future::join(probe(a, &rid, memo.pinned), async {
             match missing {
                 true => a.query(&q, &o).await.ok(),
                 false => None,
@@ -489,7 +495,7 @@ pub async fn build<'a, A: Arkiv>(
         let probed = async {
             match earlier {
                 Some(p) => Ok(p),
-                None => probe(a, &rid).await,
+                None => probe(a, &rid, memo.pinned).await,
             }
         };
         let (p, pages) = futures_util::future::join(probed, prefetch(a, &rid, &memo)).await;
@@ -505,8 +511,11 @@ pub async fn build<'a, A: Arkiv>(
         }
     }
     let backend = Served::new(a, BTreeMap::new());
-    let (p, view) =
-        futures_util::future::join(probe(a, &rid), super::build(&backend, &rid, state, want)).await;
+    let (p, view) = futures_util::future::join(
+        probe(a, &rid, memo.pinned),
+        super::build(&backend, &rid, state, want),
+    )
+    .await;
     trace("plain", || format!("probed={}", p.is_ok()));
     let s = Session {
         backend,

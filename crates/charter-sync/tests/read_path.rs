@@ -232,6 +232,10 @@ async fn an_extended_cob_op_of_a_pinned_repo_changes_the_probe() {
     charter_sync::sync(&net, &repo, &charter_sync::Want::default())
         .await
         .expect("full sync");
+    // The memo written before the pin holds no op list; this sync records one.
+    charter_sync::sync(&net, &repo, &charter_sync::Want::default())
+        .await
+        .expect("sync recording the ops");
 
     // Same op count, new `$updatedAt` (ops are read-only, so an extend): the probe sees it.
     let key = created_by(&net, mallory.address()).await[0].key;
@@ -249,4 +253,50 @@ async fn an_extended_cob_op_of_a_pinned_repo_changes_the_probe() {
             .any(|c| c.starts_with("query") && !probe_or_count(&c)),
         "the changed probe sends the view's queries: {sent:#?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpinned_repo_with_many_ops_sends_no_op_list_with_its_probe() {
+    use charter_store::AttributeValue as V;
+    let net = Net::new();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (_, bob, rid, _) = pushed_and_cloned(&net, tmp.path()).await;
+    let mallory = outsider(&net);
+    for group in (0..120u128).collect::<Vec<_>>().chunks(40) {
+        let ops = group
+            .iter()
+            .map(|salt| {
+                let attrs = [
+                    ("ag.kind", V::Str("cob".into()), true),
+                    ("ag.rid", V::Bytes32(rid), true),
+                ];
+                charter_store::create_op(&attrs, 10_000, *salt).expect("op")
+            })
+            .collect();
+        send_ops(&net, &mallory, ops).await;
+    }
+    let repo = bob.repo(&rid);
+    charter_sync::sync(&net, &repo, &charter_sync::Want::default())
+        .await
+        .expect("full sync");
+    let cob_queries = |net: &Net| {
+        let calls = net.stats.calls();
+        calls
+            .iter()
+            .filter(|c| c.starts_with("query") && c.contains("str('cob')"))
+            .count()
+    };
+    for path in ["replayed", "plain"] {
+        if path == "plain" {
+            charter_sync::view::memo::expire(&repo).expect("expire");
+        }
+        net.stats.reset();
+        charter_sync::sync(&net, &repo, &charter_sync::Want::default())
+            .await
+            .expect("sync");
+        // v0.4.0 sent one count-only query for the ops of every repo.
+        let n = cob_queries(&net);
+        eprintln!("{path} sync: {n} op queries");
+        assert!(n <= 1, "{path} sync of an unpinned repo pages its ops: {n}");
+    }
 }
