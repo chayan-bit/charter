@@ -393,6 +393,9 @@ impl<A: Arkiv> Arkiv for Served<'_, A> {
     fn seals(&self) -> bool {
         self.inner.seals()
     }
+    fn seals_for(&self, rid: &[u8; 32]) -> bool {
+        self.inner.seals_for(rid)
+    }
     fn open_rows(&self, rows: Vec<EntityData>) -> Vec<EntityData> {
         self.inner.open_rows(rows)
     }

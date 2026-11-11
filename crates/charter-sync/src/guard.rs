@@ -19,11 +19,11 @@ pub fn keyring_path(home: &Path, rid: &Rid) -> PathBuf {
         .join(format!("{}.json", hex::encode(rid)))
 }
 
-/// `E_UNSEALED_PRIVATE` when `a` does not seal and this machine holds a keyring for `rid`.
-/// One `stat`, none on a sealing backend; a `stat` that fails for any reason but "absent"
-/// refuses too.
+/// `E_UNSEALED_PRIVATE` when `a` does not seal under `rid`'s own keys (a plain backend, or
+/// one sealing another repo) and this machine holds a keyring for `rid`. One `stat`, none
+/// on a backend sealing `rid`; a `stat` that fails for any reason but "absent" refuses too.
 pub fn require_sealed<A: Arkiv>(a: &A, home: &Path, rid: &Rid) -> Result<()> {
-    if a.seals() || matches!(keyring_path(home, rid).try_exists(), Ok(false)) {
+    if a.seals_for(rid) || matches!(keyring_path(home, rid).try_exists(), Ok(false)) {
         return Ok(());
     }
     Err(SyncError::coded(

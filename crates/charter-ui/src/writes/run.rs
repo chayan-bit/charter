@@ -334,4 +334,7 @@ impl<A: Arkiv> Arkiv for Tap<A> {
     fn seals(&self) -> bool {
         self.a.seals()
     }
+    fn seals_for(&self, rid: &[u8; 32]) -> bool {
+        self.a.seals_for(rid)
+    }
 }

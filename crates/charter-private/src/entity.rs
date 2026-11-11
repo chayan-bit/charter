@@ -121,9 +121,10 @@ fn decode_hidden(mut b: &[u8]) -> Option<Vec<AttributeEntry>> {
     Some(out)
 }
 
-/// Seals one create or patch op of `ring`'s repo; every other op, and an op already sealed,
-/// is returned unchanged (sealing is idempotent, as `Arkiv::seal_ops` requires). A v2 head
-/// patch carries every attribute, so it seals exactly like a create (head-model 9).
+/// Seals one create or patch op of `ring`'s repo; an op naming another repo's rid is
+/// refused, and every other op, and an op already sealed, is returned unchanged (sealing is
+/// idempotent, as `Arkiv::seal_ops` requires). A v2 head patch carries every attribute, so
+/// it seals exactly like a create (head-model 9).
 pub fn seal_op(ring: &Keyring, op: Operation) -> Result<Operation> {
     match op.operation {
         OP_CREATE => {
@@ -156,8 +157,8 @@ fn has(given: &[Attribute], name: &str) -> Result<bool> {
     Ok(given.iter().any(|a| a.name == w))
 }
 
-/// The sealed attribute list, or `None` when the attributes are not an unsealed entity
-/// of `ring`'s repo.
+/// The sealed attribute list, or `None` when the attributes are not an unsealed repo
+/// entity; an error when they are another repo's.
 fn seal_attrs(ring: &Keyring, given: &[Attribute]) -> Result<Option<Vec<Attribute>>> {
     let find = |n: &str| -> Result<Option<AttributeValue>> {
         let w = word(n)?;
@@ -169,12 +170,15 @@ fn seal_attrs(ring: &Keyring, given: &[Attribute]) -> Result<Option<Vec<Attribut
     let (Some(AttributeValue::Bytes32(rid)), None) = (find("ag.rid")?, find(EPOCH)?) else {
         return Ok(None);
     };
+    if rid != ring.rid {
+        // Sending it as is would publish another repo's entity in the clear.
+        return Err(internal(
+            "this op belongs to another repo than the one this backend seals",
+        ));
+    }
     let Some(AttributeValue::Str(kind)) = find("ag.kind")? else {
         return Ok(None);
     };
-    if rid != ring.rid {
-        return Ok(None);
-    }
     if RESERVED.contains(&kind.as_str()) {
         return Err(internal(&format!(
             "ag.kind {kind:?} is reserved in a private repo"
@@ -448,6 +452,21 @@ mod tests {
         let sealed = seal_op(&ring(), full).expect("sealed");
         let again = seal_op(&ring(), sealed.clone()).expect("idempotent");
         assert_eq!(again.operationData, sealed.operationData);
+    }
+
+    #[test]
+    fn an_op_of_another_repo_is_refused_instead_of_sent_in_plaintext() {
+        let other = charter_store::create_op(
+            &[
+                ("ag.kind", AttributeValue::Str("anchor".into()), true),
+                ("ag.rid", AttributeValue::Bytes32([8; 32]), true),
+                ("ag.body", AttributeValue::Bytes(vec![1, 2, 3]), false),
+            ],
+            100,
+            charter_store::random_salt(),
+        )
+        .expect("op");
+        assert!(seal_op(&ring(), other).is_err());
     }
 
     fn row(nid: u8, created: u64, updated: u64, readonly: bool, h: u8) -> EntityData {

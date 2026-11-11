@@ -174,6 +174,9 @@ impl<A: Arkiv> Arkiv for Sealed<'_, A> {
     fn seals(&self) -> bool {
         true
     }
+    fn seals_for(&self, rid: &[u8; 32]) -> bool {
+        self.ring.rid == *rid
+    }
     fn open_rows(&self, rows: Vec<charter_store::EntityData>) -> Vec<charter_store::EntityData> {
         open_all(&self.ring, rows)
     }

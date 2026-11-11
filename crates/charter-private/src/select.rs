@@ -119,6 +119,9 @@ impl<A: Arkiv> Arkiv for ForRepo<'_, A> {
     fn seals(&self) -> bool {
         both!(self, b => b.seals())
     }
+    fn seals_for(&self, rid: &[u8; 32]) -> bool {
+        both!(self, b => b.seals_for(rid))
+    }
     fn open_rows(&self, rows: Vec<EntityData>) -> Vec<EntityData> {
         both!(self, b => b.open_rows(rows))
     }
