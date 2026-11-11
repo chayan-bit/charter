@@ -512,11 +512,21 @@ Measured on the test fixture with the same tests before the build (main 53f7774)
 | Commit render p50 / p99 | 0.32 / 0.78 ms | 0.25 / 0.40 ms |
 | Repo list render p50 / p99 | 0.03 / 0.15 ms | 0.05 / 0.09 ms |
 | Branches, wallet, settings p50 | not served | 0.10, 0.01, 0.04 ms |
+| Tree render p50 / p99, A/B | 0.21 / 0.25 to 0.33 ms | 0.13 to 0.14 / 0.15 to 0.20 ms |
+| Blob render p50 / p99, A/B | 0.14 to 0.15 / 0.17 to 0.23 ms | 0.15 / 0.20 to 0.27 ms |
+| Repo home render p50, A/B | 0.28 to 0.30 ms | 0.23 to 0.24 ms |
+| History walks per tree / blob render | one walk of up to 2,000 commits for the entries plus one unbounded walk for the folder bar / 0 | 0 / 0 |
+| Commit objects read per Code page for the branch picker | one per ref | 0 (from the index) |
 | Chain queries: first sync, then per hour with no page open | 9, then 0 | 9, then 0 |
 | Chain queries per hour: idle, on screen, on screen with one change | 17, 365, 371 | 17, 365, 371 |
 
 The repo list's p50 rose by about 20 microseconds from its richer rows; its p99 fell, and issue and patch counts are now counted once per sync round into `view.json` instead of reading every repo's `cobs.json` on each render, so the list no longer grows with op count.
 Fonts and the icon sprite (63 KB and 5.4 KB gzipped) load once and are cached as immutable; the 20 KB budget of `ui.md` section 6 counts HTML and CSS.
+The A/B rows ran the before (`425df78`, main's code) and after binaries alternately four times each in one session, because the machine stayed loaded (load average 4 to 10); the ranges are across those runs.
+Tree, blob and repo home pages walk no history while rendering: the sync round writes `last.json`, one index per ref tip keyed by commit id (`charter-ui/src/last.rs`), and the page looks paths up in it, loaded once per sync.
+A tip that did not move keeps its index; a moved tip is indexed again from one walk, bounded at 20,000 commits, that stops once every path of the tip's tree is placed.
+With no index yet (a cold start before the first round) the pages render without the last-commit bar.
+The blob page's p50 matches main with the bar; taking the bar out measured the same, and the remaining p99 spread is within run-to-run noise on this machine.
 The writer reads the wallet balance once at start, once when pricing (as before), once after a write and on Refresh; none of these are in the sync loop.
 
 ### 10.7 Known issues found during the build
@@ -527,12 +537,15 @@ The writer reads the wallet balance once at start, once when pricing (as before)
   It stays one query when nothing changed and two when something did, as before; the `tests/pace.rs` counts are unchanged (first sync 9, then 0 with no page open; 17 an hour idle; 365 on screen; 371 with one change), and a refs-only push costs one probe query per 10 s until it is seen, then one round.
   The `chart` CLI's memo probe (`charter-sync/src/view/memo.rs`) already lists every head's `(key, $updatedAt)` for every repo, and a refs-only push now has a test there too.
 - Fixed: the phone tab strip fades its right edge only while tabs sit past it.
-- Fixed: the blob page has the last-commit bar; it walks history for the one path, as the tree page does.
+- Fixed: the blob page has the last-commit bar, read from the per-tip index of section 10.6 like the tree page's, so neither page walks history while rendering.
+- Fixed: amounts use one format everywhere (wallet and its chip, the cost dialog and its breakdown, the write status, the ledger, Rules and the timeline), from `charter-ui/src/pages/money.rs`.
+  From 0.0001 tGLM up it shows at most four decimals with trailing zeros dropped, rounded up for what you may pay and down for what you hold; below that it shows gwei, or wei under 1 gwei (`5 wei`); the exact tGLM value is the tooltip.
+  The ops listed under "what will be signed" keep the exact value.
 - Writes to a private repo are priced and sent sealed only once `sec/private-plumbing` lands; that branch picks the backend inside `writes/run.rs`, and this build left that choice alone.
   The dialog reads every figure from the `Estimate` the writer produces, so it shows the sealed cost with no change here.
 
 ### 10.8 Verification
 
-- Workspace tests (578), `cargo fmt --check` and `cargo clippy -D warnings` pass; `tests/pace.rs` adds the refs-only push from another device (it failed before the probe fix); `tests/v2.rs` adds 8 tests (vocabulary and no bare block numbers on 14 pages, aliases, branches and picker, the conflict banner, Settings applied, kept across a restart, mode 0600, bad input and missing CSRF refused, corrupt-file reset, the small-write skip, the dialog fields and the ledger, and the unfunded case).
+- Workspace tests (581), `cargo fmt --check` and `cargo clippy -D warnings` pass; `tests/pace.rs` adds the refs-only push from another device (it failed before the probe fix); `tests/v2.rs` adds 8 tests (vocabulary and no bare block numbers on 14 pages, aliases, branches and picker, the conflict banner, Settings applied, kept across a restart, mode 0600, bad input and missing CSRF refused, corrupt-file reset, the small-write skip, the dialog fields and the ledger, and the unfunded case).
 - The e2e run on the fake chain: 1,495 checks pass, 3 warn (two synthetic long pages over 20 KB and debug-build timing on one of them), 0 fail, including the live update of section 10.7 and the tab fade at both ends on 76 phone pages; axe reports 0 WCAG 2.1 A and AA violations on 50 page and state runs, including the confirm dialog with its breakdown open.
 - `e2e/run.sh` now exits 0 when every check passes and `E2E_WORK` keeps the work directory (its cleanup trap's last test used to set the exit status to 1).
