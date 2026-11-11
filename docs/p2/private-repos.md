@@ -86,6 +86,7 @@ As a fail-closed backstop, charter-sync refuses with `E_UNSEALED_PRIVATE` before
 The check is one `stat` per write and none on a sealed backend; group operations (key packages, commits, welcomes, grants) seal themselves and do not pass through it.
 A machine that reads a private repo only through published grants holds no keyring file, so the guard does not cover it; such readers cannot write anyway.
 Decrypted data stays with its owner: `$CHARTER_HOME`, `repos/` and each repo cache are made 0700 (an existing home is tightened on first use), the cache git is created with `core.sharedRepository=0600`, and packs and fetch temp files are created 0600.
+A cache made before this is tightened once on its first open: every directory 0700, every file 0600, and `core.sharedRepository=0600` added to its git config; an `owner-only` marker file in the cache then makes every later open a single `stat`.
 `scripts/chart-ci.sh` and `scripts/chart-release-attest.sh` run under `umask 077`.
 The cache directory is still named by the rid in hex, which a local user who can list `$CHARTER_HOME` would learn; with the 0700 home nobody else can, so naming caches by a keyed hash of the rid is left as an option.
 

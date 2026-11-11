@@ -117,7 +117,17 @@ impl Repo {
     }
 
     fn locked(rid: &Rid, dir: PathBuf, lock: std::fs::File) -> Result<Self> {
+        // One stat per open once the marker exists; under the lock, so one opener migrates.
+        let marker = dir.join(OWNER_ONLY_MARKER);
+        let unmarked = !marker.exists();
+        let migrate = unmarked && dir.join("git").join("HEAD").exists();
         let git = Git::init_cache(&dir.join("git"))?;
+        if migrate {
+            tighten_cache(&dir)?;
+        }
+        if unmarked {
+            write_owner_only(&marker, b"")?;
+        }
         Ok(Self {
             rid: *rid,
             dir,
@@ -144,6 +154,43 @@ impl Repo {
     pub fn tmp(&self) -> PathBuf {
         self.dir.join("tmp")
     }
+}
+
+/// Marks a cache whose files are owner-only: made by this version, or tightened once by
+/// [`tighten_cache`].
+const OWNER_ONLY_MARKER: &str = "owner-only";
+
+/// A cache made before caches were owner-only, tightened once: every directory 0700, every
+/// file 0600 (symlinks untouched), and `core.sharedRepository=0600` so git keeps new
+/// objects owner-only.
+fn tighten_cache(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let io = |p: &Path, e| SyncError::io(p.display(), e);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).map_err(|e| io(&d, e))? {
+            let p = e.map_err(|e| io(&d, e))?.path();
+            let t = std::fs::symlink_metadata(&p)
+                .map_err(|e| io(&p, e))?
+                .file_type();
+            let mode = match (t.is_dir(), t.is_file()) {
+                (true, _) => 0o700,
+                (_, true) => 0o600,
+                _ => continue,
+            };
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode))
+                .map_err(|e| io(&p, e))?;
+            if t.is_dir() {
+                stack.push(p);
+            }
+        }
+    }
+    let config = dir.join("git").join("config");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, b"[core]\n\tsharedRepository = 0600\n"))
+        .map_err(|e| io(&config, e))
 }
 
 /// Creates `d` and makes it owner-only: `$CHARTER_HOME` and a repo's cache hold the

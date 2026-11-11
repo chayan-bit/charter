@@ -82,3 +82,65 @@ fn decrypted_cache_is_private_to_its_owner() {
         );
     });
 }
+
+fn mode(p: &std::path::Path) -> u32 {
+    std::fs::symlink_metadata(p)
+        .expect("meta")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+/// A cache from before caches were owner-only: 0755 dirs and 0644 objects, packs and temp
+/// files. The first open tightens it once and marks it; later opens never walk it again.
+#[test]
+fn a_cache_made_before_the_upgrade_is_tightened_once() {
+    let home = tempfile::tempdir().expect("home");
+    let rid: Rid = [5; 32];
+    let dir = home.path().join("repos").join(hex::encode(rid));
+    let git = dir.join("git");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let out = std::process::Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .arg(&git)
+        .output()
+        .expect("git init");
+    assert!(out.status.success());
+    let files = [
+        git.join("objects/ab/cdef0123"),
+        git.join("objects/pack/pack-1.pack"),
+        dir.join("outgoing/v3-1.pack"),
+        dir.join("tmp/fetch.pack"),
+        dir.join("state.json"),
+    ];
+    for f in &files {
+        std::fs::create_dir_all(f.parent().expect("parent")).expect("mkdir");
+        std::fs::write(f, b"decrypted").expect("write");
+    }
+    let loosen = |p: &std::path::Path, m: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).expect("chmod")
+    };
+    for f in &files {
+        loosen(f, 0o644);
+        loosen(f.parent().expect("parent"), 0o755);
+    }
+
+    drop(charter_sync::Repo::open(home.path(), &rid).expect("open"));
+    let open = open_to_others(&dir);
+    assert!(open.is_empty(), "left readable by others: {open:?}");
+    for f in &files {
+        assert_eq!(mode(f), 0o600, "{}", f.display());
+    }
+    let config = std::fs::read_to_string(git.join("config")).expect("config");
+    assert!(config.contains("sharedRepository = 0600"), "{config}");
+    assert!(dir.join("owner-only").exists(), "marked");
+
+    // Marked: a file loosened later is not walked again on open.
+    loosen(&files[0], 0o644);
+    drop(charter_sync::Repo::open(home.path(), &rid).expect("reopen"));
+    assert_eq!(mode(&files[0]), 0o644, "the walk ran again");
+    assert_eq!(
+        config,
+        std::fs::read_to_string(git.join("config")).expect("config")
+    );
+}
