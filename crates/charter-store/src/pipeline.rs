@@ -338,13 +338,21 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
 
     /// A plain value transfer (wallet top-up).
     pub async fn transfer(&mut self, to: Address, value: U256) -> Result<Receipt, StoreError> {
-        let landed = self
-            .drive(VecDeque::from([(0, Job::Transfer(to, value))]))
-            .await?;
+        let landed = self.transfers(vec![(to, value)]).await?;
         landed
             .first()
             .map(|l| l.receipt)
             .ok_or_else(|| StoreError::Rpc("transfer produced no receipt".into()))
+    }
+
+    /// Several value transfers sent together (consecutive nonces, so they share a block).
+    pub async fn transfers(&mut self, to: Vec<(Address, U256)>) -> Result<Vec<Landed>, StoreError> {
+        let jobs = to
+            .into_iter()
+            .enumerate()
+            .map(|(i, (a, v))| (i, Job::Transfer(a, v)))
+            .collect();
+        self.drive(jobs).await
     }
 
     async fn drive(

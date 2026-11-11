@@ -239,12 +239,19 @@ impl<A: Arkiv> HeadPush<'_, A> {
     pub async fn setup(&self) -> Result<Ready> {
         let first = self.first_ops()?;
         let sent_first = !first.is_empty();
-        if sent_first {
-            self.send_from(&self.keys.control(&self.rid()), vec![first])
-                .await?;
-        }
+        // One wallet run tops up both the identity's control address (for `first`) and
+        // `C_d`, so a first push waits for one top-up block, not two; then `first` goes
+        // while `C_d` is checked idle (the wallet sends nothing else meanwhile).
+        let control = self.keys.control(&self.rid());
+        let funded = async {
+            let funds = self.prefund(&first).await?;
+            if sent_first {
+                self.send_from(&control, vec![first.clone()]).await?;
+            }
+            Ok(funds)
+        };
         let ((waited, account), (head, base_fee, at, balance)) =
-            futures_util::future::try_join(self.ensure_idle(), self.prefund_control()).await?;
+            futures_util::future::try_join(self.ensure_idle(), funded).await?;
         let _ = std::fs::remove_file(self.pending_head_path());
         Ok(Ready {
             current: !sent_first && !waited,
@@ -257,23 +264,55 @@ impl<A: Arkiv> HeadPush<'_, A> {
     }
 
     /// Tops `C_d` up for several head txs at once when it cannot pay for one, so most
-    /// pushes send no top-up before their head tx. Returns the head, base fee and time it
-    /// read, and `C_d`'s balance after the top-up.
-    async fn prefund_control(&self) -> Result<(u64, u128, std::time::Instant, U256)> {
-        let c = self.dev.control_address(&self.rid());
-        let ((head, fee), have) =
-            futures_util::future::try_join(self.a.head_fee(), self.a.balance(c)).await?;
-        let at = std::time::Instant::now();
-        let one = self.cfg.pipeline.tx_reserve(HEAD_GAS, U256::ZERO, fee);
-        let Some(amount) = charter_store::PipelineConfig::top_up(have, one, PREFUND_HEADS) else {
-            return Ok((head, fee, at, have));
+    /// pushes send no top-up before their head tx, and the identity's control address
+    /// for `first` (the first write and device delegation) if it holds too little. Returns
+    /// the head, base fee and time it read, and `C_d`'s balance after the top-up.
+    async fn prefund(&self, first: &[Operation]) -> Result<(u64, u128, std::time::Instant, U256)> {
+        let rid = self.rid();
+        let (c_d, c) = (
+            self.dev.control_address(&rid),
+            self.keys.control_address(&rid),
+        );
+        let pc = &self.cfg.pipeline;
+        // The control address's needs only for `first`, read in the same round trip.
+        let control = async {
+            match first.is_empty() {
+                true => Ok(None),
+                false => {
+                    futures_util::future::try_join(self.a.estimate(c, first), self.a.balance(c))
+                        .await
+                        .map(Some)
+                }
+            }
         };
+        let ((head, fee), have, control) =
+            futures_util::future::try_join3(self.a.head_fee(), self.a.balance(c_d), control)
+                .await?;
+        let at = std::time::Instant::now();
+        let one = pc.tx_reserve(HEAD_GAS, U256::ZERO, fee);
+        let mut sends = vec![];
+        if let Some(amount) = charter_store::PipelineConfig::top_up(have, one, PREFUND_HEADS) {
+            sends.push((c_d, amount));
+        }
+        // What the pipeline sending `first` would top up itself, one block later.
+        if let Some((gas, have_c)) = control
+            && let Some(amount) = charter_store::PipelineConfig::top_up(
+                have_c,
+                pc.tx_reserve(gas, U256::ZERO, fee),
+                1,
+            )
+        {
+            sends.push((c, amount));
+        }
+        if sends.is_empty() {
+            return Ok((head, fee, at, have));
+        }
+        let to_c_d = sends.iter().find(|(a, _)| *a == c_d).map(|(_, v)| *v);
         let chain = self.a.chain_id().await?;
-        let cfg = self.cfg.pipeline.clone();
-        charter_store::TxPipeline::new(self.a, self.keys.wallet(), chain, cfg)
-            .transfer(c, amount)
+        charter_store::TxPipeline::new(self.a, self.keys.wallet(), chain, pc.clone())
+            .transfers(sends)
             .await?;
-        Ok((head, fee, at, have + amount))
+        Ok((head, fee, at, have + to_c_d.unwrap_or_default()))
     }
 
     /// Sends what `plan` says, re-checks and commits, reading the head tx's nonce inputs
@@ -461,10 +500,10 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 return Ok(());
             }
             let mut file = std::fs::File::open(f).map_err(|e| SyncError::io(f.display(), e))?;
-            let mut jobs = vec![];
-            for batch in missing.chunks(self.cfg.chunk_batch.max(1)) {
-                jobs.clear();
-                for &i in batch {
+            let batches: Vec<&[u64]> = missing.chunks(self.cfg.chunk_batch.max(1)).collect();
+            for (n, batch) in batches.iter().enumerate() {
+                let mut jobs = vec![];
+                for &i in *batch {
                     let bytes = packs::read_chunk(&mut file, i, m.size)
                         .map_err(|e| SyncError::io(f.display(), e))?;
                     jobs.push(vec![chunk_op(
@@ -475,11 +514,21 @@ impl<A: Arkiv> HeadPush<'_, A> {
                         self.cfg.data_lifetime,
                     )?]);
                 }
-                if let Err(e) = self.send_from(&self.dev.bulk(&rid), jobs.clone()).await {
-                    warn(&format!("snapshot upload: {e}; checking what landed"));
+                // The manifest rides with the last chunks instead of a block of its own:
+                // readers reach it only through the head, which lands after both.
+                let with_manifest = !sent_manifest && n + 1 == batches.len();
+                if with_manifest {
+                    jobs.push(vec![entity_op::<ManifestBody>(
+                        manifest,
+                        self.cfg.data_lifetime,
+                    )?]);
+                }
+                match self.send_from(&self.dev.bulk(&rid), jobs).await {
+                    Ok(_) => sent_manifest |= with_manifest,
+                    Err(e) => warn(&format!("snapshot upload: {e}; checking what landed")),
                 }
             }
-            if !sent_manifest {
+            if !sent_manifest && batches.is_empty() {
                 let op = entity_op::<ManifestBody>(manifest, self.cfg.data_lifetime)?;
                 self.send_from(&self.dev.bulk(&rid), vec![vec![op]]).await?;
                 sent_manifest = true;

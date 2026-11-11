@@ -167,3 +167,64 @@ async fn a_small_push_sends_its_head_patch_without_an_estimate_or_a_tx_lookup() 
         "the recorded index is the real one"
     );
 }
+
+/// Blocks after `since` holding a value transfer from `from` to `to`.
+async fn transfer_blocks(net: &Net, since: u64, from: Address, to: Address) -> Vec<u64> {
+    let head = net.mem.head().await.expect("head");
+    let mut out = vec![];
+    for n in since + 1..=head {
+        for t in net.mem.block_txs(n).await.expect("block") {
+            if t.from == from && t.to == Some(to) && t.input.is_empty() {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_push_tops_up_in_one_block_and_sends_its_manifest_with_the_chunks() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "first-push").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    commit(&work, &[("a", &noise(1, 300_000))], "feat: one");
+    let since = net.mem.head().await.expect("head");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("first push");
+
+    let wallet = alice.keys.wallet().address();
+    let dev = charter_sync::device::device_keys(alice.home.path()).expect("dev");
+    let c_d = transfer_blocks(&net, since, wallet, dev.control_address(&rid)).await;
+    let control = transfer_blocks(&net, since, wallet, alice.keys.control_address(&rid)).await;
+    assert_eq!(c_d.len(), 1, "one top-up of C_d: {c_d:?}");
+    assert!(
+        control.iter().all(|b| c_d.contains(b)),
+        "the control top-up shares C_d's block: {control:?} vs {c_d:?}"
+    );
+
+    let made = created_by(&net, dev.bulk_address(&rid)).await;
+    let kind = |o: &charter_core::Observed, k: &str| {
+        o.attr("ag.kind") == Some(&charter_core::AttrValue::Str(k.into()))
+    };
+    let last_chunk = made
+        .iter()
+        .filter(|o| kind(o, "chunk"))
+        .map(|o| o.block)
+        .max();
+    let manifest = made
+        .iter()
+        .filter(|o| kind(o, "manifest"))
+        .map(|o| o.block)
+        .max();
+    assert!(
+        last_chunk.is_some() && manifest.is_some(),
+        "a snapshot was sent"
+    );
+    assert!(
+        manifest <= last_chunk,
+        "the manifest went with the chunks, not a block after: {manifest:?} vs {last_chunk:?}"
+    );
+}
