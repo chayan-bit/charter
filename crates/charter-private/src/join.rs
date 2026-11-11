@@ -35,12 +35,34 @@ pub async fn refresh<A: Arkiv>(
         ring = join(a, &mls, rid).await?;
     }
     if let Some(r) = ring.as_mut() {
-        apply_commits(a, &mls, r).await?;
+        let mut member = apply_commits(a, &mls, r).await?;
+        if !member {
+            member = rejoin(a, &mls, keys, r).await?;
+        }
+        // An epoch end past the next epoch, or past the current one while still a member,
+        // came from a commit nobody applied (a keyring saved before 0.5.1 kept any).
+        let open = r.current()?.0 + u64::from(!member);
+        r.rotated.retain(|e, _| *e <= open);
         check_history(r)?;
         r.save(&cfg.home)?;
         mls.save()?;
     }
     Ok((mls, ring))
+}
+
+/// After this member was removed: a welcome from a later re-add replaces `ring` (and the
+/// stale MLS group); without one, `ring` keeps the old epochs for reading history but no
+/// role, so nothing acts on the role it held before. Returns whether it is a member again.
+async fn rejoin<A: Arkiv>(a: &A, mls: &Mls, keys: &Keys, ring: &mut Keyring) -> Result<bool> {
+    if let Some(mut fresh) = join(a, mls, &ring.rid).await?
+        && fresh.current()?.0 > ring.current()?.0
+        && apply_commits(a, mls, &mut fresh).await?
+    {
+        *ring = fresh;
+        return Ok(true);
+    }
+    ring.roles.remove(&hex::encode(keys.nid()));
+    Ok(false)
 }
 
 /// Joins `rid`'s group. Every Welcome for one of our key packages is evaluated; exactly one
@@ -64,10 +86,14 @@ async fn join<A: Arkiv>(a: &A, mls: &Mls, rid: &Rid) -> Result<Option<Keyring>> 
             Err(e) => refused = Some(e),
         }
     }
-    let groups: BTreeSet<(Vec<u8>, u64)> = ok
-        .iter()
-        .map(|(_, (r, _))| (r.group.clone(), r.current().map_or(0, |c| c.0)))
-        .collect();
+    // Each verified welcome continues the canonical commit record ([`on_record`]), so
+    // welcomes at different epochs are all genuine (a re-add, or a second add of the same
+    // key package): the newest wins. Two at one epoch naming different groups cannot both
+    // be canonical, so they are refused.
+    let epoch_of = |r: &Keyring| r.current().map_or(0, |c| c.0);
+    let newest = ok.iter().map(|(_, (r, _))| epoch_of(r)).max();
+    ok.retain(|(_, (r, _))| Some(epoch_of(r)) == newest);
+    let groups: BTreeSet<&[u8]> = ok.iter().map(|(_, (r, _))| r.group.as_slice()).collect();
     if groups.len() > 1 {
         return Err(SyncError::coded(
             ErrorCode::Equivocation,
@@ -79,7 +105,8 @@ async fn join<A: Arkiv>(a: &A, mls: &Mls, rid: &Rid) -> Result<Option<Keyring>> 
         return refused.map_or(Ok(None), Err);
     };
     let body = bytes(&rows[i].1, "ag.body").unwrap_or_default();
-    let g = mls.finish(mls.stage(body)?)?;
+    let staged = mls.stage(body)?.ok_or_else(|| not_member(rid))?;
+    let g = mls.finish(staged)?;
     ring.group = g.group_id().as_slice().to_vec();
     // Not handed to the clone as prefetched rows: the clone must read them itself, so its
     // memo records the identity page and later fetches replay it instead of reading again.
@@ -100,7 +127,7 @@ async fn verify_welcome<A: Arkiv>(
     let (Some(body), Some(bx)) = (bytes(w, "ag.body"), bytes(w, "ag.box")) else {
         return Ok(None);
     };
-    let Ok(staged) = mls.stage(body) else {
+    let Some(staged) = mls.stage(body)? else {
         return Ok(None);
     };
     let (epoch, key) = mls.staged_key(&staged, rid)?;
@@ -276,8 +303,10 @@ fn root_of(rid: &Rid, rows: &[Observed]) -> Option<Vec<Nid>> {
 }
 
 /// Applies attested admin commits for the next epochs; any other commit is skipped and
-/// undone. Stops once this member is removed: it then holds no key for later epochs.
-async fn apply_commits<A: Arkiv>(a: &A, mls: &Mls, ring: &mut Keyring) -> Result<()> {
+/// undone. Stops once this member is removed: it then holds no key for later epochs, and
+/// the commit that removed it (an admin's, as MLS authenticates) ends its last epoch.
+/// Returns whether it is still a member.
+async fn apply_commits<A: Arkiv>(a: &A, mls: &Mls, ring: &mut Keyring) -> Result<bool> {
     let mut g = mls.load(&ring.group)?;
     loop {
         let gens = ring.id_keys().count();
@@ -326,7 +355,7 @@ async fn apply_commits<A: Arkiv>(a: &A, mls: &Mls, ring: &mut Keyring) -> Result
         }
         // A removal started a new id-key generation: its later commits use it.
         if ring.id_keys().count() == gens || !g.is_active() {
-            return Ok(());
+            return Ok(g.is_active());
         }
     }
 }

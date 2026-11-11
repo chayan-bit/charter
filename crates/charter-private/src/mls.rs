@@ -244,16 +244,28 @@ impl Mls {
     }
 
     /// Decrypts a Welcome for one of this member's key packages without joining yet.
-    /// OpenMLS consumes the key package here: take a [`Self::snapshot`] first.
-    pub fn stage(&self, welcome: &[u8]) -> Result<StagedWelcome> {
+    /// OpenMLS consumes the key package here: take a [`Self::snapshot`] first. Joining
+    /// replaces this member's old state of the same group (left when it was removed), so a
+    /// re-add can be joined; callers join only a Welcome they verified. `None`: the Welcome
+    /// is for none of this member's unused key packages; any other failure is an error.
+    pub fn stage(&self, welcome: &[u8]) -> Result<Option<StagedWelcome>> {
         let body = MlsMessageIn::tls_deserialize_exact(welcome)
             .map_err(|e| mls_err("welcome", e))?
             .extract();
         let MlsMessageBodyIn::Welcome(w) = body else {
             return Err(mls_err("welcome", "not a Welcome"));
         };
-        StagedWelcome::new_from_welcome(&self.provider, create_config().join_config(), w, None)
-            .map_err(|e| mls_err("welcome", e))
+        let built =
+            StagedWelcome::build_from_welcome(&self.provider, create_config().join_config(), w);
+        match built {
+            Err(WelcomeError::NoMatchingKeyPackage) => Ok(None),
+            Err(e) => Err(mls_err("welcome", e)),
+            Ok(b) => b
+                .replace_old_group()
+                .build()
+                .map(Some)
+                .map_err(|e| mls_err("welcome", e)),
+        }
     }
 
     /// `(epoch, content key)` of a staged Welcome.
