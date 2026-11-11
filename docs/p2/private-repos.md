@@ -72,7 +72,7 @@ The MLS credential is a basic credential naming the nid, and it is bound to the 
 The adversary controls any number of wallets, may have been a member or admin earlier, and can write any entity to Arkiv.
 It cannot break ML-DSA-65, Ed25519, ML-DSA-44, X-Wing or XChaCha20-Poly1305, and cannot forge the root identity of the repo.
 Content and membership must stay confidential to current members, and members must accept only state an authorized member made.
-The fixes below are named after the findings of the 2026-11 review.
+The fixes below are named after the findings of the 2026-11 review (F) and of its follow-up review of the fixes (N).
 
 ### Join (F2)
 
@@ -85,19 +85,31 @@ At each epoch from there to E it takes the first commit in Arkiv order signed by
 The commit at E must be signed by the welcome's signer.
 Members check the same fields when they apply a commit, so the history a joiner replays is the one members applied.
 A removed admin keeps every key and admin set up to her removal, but the first commit after it was signed by a remaining admin and pins a key and admin set she does not have, so any welcome she forges fails the replay, even when no genuine welcome exists yet.
-A joiner also evaluates every welcome for its key packages, each on a snapshot of its MLS state, and fails with `E_EQUIVOCATION` if two verified welcomes lead to different groups.
+A joiner also evaluates every welcome for its key packages, each on a snapshot of its MLS state.
+Every verified welcome continues the canonical record, so verified welcomes at different epochs (a re-add, or the same key package added again before its owner joined) are all genuine, and the newest wins (N5).
+`E_EQUIVOCATION` is left for two verified welcomes at one epoch that name different groups, which the replay leaves no room for.
+A welcome that is not for an unused key package of the joiner is skipped; any other failure to stage it is an error, not a silent skip.
+A removed member that is added again on the same home rejoins: the new welcome replaces its old MLS state of the group (N7).
+Until then its keyring keeps the old epochs, so it can still read history, but no role, so nothing acts on the role it held before the removal.
 
 ### Late writes and role checks (F3)
 
 Each commit records the block it landed in (`Keyring::rotated`).
+A member places the start of an epoch only from a commit it applied, a commit whose lockbox opens under that epoch's key, or the commit that removed it (which MLS authenticates as an admin's).
+A joiner places them from the commits its replay accepts, and a grant reader from its verified history (see "Published grants").
+Anyone who copies the blinded rid can write a commit row naming any epoch, so such a row places nothing (N1).
+A keyring saved with an epoch start past the next epoch, or past the current one while the member is still in the group, drops it when next refreshed, and a lockbox's epoch starts past its own epoch are ignored.
 A row sealed in epoch e is admitted only if it landed no later than the commit for e+1 plus `GRACE_BLOCKS` (64 blocks, about two minutes), so an in-flight push is not lost.
 Readonly rows use their creation block.
 Heads are mutable and anyone may extend them, which moves their update block, so a head is also admitted if its `ag.h` is in the snapshot of heads the admin pinned in the commit.
 A head that is not pinned, was created in time and whose update block passed the cutoff (a body that landed in the grace window and was extended later) is admitted if its body's transaction from the head's creator landed by the cutoff plus grace.
 The search reads only blocks `at + 1` to `min(at + 64, cutoff + grace)`, because a body must land within 64 blocks after its signed `at` (docs/p5/head-model.md 5.4), so a removed member's later patch with a backdated `at` finds nothing there.
 Without this, such a head was hidden from other members, and keepalive stopped extending the snapshot and pieces it names, until its writer pushed again.
+The verdict is final, because the epoch has ended, so a backend made with `Sealed::caching` keeps it per entity key, `ag.h` and bound in `$CHARTER_HOME/private/<rid hex>.landed.json` (mode 600), and later reads pay no block reads for it (N4).
+The CLI, the remote helper and the UI sync loop use it.
 A signed row of a write kind (anchor, refs, manifest, device, head) is admitted only if its `ag.nid` held write or admin in the row's epoch; other signed rows need read.
-Heads and snapshot manifests are signed by a device key, which holds no role, so they pass this check and core accepts them only under the member's `device` record, which needs write.
+A head is signed by a device key but names its member in `ag.nid` (the device is `ag.dev`), so it is checked against the member's role: a writer demoted to read keeps its device key and device record, but its new heads do not count, and neither do an outsider's (N8).
+A snapshot manifest's `ag.nid` is the device key, which holds no role, so a manifest passes this check; it is content addressed and counts only when an admitted head names it, so a manifest from a demoted writer's device has no effect.
 Unsigned rows (chunks, pieces) pass, since only an admitted signed row can reference them.
 The same check covers cob ops, heads and refs, because all of them are opened by `Sealed`.
 
@@ -112,13 +124,17 @@ A second leaf for a nid that already holds a role is added only by `chart member
 A key package names a nid, its composite public key and a signature by that key over the MLS signature key, and an admin refuses one whose binding does not verify (`E_BAD_SIG`).
 A plain add of a key package whose nid already holds a role is refused (`E_BAD_FORMAT`), so an add can never demote an admin or add a hidden device.
 
-### Published grants (F7)
+### Published grants (F7, N2)
 
 A grant is `id_key || key || public key || signature || (nid || role)*`, signed by a root delegate over the rid, the epoch, both keys and the roles of that epoch.
 A reader picks the root-epoch grant whose keys open the root identity row (its hash is the rid), preferring a signed one.
-A later grant is used only if it is signed by a delegate of that root identity.
-An outsider's grant therefore can neither block nor replace the real one.
+That gives it the generation-0 id key, so it finds the commit records by `ag.ct`.
+It then takes the newest grant signed by a root delegate whose epoch's commit lockbox opens under the grant's key, and replays that lockbox's history from the root exactly as a joiner replays a welcome's.
+The verified history fixes every epoch key and admin set up to that epoch, and the end of that epoch is placed by the first commit of the next one signed by one of its admins.
+A grant counts only if its keys are the ones that history holds and its signer was an admin of the epoch before (a root delegate where no admin set is on record).
+A root delegate that another admin removed from the group therefore cannot publish a grant for an epoch it never held, and a grant published first by anyone can neither block nor replace the real one.
 A legacy 64-byte grant is still accepted for the root epoch, where opening the root identity authenticates it.
+In a repo with no attested commit yet (legacy, or never changed), every grant signed by a root delegate counts, the first per epoch.
 
 ### Id-key rotation (F8)
 
@@ -141,6 +157,7 @@ A welcome names its key package in plaintext (`ag.kp`), and key packages, commit
 A repo created before 0.5.1 has keyring format 1: no attestations, admin sets, role history or commit blocks.
 A 0.5.1 client reads such a repo as before, deriving the role history and commit blocks from the commits it can open, and accepts unattested commits only while the format is 1.
 The first membership change on 0.5.1 must be made by a root delegate; any other admin is refused with a clear upgrade message.
+Members enforce this too: they apply the migrating commit only if its signer is a delegate of the root identity, so an admin whose client skips the check cannot migrate the repo (N3).
 That commit sets format 2, records the admin set, pins the heads, and is attested; it is the first commit a joiner's replay starts from.
 From then on every client requires attestations, admission and the blinded pack.
 The same tx writes a `stop` row: an identity row under the generation-0 blinded rid whose `ag.v` no client supports.
@@ -172,8 +189,9 @@ Repo programs are expected to call these through obligations later.
 ## Unsealed-write guard and local permissions
 
 Every repo-scoped `chart` command and the `chart ui` write worker pick their backend with `charter_private::for_repo` (the remote helper with `ring_for`), so a private repo's writes and reads go through `Sealed`.
-As a fail-closed backstop, charter-sync refuses with `E_UNSEALED_PRIVATE` before any control write (identity, binds, ops), any push (chunks, pieces, head txs) and any keepalive when the backend does not seal and `$CHARTER_HOME/private/<rid>.json` exists.
-The check is one `stat` per write and none on a sealed backend; group operations (key packages, commits, welcomes, grants) seal themselves and do not pass through it.
+As a fail-closed backstop, charter-sync refuses with `E_UNSEALED_PRIVATE` before any control write (identity, binds, ops), any push (chunks, pieces, head txs) and any keepalive when the backend does not seal under that repo's own keys (`Arkiv::seals_for`) and `$CHARTER_HOME/private/<rid>.json` exists.
+A backend sealing another private repo therefore fails the check too, and `Sealed` refuses to seal an op that names another repo's rid instead of sending it as is (N6).
+The check is one `stat` per write and none on a backend sealing that repo; group operations (key packages, commits, welcomes, grants) seal themselves and do not pass through it.
 A machine that reads a private repo only through published grants holds no keyring file, so the guard does not cover it; such readers cannot write anyway.
 Decrypted data stays with its owner: `$CHARTER_HOME`, `repos/` and each repo cache are made 0700 (an existing home is tightened on first use), the cache git is created with `core.sharedRepository=0600`, and packs and fetch temp files are created 0600.
 A cache made before this is tightened once on its first open: every directory 0700, every file 0600, and `core.sharedRepository=0600` added to its git config; an `owner-only` marker file in the cache then makes every later open a single `stat`.
@@ -196,12 +214,14 @@ Push, clone, fetch and sync make no more queries than in 0.5.0, and `tests/query
 | remove | 1 | 3 |
 
 Join reads the root identity, the signer's peer key and the commit list for the admin replay, plus one peer key per other admin who committed.
-Add and remove read the heads to pin and the admin's own peer document; the migrating commit also reads the root identity.
+Add and remove read the heads to pin and the admin's own peer document; the migrating commit also reads the root identity, and so does each member applying it, once.
 Each commit applied costs one peer-key lookup for its signer, and a refresh queries commits again only when a removal starts a new id-key generation.
-A grant reader saves one query (the `group` and `pub` lookups are merged) and spends it on the commit list it needs for admission.
+A grant reader saves one query (the `group` and `pub` lookups are merged) and spends it on one commit list, attested and legacy rows together, that serves both its history check and admission.
+Its history check looks up the key of each committing admin that signed no grant (none when, as usual, the root delegate both commits and publishes) and checks one commit signature per epoch it replays.
+A removed member's refresh also looks for a re-add's welcome, one query per key package it published.
 Each attestation and signed grant costs one composite signature to make and one to check, and a join checks one commit signature per epoch it replays.
 Each commit and welcome grows by an attestation (about 3.4 KB), and the lockbox by a few bytes per role change, admin set, commit and pinned head.
-A head extended past its epoch's cutoff costs at most 64 block reads, once per sync that reads it, and only until the next commit pins it.
+A head extended past its epoch's cutoff costs at most 64 block reads, once per head and body on a backend that caches verdicts, and once per read otherwise.
 A signed grant is 64 B plus 5.4 KB of key and signature plus 33 B per member.
 
 ## Known limits
@@ -209,9 +229,12 @@ A signed grant is 64 B plus 5.4 KB of key and signature plus 33 B per member.
 Knowing the rid reveals that a private repo exists, through the `group` marker, which is what lets a non-member get `E_NOT_MEMBER` instead of a generic not-found.
 A public identity for the rid takes precedence over the marker, so a forged marker cannot close a public repo.
 A published grant covers one epoch, so readers also need the grants of the epochs that sealed the identity and binds.
+That epoch's commit and welcome rows carry the lockbox sealed under its key, and the lockbox holds every earlier epoch key, so whoever holds a grant can open every earlier epoch as well (as in 0.5.0); the reader code uses only the granted epochs, but publishing a grant should be treated as publishing all history up to it (see TODO, history lockbox).
 Concurrent admins committing at the same epoch fork the group; the first commit in Arkiv order wins and the other admin must rejoin.
 An admin can still commit at an epoch before she is removed (the concurrent-admins fork above); the first commit in Arkiv order wins, as for members.
-A delegate of the root identity is trusted for good: removing one from the group does not stop it signing the first commit of a replay.
+A delegate of the root identity is trusted for good where no admin set is on record yet: it can sign the first commit of a replay while none exists, and in a migrated repo a junk record it signs for a legacy epoch makes joins fail until the row expires (the replay ignores records for epoch 0, which no commit makes).
+After the first attested commit it is an admin only while the admin sets say so, for joiners, members and grant readers alike.
+In a repo with no attested commit, a grant reader cannot place the end of its newest granted epoch.
 Anyone who ever held the generation-0 id key (every member, past or present, and grant readers) can count later commits, see when they landed and which admin signed each, though not what they changed.
 A pre-0.5.1 client that first reads a migrated repo after its keepalive lapsed sees no stopper, though it still cannot open anything sealed under a later id-key generation.
 Leaves added before 0.5.1 were never checked against a leaf binding; an admin who doubts one should remove that member and add it again.
