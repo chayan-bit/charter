@@ -153,6 +153,7 @@ pub async fn revoke<A: Arkiv>(
     device: &Nid,
     this_device: &Nid,
 ) -> Result<RevokeBody> {
+    crate::guard::require_sealed(a, &cfg.home, &view.rid)?;
     let usage = |m: String| SyncError::coded(ErrorCode::BadFormat, m);
     if device == this_device {
         return Err(usage(
@@ -210,6 +211,8 @@ pub async fn revoke_device<A: Arkiv>(
     device: &Nid,
     this_device: &Nid,
 ) -> Result<RevokeOutcome> {
+    // Before the sync, so an unsealed backend never reaches the mark path either.
+    crate::guard::require_sealed(a, &cfg.home, &repo.rid)?;
     let want = crate::Want {
         must: [keys.nid()].into(),
         ..crate::Want::default()

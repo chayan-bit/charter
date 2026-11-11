@@ -189,7 +189,7 @@ Repo programs are expected to call these through obligations later.
 ## Unsealed-write guard and local permissions
 
 Every repo-scoped `chart` command and the `chart ui` write worker pick their backend with `charter_private::for_repo` (the remote helper with `ring_for`), so a private repo's writes and reads go through `Sealed`.
-As a fail-closed backstop, charter-sync refuses with `E_UNSEALED_PRIVATE` before any control write (identity, binds, ops), any push (chunks, pieces, head txs) and any keepalive when the backend does not seal under that repo's own keys (`Arkiv::seals_for`) and `$CHARTER_HOME/private/<rid>.json` exists.
+As a fail-closed backstop, charter-sync refuses with `E_UNSEALED_PRIVATE` before any control write (identity, binds, ops, device revokes), any push (chunks, pieces, head txs) and any keepalive when the backend does not seal under that repo's own keys (`Arkiv::seals_for`) and `$CHARTER_HOME/private/<rid>.json` exists.
 A backend sealing another private repo therefore fails the check too, and `Sealed` refuses to seal an op that names another repo's rid instead of sending it as is (N6).
 The check is one `stat` per write and none on a backend sealing that repo; group operations (key packages, commits, welcomes, grants) seal themselves and do not pass through it.
 A machine that reads a private repo only through published grants holds no keyring file, so the guard does not cover it; such readers cannot write anyway.

@@ -79,6 +79,17 @@ fn unsealed_writes_to_a_private_repo_are_refused() {
         let op = issue(&rid);
         let post = charter_sync::cob::post(&net, &alice.cfg, &alice.keys, &op);
         assert_eq!(code(post.await), "E_UNSEALED_PRIVATE");
+        // A device revoke (head-model 15) is a control write too.
+        let (repo, dev) = (alice.repo(&rid), [8u8; 32]);
+        let revoke = charter_sync::revoke::revoke_device(
+            &net,
+            &alice.cfg,
+            &alice.keys,
+            &repo,
+            &dev,
+            &[9; 32],
+        );
+        assert_eq!(code(Box::pin(revoke).await), "E_UNSEALED_PRIVATE");
         let leaks = plaintext_rid_rows(&net, &rid).await;
         assert!(
             leaks.is_empty(),
