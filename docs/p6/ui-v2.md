@@ -541,6 +541,7 @@ The writer reads the wallet balance once at start, once when pricing (as before)
 - Fixed: amounts use one format everywhere (wallet and its chip, the cost dialog and its breakdown, the write status, the ledger, Rules and the timeline), from `charter-ui/src/pages/money.rs`.
   From 0.0001 tGLM up it shows at most four decimals with trailing zeros dropped, rounded up for what you may pay and down for what you hold; below that it shows gwei, or wei under 1 gwei (`5 wei`); the exact tGLM value is the tooltip.
   The ops listed under "what will be signed" keep the exact value.
+  In columns (the ledger, the dialog's breakdown, Rules bounties) tGLM and gwei are padded to four decimals in tabular numerals and right-aligned on a unit slot as wide as "tGLM", so `0.0030 tGLM` sits above `0.0139 tGLM` and `5 wei` lines up on the unit; running text keeps the short form.
 - Writes to a private repo are priced and sent sealed only once `sec/private-plumbing` lands; that branch picks the backend inside `writes/run.rs`, and this build left that choice alone.
   The dialog reads every figure from the `Estimate` the writer produces, so it shows the sealed cost with no change here.
 
