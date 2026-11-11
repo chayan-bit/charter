@@ -86,7 +86,7 @@ Pack = [pack_id: bstr .size 32, pieces: [* [tx: bstr .size 32, sha256: bstr .siz
 - `base` is the merged oid this entry fast-forwards, signed by the writer, or empty when the entry creates the ref, deletes it or is not a fast-forward (section 8).
 - The head body has the byte cap of every signed body (`max_body_len`: 65,536 B minus the 3,417 B envelope, so 62,119 B), which its refs and piece list share.
   With sha1 oids and 20-byte names an entry is about 60 B (about 81 B for an entry updated by this body, which carries a base) and a piece about 70 B, so one device can list about 550 refs next to a full 256-piece list and about 900 with few pieces (DERIVED); the v1 refs entity held about 1,100 under the same cap.
-  A push past it fails with `E_REFS_TOO_LARGE` and writes nothing; moving an oversized ref list into a piece is not implemented (section 11).
+  Before format v4 a push past it failed with `E_REFS_TOO_LARGE` and wrote nothing; since then the writer keeps most entries in a ref table named by the signed body (section 14).
 - The writer sends a pack inline only when an upper bound of the body plus the 16 KiB of inline bytes fits one transaction (131,030 B); otherwise the pack goes as bulk pieces, so a large head never makes the head transaction too big.
 - `pack_id = SHA-256(pack bytes)`; a pack is the concatenation of its pieces in order; each piece is at most 65,536 B.
 - Body size (DERIVED): about 200 B of fixed fields, about 55 B per ref (about 77 B with a base), 34 B per snapshot manifest, about 70 B per piece, plus the 3,417 B envelope (44 B framing and the 3,373 B signature); a small repo's head is about 3.8 KiB.
@@ -346,7 +346,7 @@ What remains noticeable: a snapshot push is slower and costs more (entity chunks
 
 Known limits not handled in v0.4.0:
 
-- A device's head holds at most about 550 to 900 refs (section 4.2); a migration or push past that fails with `E_REFS_TOO_LARGE` instead of moving the ref list into a piece.
+- Until format v4 a device's head held at most about 550 to 900 refs (section 4.2) and a push past that failed with `E_REFS_TOO_LARGE`; v4 moves the bulk of a large ref list into a ref table (section 14), which bounds a device at the table cap of 4 MiB stored (tens of thousands of refs).
 - A pack that cannot be indexed is downloaded once per change of the peer's heads, and by every fresh clone (section 5.5); until v0.5.0 it was downloaded on every fetch.
 - A copied `device/seed` makes two machines one device; they serialise on the confirmed nonce of `C_d`, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4); the retry reuses the bulk pieces the refused push landed.
 - Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can sign the same wallet nonce (issue #28).
@@ -463,3 +463,70 @@ PieceRun = [block: uint, index: uint, count: uint]
 | Head after a 2 MiB push (34 carried pieces) | +2,420 B per push | about +40 B | about -95k gas per push, growing to about -700k at 256 pieces |
 | Thin pack of 2 to 30 commits | 100% | 70 to 72% | -28 to -30% of piece gas |
 | Snapshot refresh (Charter's own repo) | 1.81 MB | 1.17 MB | -35% (-29% on top of the 13.3 pack settings) |
+
+## 14. Ref tables: heads past the body cap (issue #24, format v4)
+
+Status: designed 2026-11-11 on branch `fix/issues-batch-1`.
+Before it, a device whose refs did not fit the 62,119 B head body (about 550 to 900 refs, section 4.2) could not push at all: the push failed with `E_REFS_TOO_LARGE` and wrote nothing.
+
+### 14.1 Goal and budget
+
+- A head whose v3 body fits stays a v3 head, byte for byte: no new field, no new read, no new transaction, so every operation of the performance gate (`speed-and-cost.md` section 7) keeps its exact cost.
+- A device with more refs keeps most of them in a ref table stored as bulk pieces, named by hash from the signed head body, and lists only the entries that differ from the table inline.
+- A push that changes a few refs of a large device reuses the table and pays only for the changed entries, so a 5,000-ref device pushes at about the cost of a small device.
+- The table is rewritten only when the inline difference grows past a bound (14.3).
+
+### 14.2 Encoding
+
+```cddl
+HeadBodyV4 = {               ; HeadBodyV3 (13.1) plus field 12
+  12: RefTable,
+}
+RefTable   = [table_id: bstr .size 32, codec: uint, runs: [+ PieceRun], stamp: uint]
+TableBytes = [* RefEntry]    ; canonical CBOR, before the codec
+```
+
+- Signed with envelope kind code 14 and context `arkiv-git/head/v4`; the content hash is `H("head4", envelope)`; stored as `ag.kind = 'head'` with `ag.v = 4`, plus `ag.rid`, `ag.nid`, `ag.dev` and `ag.h` as in v3.
+- A v3 body never carries field 12 (minicbor omits the absent field, so v3 bytes are unchanged), and a v4 body always does.
+- `table_id = SHA-256(stored bytes)`, the concatenation of the table's pieces in order; `codec` is 0 (the stored bytes are `TableBytes`) or 1 (a brotli stream of them), as for packs (13.3).
+- The table's pieces are bulk pieces of `B_d`: every run has `block > 0` (never `PieceRun::HERE`), at most 64 piece transactions (4 MiB stored), and the decoded table is capped at 16 MiB, so a signed table bomb fails with `E_BAD_REFS`.
+- `TableBytes` follow the rules of 4.2 for a ref list: strictly ascending names, `counter >= 1`, oid and base lengths of field 11.
+- The effective refs of a v4 body are the table's entries, each table entry with `stamp = 0` taking the table's `stamp` instead, overlaid by the entries of field 7 by name (field 7 wins).
+  The effective list must pass every rule of 4.2, including `stamp <= at`; the table's own `stamp` must be at most `at`, and 0 means the block this body landed in, like an entry stamp.
+- The merge (5.3), the push re-check (7.3) and the program fold (section 8) read only effective refs, so a v4 head merges and folds exactly like a v3 head that listed the same entries.
+
+### 14.3 Writing
+
+The writer decides from the planned entries (7.1 step 3) before it builds the pack content:
+
+1. When the v3 body fits (an upper bound of the encoded refs, the carried packs and one new pack, with a 1 KiB margin, at most `max_body_len`), it writes v3 exactly as before.
+2. Else, when the previous head is v4, its table still lists no name the new entries dropped, and the entries that differ from the previous table (by every field, after its `stamp` substitution) encode to at most 16 KiB (about 250 entries), it reuses that table: the same `table_id`, `codec` and `runs`, with `stamp` made concrete (the previous body's landing block when it was 0), and field 7 lists only the differing entries.
+3. Else it writes a new table: every entry with an empty `base` goes into the table and the rest (the fast-forwards of this push, which carry their base, section 8) into field 7, with the table's `stamp` set to 0; when field 7 would still not fit, every entry goes into the table.
+   The table is compressed when that is smaller, cut into 64 KiB pieces and sent from `B_d` before the head tx, with the reuse of issue #26 (a retry names the pieces a refused attempt landed).
+
+- The pack choice of 13.1 (inline when the body plus 16 KiB fits one transaction) counts only the inline entries, so a reusing push of a large device keeps its small pack inline.
+- Moving between v3 and v4 changes `ag.v`, so that patch sets every attribute, as the migrating patch of 13.4 does; every other v4 patch sets only `ag.body` and `ag.h`.
+- A follow-up head (a body that landed late, 7.1) makes its stamps concrete as before, the table's `stamp` included.
+- The 16 KiB bound is a cost trade (DERIVED): 16 KiB of extra entries cost about 0.26M gas per push at 16 gas per calldata byte, while rewriting a 5,000-ref table (about 140 KB after brotli) costs about 2.5M gas, so the table is rewritten after at most about 10 pushes that each carry the maximum difference.
+
+### 14.4 Reading
+
+- Readers accept a v4 row like a v3 row (5.2), then read the table's pieces from calldata with `eth_getTransactionByBlockNumberAndIndex` (the pieces of `B_d` only), check `table_id`, decode under the cap and build the effective refs before the merge.
+  Pieces outlive their 20-block lifetime in block history, exactly as the packs since the snapshot do (11.3), so the table needs no keepalive.
+- Decoded tables are cached in memory by `table_id`, which is safe across devices and repos because the hash names the bytes.
+  The program fold keeps each walked v4 body without its table and each table once, by `table_id`, in `git/arkiv-head-bodies.json`.
+- Cost: a sync that meets a new or changed v4 head reads the table once per process (one parallel round of `tx_at` calls, about three for 5,000 refs); a v3 head costs nothing new.
+  shortcut: the table cache is per process, so a CLI fetch of a changed v4 head re-reads its table; persist it under the repo cache if large devices sync often.
+
+### 14.5 Old clients and migration
+
+- v0.5.0 meets `ag.kind = 'head'` with `ag.v = 4` from a tracked `C_d` as an unknown layout version and stops with `E_UNSUPPORTED_VERSION` (the path of 13.4); it never shows the inline difference as the device's refs.
+- v0.5.0 walking a body chain (section 8) back through a v4 body sees envelope kind code 14, which its calldata reader refuses, and stops with `E_NOT_LIVE` instead of folding partial refs.
+- Nothing migrates eagerly: a device switches to v4 on the first push whose refs no longer fit, and back to v3 when they fit again; repos whose devices stay under the cap never change format, so v0.5.0 keeps reading them.
+
+### 14.6 Security
+
+- Every table byte is covered by `table_id`, which the device signs, so a reader can neither be shown other refs nor have entries dropped.
+- The new kind code and context separate v4 signatures from v3: a v4 body can never be replayed as a v3 body that silently lacks its table.
+- The rollback rule (section 6) is unchanged: table pieces come from `B_d`, which `entityNonce(C_d)` does not count, exactly like bulk pack pieces.
+- A table whose pieces a node no longer serves makes that device's head unreadable (`E_NOT_LIVE`), as a missing pack piece does (11.3).
