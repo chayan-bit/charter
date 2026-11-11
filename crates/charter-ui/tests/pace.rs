@@ -253,6 +253,60 @@ async fn one_change_on_screen_costs_one_round_and_reaches_the_page() {
     );
 }
 
+/// A format v3 push (what `chart` sends) from another device of alice, then `[from, to)` of
+/// ticks; the page must hear of it. Returns the queries.
+async fn push_until_seen(
+    s: &mut Sim,
+    from: u64,
+    to: u64,
+    dev: &Peer,
+    work: &std::path::Path,
+    r: &str,
+) -> u64 {
+    let mut events = s.shared.subscribe();
+    push2(&s.c.net, dev, &s.rid, work, &[r])
+        .await
+        .expect("push");
+    let q = s.run(from, to).await;
+    let mut kinds = vec![];
+    while let Ok(e) = events.try_recv() {
+        kinds.push(e.kind);
+    }
+    assert!(
+        kinds.contains(&Kind::Push),
+        "{r} never reached the open page"
+    );
+    q
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refs_only_push_from_another_device_reaches_the_open_page() {
+    let mut s = sim(47, false).await;
+    s.shared.focus(s.rid);
+    let _v = s.shared.viewer(s.rid);
+    let dev = s.alice.second_device(&s.c.net);
+    let dir = tempfile::tempdir().expect("work");
+    let work = work_repo(dir.path(), "w");
+    commit(&work, &[("a.txt", b"a\n")], "first");
+    s.run(0, 30).await;
+    // Its first push creates the device's head; the second only patches it in place.
+    push_until_seen(&mut s, 30, 60, &dev, &work, "refs/heads/main").await;
+    git(&work, &["branch", "side"]);
+    let quiet = s.run(60, 120).await;
+    let q = push_until_seen(&mut s, 120, 150, &dev, &work, "refs/heads/side").await;
+    eprintln!(
+        "refs-only push: {quiet} queries in 60 s with no change, {q} in the 30 s that caught it (one round = {})",
+        s.round_cost
+    );
+    assert!(quiet <= 6, "a probe every 10 s, one query each: {quiet}");
+    let branches = s.alice.repo(&s.rid).dir.join(cache::VIEW);
+    let view = std::fs::read_to_string(branches).expect("view");
+    assert!(
+        view.contains("refs/heads/side"),
+        "the round recorded the new branch"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_draining_quota_pauses_background_rounds_and_the_page_says_so() {
     let mut s = sim(44, false).await;
