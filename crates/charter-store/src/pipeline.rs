@@ -9,7 +9,7 @@ use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_signer_local::PrivateKeySigner;
 use arkiv_bindings::Operation;
 
-use crate::heads::{self, Heads};
+use crate::heads::{self, Feed, Heads};
 use crate::shape::{Estimates, Shape};
 use crate::tx::EXECUTE_BASE_BYTES;
 use crate::{
@@ -71,11 +71,13 @@ impl Default for PipelineConfig {
 }
 
 impl PipelineConfig {
-    /// For many large independent txs (a big upload): up to two blocks of gas may be
-    /// unconfirmed, so this sender keeps every block it can get full instead of 40 percent.
+    /// For many large independent txs (a big upload): up to the block gas target (half
+    /// the limit, EIP-1559 elasticity 2) unconfirmed, refilled as each block lands. The base
+    /// fee rises only above the target: a 10 MiB push that kept blocks 91% full moved it
+    /// from 1.00 to 2.64 gwei over 10 blocks (MEASURED on Rabdi, 2026-11-11).
     pub fn bulk(&self) -> Self {
         Self {
-            pace_percent: self.pace_percent.max(200),
+            pace_percent: 50,
             ..self.clone()
         }
     }
@@ -229,6 +231,17 @@ pub struct TxPipeline<'a, A: Arkiv> {
     retried: HashSet<(usize, B256)>,
     /// The latest head, its base fee and when they were read.
     seen: Option<(u64, u128, Instant)>,
+    /// The sender's balance as the caller last read it, used by the first window instead
+    /// of a read (see [`TxPipeline::seeded`]).
+    balance: Option<U256>,
+    /// What the sender held beyond its in-flight reserves after the last window, plus the
+    /// unused reserve of each tx landed since: exact while no one else spends from it, so
+    /// later windows skip the balance read.
+    spare: Option<U256>,
+    /// Gas to price every execute job at instead of estimating it ([`TxPipeline::with_gas`]).
+    fixed_gas: Option<u64>,
+    /// The process's shared `newHeads` socket, when one runs (see [`heads::start_feed`]).
+    feed: tokio::sync::watch::Receiver<Feed>,
     heads: Option<Heads>,
     /// The socket failed once: poll on the timer for the rest of the run.
     heads_off: bool,
@@ -253,6 +266,10 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             estimates: Estimates::default(),
             retried: HashSet::new(),
             seen: None,
+            balance: None,
+            spare: None,
+            fixed_gas: None,
+            feed: heads::feed(),
             heads: None,
             heads_off: false,
             reread: false,
@@ -267,6 +284,22 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
     pub fn at_nonce(mut self, nonce: u64) -> Self {
         self.nonce = Some(nonce);
         self.pinned = true;
+        self
+    }
+
+    /// Starts from reads the caller just made: the head and base fee read at `at`, and the
+    /// sender's balance (nothing of it in flight). Saves two round trips before the first
+    /// send; a head older than one block is read again.
+    pub fn seeded(mut self, head: u64, base_fee: u128, at: Instant, balance: U256) -> Self {
+        self.seen = Some((head, base_fee, at));
+        self.balance = Some(balance);
+        self
+    }
+
+    /// Prices every execute job at `gas` instead of an `eth_estimateGas` round trip, for
+    /// jobs whose gas the caller bounds itself; a job that fails is estimated when retried.
+    pub fn with_gas(mut self, gas: u64) -> Self {
+        self.fixed_gas = Some(gas);
         self
     }
 
@@ -310,13 +343,21 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
 
     /// A plain value transfer (wallet top-up).
     pub async fn transfer(&mut self, to: Address, value: U256) -> Result<Receipt, StoreError> {
-        let landed = self
-            .drive(VecDeque::from([(0, Job::Transfer(to, value))]))
-            .await?;
+        let landed = self.transfers(vec![(to, value)]).await?;
         landed
             .first()
             .map(|l| l.receipt)
             .ok_or_else(|| StoreError::Rpc("transfer produced no receipt".into()))
+    }
+
+    /// Several value transfers sent together (consecutive nonces, so they share a block).
+    pub async fn transfers(&mut self, to: Vec<(Address, U256)>) -> Result<Vec<Landed>, StoreError> {
+        let jobs = to
+            .into_iter()
+            .enumerate()
+            .map(|(i, (a, v))| (i, Job::Transfer(a, v)))
+            .collect();
+        self.drive(jobs).await
     }
 
     async fn drive(
@@ -354,7 +395,19 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
     /// else one poll interval. The socket is opened on the first wait, which returns at
     /// once so a block announced during the handshake is not missed.
     async fn wait(&mut self) {
-        let _t = crate::trace::span(|| format!("pipeline.wait ws={}", self.heads.is_some()));
+        let shared = !matches!(*self.feed.borrow(), Feed::Down);
+        let _t = crate::trace::span(|| {
+            format!("pipeline.wait ws={} shared={shared}", self.heads.is_some())
+        });
+        if self.cfg.use_heads && shared {
+            // The next block after the last one seen, or the poll timer as the fallback.
+            if let Ok(Ok(())) = tokio::time::timeout(HEAD_WAIT, self.feed.changed()).await
+                && let Some(tip) = self.feed_tip()
+            {
+                self.seen = Some(tip);
+            }
+            return;
+        }
         if self.cfg.use_heads && self.heads.is_none() && !self.heads_off {
             match self.arkiv.heads_ws() {
                 Some(ws) => match tokio::time::timeout(HEAD_WAIT, heads::subscribe(&ws)).await {
@@ -379,8 +432,25 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         tokio::time::sleep(self.cfg.poll).await;
     }
 
+    /// The shared socket's latest block if newer than what this run saw, marking it seen.
+    fn feed_tip(&mut self) -> Option<(u64, u128, Instant)> {
+        match *self.feed.borrow_and_update() {
+            Feed::Tip {
+                number,
+                base_fee,
+                at,
+            } if base_fee > 0 && self.seen.is_none_or(|(_, _, seen)| at > seen) => {
+                Some((number, base_fee, at))
+            }
+            _ => None,
+        }
+    }
+
     /// The head and its base fee: the last seen if fresh, else one read.
     async fn head_fee(&mut self) -> Result<(u64, u128), StoreError> {
+        if let Some(tip) = self.feed_tip() {
+            self.seen = Some(tip);
+        }
         if let Some((head, fee, at)) = self.seen
             && at.elapsed() < FEE_FRESH
         {
@@ -409,6 +479,10 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         queue: &mut VecDeque<(usize, Job)>,
         inflight: &mut Vec<InFlight>,
     ) -> Result<bool, StoreError> {
+        // Nothing left to send: no fee or balance read after the last receipt.
+        if queue.is_empty() {
+            return Ok(false);
+        }
         // The base fee can rise while we fill blocks: at most one block old.
         let (sent_at, base_fee) = self.head_fee().await?;
         let budget = self.cfg.pace_budget(base_fee);
@@ -462,8 +536,15 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             }
             ready.push((job, body, p));
         }
-        self.send_all(ready, base_fee, sent_at, queue, inflight)
-            .await
+        self.spare = covered;
+        let again = self
+            .send_all(ready, base_fee, sent_at, queue, inflight)
+            .await?;
+        // Someone else sent from this key: the carried balance no longer holds.
+        if again {
+            self.spare = None;
+        }
+        Ok(again)
     }
 
     /// Calldata, recipient, value and gas, checking the byte and gas caps. A create job
@@ -495,7 +576,10 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             .then(|| Shape::of(ops, &input))
             .flatten()
             .filter(|_| !self.retried.contains(&(job, keccak256(&input))));
-        let reuse = shape.as_ref().and_then(|s| self.estimates.get(s, &input));
+        let fixed = self
+            .fixed_gas
+            .filter(|_| !self.retried.contains(&(job, keccak256(&input))));
+        let reuse = fixed.or_else(|| shape.as_ref().and_then(|s| self.estimates.get(s, &input)));
         let gas = match reuse {
             Some(g) => g,
             None => self.arkiv.estimate(self.address(), ops).await?,
@@ -677,8 +761,14 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
     }
 
     /// The sender's balance not already reserved by txs in flight.
-    async fn covered(&self, inflight: &[InFlight]) -> Result<U256, StoreError> {
-        let have = self.arkiv.balance(self.address()).await?;
+    async fn covered(&mut self, inflight: &[InFlight]) -> Result<U256, StoreError> {
+        if let Some(spare) = self.spare.take() {
+            return Ok(spare);
+        }
+        let have = match self.balance.take() {
+            Some(b) => b,
+            None => self.arkiv.balance(self.address()).await?,
+        };
         let reserved: U256 = inflight.iter().map(|f| f.tx.max_cost()).sum();
         Ok(have.saturating_sub(reserved))
     }
@@ -769,6 +859,9 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 .ok_or_else(|| StoreError::Rpc("in-flight tx without a poll slot".into()))?;
             match receipts[pos].take().flatten() {
                 Some(r) if r.success => {
+                    if let Some(spare) = self.spare.as_mut() {
+                        *spare += unused_reserve(f, &r);
+                    }
                     done.push(Landed {
                         job: f.job,
                         receipt: r,
@@ -895,6 +988,16 @@ const PLUG: usize = usize::MAX;
 /// Whether a tx in flight has a nonce above `n`, i.e. waits on it.
 fn above(inflight: &[InFlight], n: u64) -> bool {
     inflight.iter().any(|f| f.tx.nonce() > n)
+}
+
+/// What a landed tx reserved but did not spend: its max cost less its value and fee.
+fn unused_reserve(f: &InFlight, r: &Receipt) -> U256 {
+    let value = match &f.body {
+        Job::Transfer(_, v) => *v,
+        Job::Execute(_) => U256::ZERO,
+    };
+    let fee = U256::from(r.gas_used) * U256::from(r.effective_gas_price);
+    f.tx.max_cost().saturating_sub(value + fee)
 }
 
 /// Sends one signed tx, resending the same bytes on an RPC error: an identical tx can land

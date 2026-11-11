@@ -1,6 +1,7 @@
 //! `RpcArkiv`: JSON-RPC over HTTP to an Arkiv node (Rabdi by default).
 //!
-//! The chain id is checked on connect and on every send. HTTP 429 (`ANON_COST_LIMITED`)
+//! The chain id is checked by the first call (a read carries `eth_chainId` in the same
+//! JSON-RPC batch, a send verifies first) and on every send. HTTP 429 (`ANON_COST_LIMITED`)
 //! becomes `E_RATE_LIMITED`; the client waits out `Retry-After` only within
 //! `max_rate_wait`, and every request has a timeout, so a call never hangs.
 
@@ -83,8 +84,8 @@ pub struct RpcArkiv {
     http: reqwest::Client,
     cfg: RpcConfig,
     id: AtomicU64,
-    /// The chain id `connect` verified; 0 until then. Saves one round trip per command.
-    verified_chain: AtomicU64,
+    /// The chain id the first call verified; 0 until then. Shared with every twin.
+    verified_chain: Arc<AtomicU64>,
     /// `CHARTER_TRACE` set: one stderr line per call with its method, time and size.
     trace: bool,
     /// The latest quota reports: `[arkiv_query, every other method]` (separate budgets),
@@ -100,6 +101,7 @@ struct RawReceipt {
     status: U64,
     gas_used: U64,
     effective_gas_price: U128,
+    transaction_index: U64,
 }
 
 #[derive(Deserialize)]
@@ -165,7 +167,7 @@ impl RpcArkiv {
                 ..self.cfg.clone()
             },
             id: AtomicU64::new(1),
-            verified_chain: AtomicU64::new(self.verified_chain.load(Ordering::Relaxed)),
+            verified_chain: self.verified_chain.clone(),
             trace: self.trace,
             quota: self.quota.clone(),
         }
@@ -177,34 +179,95 @@ impl RpcArkiv {
         }
     }
 
-    /// Build the client and refuse to continue unless the RPC serves `cfg.chain_id`.
+    /// Builds the client without a request: the first call verifies that the RPC serves
+    /// `cfg.chain_id` before anything it returns is used (a read in the same round trip).
     pub async fn connect(cfg: RpcConfig) -> Result<Self, StoreError> {
         let http = reqwest::Client::builder()
             .timeout(cfg.timeout)
             .build()
             .map_err(|e| StoreError::Rpc(format!("http client: {e}")))?;
-        let me = Self {
+        Ok(Self {
             http,
             cfg,
             id: AtomicU64::new(1),
-            verified_chain: AtomicU64::new(0),
+            verified_chain: Arc::default(),
             trace: crate::trace::enabled(),
             quota: Arc::default(),
-        };
-        let got = me.chain_id().await?;
-        if got != me.cfg.chain_id {
+        })
+    }
+
+    fn check_chain(&self, got: u64) -> Result<u64, StoreError> {
+        if got != self.cfg.chain_id {
             return Err(StoreError::WrongChain {
-                expected: me.cfg.chain_id,
+                expected: self.cfg.chain_id,
                 got,
             });
         }
-        me.verified_chain.store(got, Ordering::Relaxed);
-        Ok(me)
+        self.verified_chain.store(got, Ordering::Relaxed);
+        Ok(got)
     }
 
+    /// The verified chain id, asking the node (alone) the first time.
+    async fn verify_chain(&self) -> Result<u64, StoreError> {
+        match self.verified_chain.load(Ordering::Relaxed) {
+            0 => {
+                let got = self.call_one::<U64>("eth_chainId", json!([])).await?;
+                self.check_chain(u64_of(got))
+            }
+            known => Ok(known),
+        }
+    }
+
+    /// One call. Until the chain id is verified, a read goes as the batch `[eth_chainId,
+    /// call]` and its result is used only if the chain matches; a send verifies first.
     async fn call<T: DeserializeOwned>(&self, method: &str, params: Json) -> Result<T, StoreError> {
-        let id = self.id.fetch_add(1, Ordering::Relaxed);
-        let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        if self.verified_chain.load(Ordering::Relaxed) != 0 {
+            return self.call_one(method, params).await;
+        }
+        if method == "eth_sendRawTransaction" {
+            self.verify_chain().await?;
+            return self.call_one(method, params).await;
+        }
+        let (cid, id) = (self.next_id(), self.next_id());
+        let body = json!([
+            { "jsonrpc": "2.0", "id": cid, "method": "eth_chainId", "params": [] },
+            { "jsonrpc": "2.0", "id": id, "method": method, "params": params },
+        ]);
+        let reply = self.request(method, &body).await?;
+        if !reply.is_array() {
+            // A node without batch support answers with one error object: probe, then call.
+            self.verify_chain().await?;
+            return self.call_one(method, body[1]["params"].clone()).await;
+        }
+        let by_id = |want: u64| {
+            reply
+                .as_array()
+                .and_then(|a| a.iter().find(|r| r["id"].as_u64() == Some(want)))
+                .cloned()
+                .ok_or_else(|| StoreError::Rpc(format!("{method}: batch reply without id {want}")))
+        };
+        let chain: U64 = result_of("eth_chainId", by_id(cid)?)?;
+        self.check_chain(u64_of(chain))?;
+        result_of(method, by_id(id)?)
+    }
+
+    fn next_id(&self) -> u64 {
+        self.id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    async fn call_one<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Json,
+    ) -> Result<T, StoreError> {
+        let body =
+            json!({ "jsonrpc": "2.0", "id": self.next_id(), "method": method, "params": params });
+        result_of(method, self.request(method, &body).await?)
+    }
+
+    /// Posts `body` (one call or a batch whose last call is `method`) with the transport
+    /// retries and the 429 handling; returns the parsed reply.
+    async fn request(&self, method: &str, body: &Json) -> Result<Json, StoreError> {
         let mut waited = Duration::ZERO;
         let started = std::time::Instant::now();
         let start_unix = crate::trace::unix_ms();
@@ -215,7 +278,7 @@ impl RpcArkiv {
             TRANSPORT_RETRIES
         };
         loop {
-            let mut req = self.http.post(&self.cfg.url).json(&body);
+            let mut req = self.http.post(&self.cfg.url).json(body);
             if let Some(k) = &self.cfg.access_key {
                 req = req.header(ACCESS_KEY_HEADER, k);
             }
@@ -265,21 +328,23 @@ impl RpcArkiv {
                 });
             }
             if self.trace {
+                let (label, params) = match body.as_array() {
+                    Some(calls) => (
+                        format!("eth_chainId+{method}"),
+                        &calls[calls.len() - 1]["params"],
+                    ),
+                    None => (method.to_owned(), &body["params"]),
+                };
                 eprintln!(
-                    "chart-trace: rpc {method} @{} {} ms {} B {version:?} req {} B{}",
+                    "chart-trace: rpc {label} @{} {} ms {} B {version:?} req {} B{}",
                     start_unix,
                     started.elapsed().as_millis(),
                     text.len(),
                     body.to_string().len(),
-                    trace_detail(method, &body["params"], &text),
+                    trace_detail(method, params, &text),
                 );
             }
-            let mut j: Json = serde_json::from_str(&text)
-                .map_err(|e| StoreError::Rpc(format!("{method}: {e}")))?;
-            if let Some(err) = j.get("error") {
-                return Err(rpc_error(err));
-            }
-            return serde_json::from_value(j["result"].take())
+            return serde_json::from_str(&text)
                 .map_err(|e| StoreError::Rpc(format!("{method}: {e}")));
         }
     }
@@ -304,6 +369,15 @@ fn trace_detail(method: &str, params: &Json, text: &str) -> String {
         "eth_sendRawTransaction" => format!(" res={}", text.chars().take(140).collect::<String>()),
         _ => String::new(),
     }
+}
+
+/// The `result` of one JSON-RPC reply object, or its error mapped.
+fn result_of<T: DeserializeOwned>(method: &str, mut reply: Json) -> Result<T, StoreError> {
+    if let Some(err) = reply.get("error") {
+        return Err(rpc_error(err));
+    }
+    serde_json::from_value(reply["result"].take())
+        .map_err(|e| StoreError::Rpc(format!("{method}: {e}")))
 }
 
 /// Map a JSON-RPC error object onto a `StoreError`.
@@ -341,10 +415,7 @@ impl Arkiv for RpcArkiv {
     }
 
     async fn chain_id(&self) -> Result<u64, StoreError> {
-        match self.verified_chain.load(Ordering::Relaxed) {
-            0 => self.call::<U64>("eth_chainId", json!([])).await.map(u64_of),
-            known => Ok(known),
-        }
+        self.verify_chain().await
     }
 
     async fn head(&self) -> Result<u64, StoreError> {
@@ -454,6 +525,7 @@ impl Arkiv for RpcArkiv {
             success: u64_of(r.status) == 1,
             gas_used: u64_of(r.gas_used),
             effective_gas_price: r.effective_gas_price.to::<u128>(),
+            index: u32::try_from(u64_of(r.transaction_index)).unwrap_or(u32::MAX),
         }))
     }
 

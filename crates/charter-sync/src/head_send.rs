@@ -7,19 +7,19 @@ use std::time::Duration;
 
 use charter_core::{
     Body, DeviceBody, ErrorCode, Hash32, HeadBody, HeadPack, ManifestBody, PieceRef, ZERO,
-    chunk_count, entity_attributes, resolve_stamps,
+    chunk_count, entity_attributes, is_device_row, resolve_stamps,
 };
 use charter_store::{Arkiv, Operation, U256, create_op_flags, patch_op, random_salt};
 
 use crate::head_push::{HeadPush, INLINE_MAX, Plan};
-use crate::heads::{LANDING_WINDOW, V2};
+use crate::heads::{self, LANDING_WINDOW, V2};
 use crate::ids::hex32;
 use crate::pieces::{PIECE_SIZE, piece_op};
 use crate::push_send::{Cost, first_write_ops};
 use crate::repo::staging;
 use crate::state::{LandingJson, State};
 use crate::write::{self, chunk_op, entity_op, sign, wire};
-use crate::{Result, SyncError, packs, warn};
+use crate::{Result, SyncError, packs, view, warn};
 
 /// Creation flags of a head: `permissionlessExtension`, not readonly, so `C_d` can patch it.
 const HEAD_FLAGS: u8 = 2;
@@ -31,6 +31,41 @@ const RESEND_ROUNDS: usize = 3;
 const HEAD_GAS: u64 = 1_200_000;
 /// Head txs one top-up of `C_d` pays for.
 const PREFUND_HEADS: u64 = 4;
+/// A head patch with less calldata than this is priced by [`head_gas`], not estimated.
+const UNESTIMATED_HEAD_BYTES: usize = 32 * 1024;
+
+/// Gas limit of a head patch of `calldata` bytes sent without an estimate: 128 gas per
+/// byte is twice the most measured on Rabdi (64.6 per byte, a 8.8 KB head listing pieces;
+/// a 6.9 KB small push used 40), and never below [`HEAD_GAS`]. A limit only reserves
+/// balance; the tx pays for the gas it uses.
+fn head_gas(calldata: usize) -> u64 {
+    HEAD_GAS.max(21_000 + 128 * calldata as u64)
+}
+
+/// What `setup` read on the way that the head send reuses instead of reading again.
+#[derive(Debug, Clone, Copy)]
+pub struct Ready {
+    /// Nothing was sent or landed since the view's sync (the plan may reuse its heads).
+    pub current: bool,
+    /// `C_d`'s confirmed tx count once idle: the head tx's nonce. Read before
+    /// `entityNonce`, so a tx of `C_d` landing after it either moves `entityNonce` or takes
+    /// this nonce, and the send fails with `E_CONCURRENT_PUSH` (H1).
+    account: u64,
+    /// The head block, its base fee and when they were read.
+    head: u64,
+    base_fee: u128,
+    at: std::time::Instant,
+    /// `C_d`'s balance after any top-up.
+    balance: U256,
+}
+
+/// Chain state the head send starts from: what `setup` read, and `entityNonce(C_d)` read
+/// after it (alongside the plan). Without them the head send reads both fresh.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Pre {
+    pub ready: Option<Ready>,
+    pub nonce: Option<u64>,
+}
 
 /// Pack bytes this push sends, in head form.
 struct Content {
@@ -108,15 +143,15 @@ impl<A: Arkiv> HeadPush<'_, A> {
     }
 
     /// Refuses to sign while an earlier tx of `C_d` is still pending (head-model 7.2);
-    /// `true` when it had to wait (so the view's heads may be stale).
-    async fn ensure_idle(&self) -> Result<bool> {
+    /// whether it had to wait (so the view's heads may be stale), and the confirmed count.
+    async fn ensure_idle(&self) -> Result<(bool, u64)> {
         let c = self.dev.control_address(&self.rid());
         for round in 0..IDLE_POLLS {
             let (pending, mined) =
                 futures_util::future::try_join(self.a.tx_count(c), self.a.tx_count_mined(c))
                     .await?;
             if pending == mined {
-                return Ok(round > 0);
+                return Ok((round > 0, mined));
             }
             tokio_sleep(self.cfg.pipeline.poll * 2).await;
         }
@@ -159,11 +194,18 @@ impl<A: Arkiv> HeadPush<'_, A> {
     pub async fn run(self) -> Result<()> {
         use charter_store::trace::span;
         let t = span(|| "push.setup".into());
-        let current = self.setup().await?;
+        let ready = self.setup().await?;
         drop(t);
+        let current = ready.current;
         let state = State::load(&self.repo.state_path())?;
         let t = span(|| format!("push.plan reuse_view={current}"));
-        let plan = Box::pin(self.plan_from(&state, current)).await?;
+        // `entityNonce` after the count `setup` read (H1), in the plan's round trips.
+        let c_d = self.dev.control_address(&self.rid());
+        let (plan, nonce) =
+            futures_util::future::try_join(Box::pin(self.plan_from(&state, current)), async {
+                Ok(self.a.entity_nonce(c_d).await?)
+            })
+            .await?;
         drop(t);
         if !current {
             // The program check ran on the listing; run it again on the fresh heads.
@@ -180,7 +222,11 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 self.repo.git(),
             )?;
         }
-        Box::pin(self.finish(plan)).await
+        let pre = Pre {
+            ready: Some(ready),
+            nonce: Some(nonce),
+        };
+        Box::pin(self.finish_with(plan, pre)).await
     }
 
     fn pending_head_path(&self) -> std::path::PathBuf {
@@ -189,40 +235,94 @@ impl<A: Arkiv> HeadPush<'_, A> {
 
     /// The first write and device delegation if missing, then waits for `C_d` to be idle
     /// (and so for a head tx an interrupted push left in flight) while topping it up.
-    /// `true` when nothing was sent or landed since the view's sync.
-    pub async fn setup(&self) -> Result<bool> {
+    /// What it read is reused by the head send.
+    pub async fn setup(&self) -> Result<Ready> {
         let first = self.first_ops()?;
         let sent_first = !first.is_empty();
-        if sent_first {
-            self.send_from(&self.keys.control(&self.rid()), vec![first])
-                .await?;
-        }
-        let (waited, ()) =
-            futures_util::future::try_join(self.ensure_idle(), self.prefund_control()).await?;
+        // One wallet run tops up both the identity's control address (for `first`) and
+        // `C_d`, so a first push waits for one top-up block, not two; then `first` goes
+        // while `C_d` is checked idle (the wallet sends nothing else meanwhile).
+        let control = self.keys.control(&self.rid());
+        let funded = async {
+            let funds = self.prefund(&first).await?;
+            if sent_first {
+                self.send_from(&control, vec![first.clone()]).await?;
+            }
+            Ok(funds)
+        };
+        let ((waited, account), (head, base_fee, at, balance)) =
+            futures_util::future::try_join(self.ensure_idle(), funded).await?;
         let _ = std::fs::remove_file(self.pending_head_path());
-        Ok(!sent_first && !waited)
+        Ok(Ready {
+            current: !sent_first && !waited,
+            account,
+            head,
+            base_fee,
+            at,
+            balance,
+        })
     }
 
     /// Tops `C_d` up for several head txs at once when it cannot pay for one, so most
-    /// pushes send no top-up before their head tx.
-    async fn prefund_control(&self) -> Result<()> {
-        let c = self.dev.control_address(&self.rid());
-        let (fee, have) =
-            futures_util::future::try_join(self.a.base_fee(), self.a.balance(c)).await?;
-        let one = self.cfg.pipeline.tx_reserve(HEAD_GAS, U256::ZERO, fee);
-        let Some(amount) = charter_store::PipelineConfig::top_up(have, one, PREFUND_HEADS) else {
-            return Ok(());
+    /// pushes send no top-up before their head tx, and the identity's control address
+    /// for `first` (the first write and device delegation) if it holds too little. Returns
+    /// the head, base fee and time it read, and `C_d`'s balance after the top-up.
+    async fn prefund(&self, first: &[Operation]) -> Result<(u64, u128, std::time::Instant, U256)> {
+        let rid = self.rid();
+        let (c_d, c) = (
+            self.dev.control_address(&rid),
+            self.keys.control_address(&rid),
+        );
+        let pc = &self.cfg.pipeline;
+        // The control address's needs only for `first`, read in the same round trip.
+        let control = async {
+            match first.is_empty() {
+                true => Ok(None),
+                false => {
+                    futures_util::future::try_join(self.a.estimate(c, first), self.a.balance(c))
+                        .await
+                        .map(Some)
+                }
+            }
         };
+        let ((head, fee), have, control) =
+            futures_util::future::try_join3(self.a.head_fee(), self.a.balance(c_d), control)
+                .await?;
+        let at = std::time::Instant::now();
+        let one = pc.tx_reserve(HEAD_GAS, U256::ZERO, fee);
+        let mut sends = vec![];
+        if let Some(amount) = charter_store::PipelineConfig::top_up(have, one, PREFUND_HEADS) {
+            sends.push((c_d, amount));
+        }
+        // What the pipeline sending `first` would top up itself, one block later.
+        if let Some((gas, have_c)) = control
+            && let Some(amount) = charter_store::PipelineConfig::top_up(
+                have_c,
+                pc.tx_reserve(gas, U256::ZERO, fee),
+                1,
+            )
+        {
+            sends.push((c, amount));
+        }
+        if sends.is_empty() {
+            return Ok((head, fee, at, have));
+        }
+        let to_c_d = sends.iter().find(|(a, _)| *a == c_d).map(|(_, v)| *v);
         let chain = self.a.chain_id().await?;
-        let cfg = self.cfg.pipeline.clone();
-        charter_store::TxPipeline::new(self.a, self.keys.wallet(), chain, cfg)
-            .transfer(c, amount)
+        charter_store::TxPipeline::new(self.a, self.keys.wallet(), chain, pc.clone())
+            .transfers(sends)
             .await?;
-        Ok(())
+        Ok((head, fee, at, have + to_c_d.unwrap_or_default()))
     }
 
-    /// Sends what `plan` says, re-checks and commits.
+    /// Sends what `plan` says, re-checks and commits, reading the head tx's nonce inputs
+    /// fresh.
     pub async fn finish(self, plan: Plan) -> Result<()> {
+        self.finish_with(plan, Pre::default()).await
+    }
+
+    /// [`Self::finish`] from chain state already read (see [`Pre`]).
+    pub async fn finish_with(self, plan: Plan, pre: Pre) -> Result<()> {
         use charter_store::trace::span;
         let mut state = State::load(&self.repo.state_path())?;
         // Boxed: these futures are large, and tests poll them on 2 MiB threads.
@@ -241,10 +341,10 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 content.inline.iter().map(Vec::len).sum::<usize>()
             )
         });
-        let landed = Box::pin(self.send_heads(&plan, &content, &mut state)).await?;
+        let landed = Box::pin(self.send_heads(&plan, &content, pre, &mut state)).await?;
         drop(t);
         let t = span(|| "push.recheck".into());
-        let v2 = Box::pin(self.own_v2(&state))
+        let v2 = Box::pin(self.fresh_v2(&state))
             .await?
             .ok_or_else(|| SyncError::coded(ErrorCode::Internal, "own heads vanished"))?;
         self.recheck(&v2)?;
@@ -400,10 +500,10 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 return Ok(());
             }
             let mut file = std::fs::File::open(f).map_err(|e| SyncError::io(f.display(), e))?;
-            let mut jobs = vec![];
-            for batch in missing.chunks(self.cfg.chunk_batch.max(1)) {
-                jobs.clear();
-                for &i in batch {
+            let batches: Vec<&[u64]> = missing.chunks(self.cfg.chunk_batch.max(1)).collect();
+            for (n, batch) in batches.iter().enumerate() {
+                let mut jobs = vec![];
+                for &i in *batch {
                     let bytes = packs::read_chunk(&mut file, i, m.size)
                         .map_err(|e| SyncError::io(f.display(), e))?;
                     jobs.push(vec![chunk_op(
@@ -414,11 +514,21 @@ impl<A: Arkiv> HeadPush<'_, A> {
                         self.cfg.data_lifetime,
                     )?]);
                 }
-                if let Err(e) = self.send_from(&self.dev.bulk(&rid), jobs.clone()).await {
-                    warn(&format!("snapshot upload: {e}; checking what landed"));
+                // The manifest rides with the last chunks instead of a block of its own:
+                // readers reach it only through the head, which lands after both.
+                let with_manifest = !sent_manifest && n + 1 == batches.len();
+                if with_manifest {
+                    jobs.push(vec![entity_op::<ManifestBody>(
+                        manifest,
+                        self.cfg.data_lifetime,
+                    )?]);
+                }
+                match self.send_from(&self.dev.bulk(&rid), jobs).await {
+                    Ok(_) => sent_manifest |= with_manifest,
+                    Err(e) => warn(&format!("snapshot upload: {e}; checking what landed")),
                 }
             }
-            if !sent_manifest {
+            if !sent_manifest && batches.is_empty() {
                 let op = entity_op::<ManifestBody>(manifest, self.cfg.data_lifetime)?;
                 self.send_from(&self.dev.bulk(&rid), vec![vec![op]]).await?;
                 sent_manifest = true;
@@ -454,6 +564,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
         &self,
         plan: &Plan,
         content: &Content,
+        mut pre: Pre,
         state: &mut State,
     ) -> Result<Vec<(Hash32, LandingJson)>> {
         let rid = self.rid();
@@ -475,11 +586,29 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 inline.push(vec![]);
             }
             let c_d = self.dev.control_address(&rid);
+            // Only the first head tx starts from what was read before; a follow-up reads.
+            let (ready, nonce) = (pre.ready.take(), pre.nonce.take());
             // The confirmed tx count first: a tx of `C_d` landing after it either moves
             // `entityNonce` (caught below) or takes this nonce (the send fails).
-            let account = self.a.tx_count_mined(c_d).await?;
-            let (at, nonce) =
-                futures_util::future::try_join(self.a.head(), self.a.entity_nonce(c_d)).await?;
+            let account = match ready {
+                Some(r) => r.account,
+                None => self.a.tx_count_mined(c_d).await?,
+            };
+            let (at, nonce) = futures_util::future::try_join(
+                async {
+                    match ready {
+                        Some(r) => Ok(r.head),
+                        None => self.a.head().await,
+                    }
+                },
+                async {
+                    match nonce {
+                        Some(n) => Ok(n),
+                        None => self.a.entity_nonce(c_d).await,
+                    }
+                },
+            )
+            .await?;
             // Another writer of this device (a copied device seed) would fork the body
             // chain; the next head must account for exactly what `C_d` created so far.
             let expected = match key {
@@ -533,24 +662,25 @@ impl<A: Arkiv> HeadPush<'_, A> {
             let cfg = self.cfg.pipeline.ordered();
             let wallet = self.keys.wallet();
             let signer = self.dev.control(&rid);
+            let calldata = charter_store::execute_calldata(&ops).len();
+            let seed = write::Seed {
+                tip: ready.map(|r| (r.head, r.base_fee, r.at, r.balance)),
+                gas: (key.is_some() && calldata < UNESTIMATED_HEAD_BYTES)
+                    .then(|| head_gas(calldata)),
+            };
             let landed =
-                write::send_funded_at(self.a, &signer, &wallet, &cfg, account, vec![ops]).await?;
+                write::send_funded_at(self.a, &signer, &wallet, &cfg, account, seed, vec![ops])
+                    .await?;
             let [l] = landed.as_slice() else {
                 return Err(SyncError::coded(
                     ErrorCode::Internal,
                     "the head tx was split",
                 ));
             };
-            let index = self
-                .a
-                .mined_tx(l.receipt.tx_hash)
-                .await?
-                .map(|t| t.index)
-                .unwrap_or(u32::MAX);
             let landing = LandingJson {
                 tx: l.receipt.tx_hash.0,
                 block: l.receipt.block_number,
-                index,
+                index: l.receipt.index,
             };
             state.landings.insert(hex32(&h), landing);
             state.save(&self.repo.state_path())?;
@@ -586,6 +716,63 @@ impl<A: Arkiv> HeadPush<'_, A> {
             ErrorCode::Rpc,
             "head txs keep landing late; push again",
         ))
+    }
+
+    /// This identity's v2 view read fresh after the head tx, like `own_v2` but in 3 round
+    /// trips instead of 5: the peer and anchor queries run alongside a `heads::build`
+    /// started from the peer info and device rows the sync verified, whose result is kept
+    /// only if the fresh reads return exactly those inputs (else it is built again).
+    async fn fresh_v2(&self, state: &State) -> Result<Option<V2>> {
+        let (rid, nid) = (self.rid(), self.nid());
+        let Some(pv) = self.view.peers.get(&nid) else {
+            return self.own_v2(state).await;
+        };
+        let rows: Vec<_> = pv
+            .anchors
+            .iter()
+            .filter(|o| is_device_row(o))
+            .cloned()
+            .collect();
+        if rows.is_empty() {
+            return self.own_v2(state).await;
+        }
+        let fresh = async {
+            let Some(info) = view::resolve_peer(self.a, &rid, &nid).await? else {
+                return Ok(None);
+            };
+            let rows = view::anchors(self.a, &rid, &nid, &info).await?;
+            let rows: Vec<_> = rows.into_iter().filter(is_device_row).collect();
+            Ok::<_, SyncError>(Some((info, rows)))
+        };
+        let early = heads::build(
+            self.a,
+            &rid,
+            &nid,
+            &pv.info,
+            &self.view.identity,
+            &rows,
+            state,
+        );
+        let (fresh, early) = futures_util::future::join(fresh, Box::pin(early)).await;
+        let Some((info, fresh_rows)) = fresh? else {
+            return Ok(None);
+        };
+        if fresh_rows.is_empty() {
+            return Ok(None);
+        }
+        if info.binds == pv.info.binds && fresh_rows == rows {
+            return early.map(Some);
+        }
+        let v2 = heads::build(
+            self.a,
+            &rid,
+            &nid,
+            &info,
+            &self.view.identity,
+            &fresh_rows,
+            state,
+        );
+        Ok(Some(Box::pin(v2).await?))
     }
 
     /// Whether this device's head, read inside one `entityNonce` bracket at `nonce`, is
