@@ -176,6 +176,7 @@ fn a_removed_root_delegates_forged_grant_is_refused() {
         let att = charter_private::auth::sign_commit(
             &alice.keys,
             &rid,
+            &old.id_key,
             forged_ep,
             &fake_key,
             &body,
@@ -529,9 +530,17 @@ fn a_root_delegates_record_for_epoch_zero_does_not_block_joins() {
         let gen0 = ring(&net, &alice, &rid).await.expect("alice").id_key;
         let (body, bx, key) = (vec![0x42; 8], vec![0x43; 8], [0x5a; 32]);
         let admins: BTreeSet<String> = [hex::encode(alice.keys.nid())].into();
-        let att =
-            charter_private::auth::sign_commit(&alice.keys, &rid, 0, &key, &body, &bx, &admins)
-                .expect("sign");
+        let att = charter_private::auth::sign_commit(
+            &alice.keys,
+            &rid,
+            &gen0,
+            0,
+            &key,
+            &body,
+            &bx,
+            &admins,
+        )
+        .expect("sign");
         let ct = charter_private::auth::commits_tag(&gen0, &rid);
         let record = msg::op(
             msg::T_COMMIT,

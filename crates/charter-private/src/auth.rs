@@ -4,9 +4,9 @@
 //!
 //! - leaf binding: a nid signs its MLS signature key; an admin checks it before an add;
 //! - welcome attestation: the admin who made a welcome signs it and its lockbox, sealed;
-//! - commit attestation: the admin who made a commit signs it, its lockbox, a digest of the
-//!   new epoch's admin set and an epoch authenticator, in the clear for anyone holding the
-//!   generation-0 id key, so a joiner can replay who was admin when from the root;
+//! - commit attestation: the admin who made a commit signs it, its lockbox, the new epoch's
+//!   admin set and an epoch authenticator, readable by anyone holding the generation-0 id
+//!   key, so joiners and grant readers can replay who was admin when from the root;
 //! - grant: a root delegate signs a published epoch grant.
 
 use std::collections::BTreeSet;
@@ -97,13 +97,7 @@ pub fn open_att(key: &Key, rid: &Rid, epoch: u64, sealed: &[u8]) -> Option<(Nid,
     Some((nid.try_into().ok()?, sig.to_vec()))
 }
 
-/// What every member and joiner can recompute for epoch `epoch` with its key: a digest of
-/// its admin set, and an authenticator of the key itself.
-pub fn admins_digest(key: &Key, admins: &BTreeSet<String>) -> Hash32 {
-    let set: Vec<u8> = admins.iter().flat_map(|n| n.bytes()).collect();
-    blind(key, "admins", &set)
-}
-
+/// What only holders of epoch `epoch`'s key can compute: an authenticator of the key.
 pub fn epoch_auth(key: &Key, rid: &Rid) -> Hash32 {
     blind(key, "epoch", rid)
 }
@@ -114,13 +108,30 @@ pub fn commits_tag(gen0: &Key, rid: &Rid) -> Hash32 {
     blind(gen0, "commits", rid)
 }
 
-/// A commit's public attestation (`ag.att`): `signer || admins digest || epoch auth || sig`.
+/// The key a commit attestation's admin set is sealed under: holders of the generation-0
+/// id key, who already see each commit's signer, read it; anyone else sees ciphertext.
+fn admins_key(gen0: &Key, rid: &Rid) -> Key {
+    blind(gen0, "admin-set", rid)
+}
+
+const ADM_KIND: &str = "adm";
+
+/// A commit's public attestation (`ag.att`): `signer || epoch auth || u32be(len) || admin
+/// set sealed under [`admins_key`] || sig`, opened: the new epoch's admins (hex nids).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitAtt {
     pub signer: Nid,
-    pub admins: Hash32,
     pub auth: Hash32,
+    pub admins: BTreeSet<String>,
     pub sig: Vec<u8>,
+}
+
+fn admin_bytes(admins: &BTreeSet<String>) -> Vec<u8> {
+    admins
+        .iter()
+        .filter_map(|n| hex::decode(n).ok())
+        .flatten()
+        .collect()
 }
 
 fn commit_msg(
@@ -128,45 +139,66 @@ fn commit_msg(
     epoch: u64,
     body: &[u8],
     lockbox: &[u8],
-    adm: &Hash32,
     eauth: &Hash32,
+    admins: &BTreeSet<String>,
 ) -> Vec<u8> {
     [
         att_msg(rid, epoch, body, lockbox, None),
-        adm.to_vec(),
         eauth.to_vec(),
+        admin_bytes(admins),
     ]
     .concat()
 }
 
 /// This admin's public attestation of commit `body` with `lockbox`, making epoch `epoch`
-/// (key `key`) with admin set `admins`.
+/// (key `key`) with admin set `admins`; `gen0` is the repo's generation-0 id key.
+#[allow(clippy::too_many_arguments)]
 pub fn sign_commit(
     keys: &Keys,
     rid: &Rid,
+    gen0: &Key,
     epoch: u64,
     key: &Key,
     body: &[u8],
     lockbox: &[u8],
     admins: &BTreeSet<String>,
 ) -> Result<Vec<u8>> {
-    let (adm, eauth) = (admins_digest(key, admins), epoch_auth(key, rid));
-    let sig = sign(
-        keys,
-        CTX_COMMIT,
-        &commit_msg(rid, epoch, body, lockbox, &adm, &eauth),
+    let eauth = epoch_auth(key, rid);
+    let msg = commit_msg(rid, epoch, body, lockbox, &eauth, admins);
+    let sig = sign(keys, CTX_COMMIT, &msg)?;
+    let sealed = seal(
+        &admins_key(gen0, rid),
+        &aad(rid, ADM_KIND, epoch),
+        &admin_bytes(admins),
     )?;
-    Ok([keys.nid().as_slice(), &adm, &eauth, &sig].concat())
+    let len = u32::try_from(sealed.len())
+        .map_err(|_| SyncError::coded(ErrorCode::Internal, "admin set too large"))?;
+    Ok([
+        keys.nid().as_slice(),
+        &eauth,
+        &len.to_be_bytes(),
+        &sealed,
+        &sig,
+    ]
+    .concat())
 }
 
-pub fn parse_commit_att(b: &[u8]) -> Option<CommitAtt> {
+/// The attestation of a commit for epoch `epoch` of `rid`, its admin set opened with the
+/// generation-0 id key `gen0`.
+pub fn parse_commit_att(b: &[u8], gen0: &Key, rid: &Rid, epoch: u64) -> Option<CommitAtt> {
     let (signer, rest) = b.split_at_checked(32)?;
-    let (adm, rest) = rest.split_at_checked(32)?;
-    let (eauth, sig) = rest.split_at_checked(32)?;
+    let (eauth, rest) = rest.split_at_checked(32)?;
+    let (len, rest) = rest.split_at_checked(4)?;
+    let len = usize::try_from(u32::from_be_bytes(len.try_into().ok()?)).ok()?;
+    let (sealed, sig) = rest.split_at_checked(len)?;
+    let set = open(&admins_key(gen0, rid), &aad(rid, ADM_KIND, epoch), sealed)?;
+    if !set.len().is_multiple_of(32) {
+        return None;
+    }
     Some(CommitAtt {
         signer: signer.try_into().ok()?,
-        admins: adm.try_into().ok()?,
         auth: eauth.try_into().ok()?,
+        admins: set.chunks(32).map(hex::encode).collect(),
         sig: sig.to_vec(),
     })
 }
@@ -180,7 +212,7 @@ pub fn commit_signed(
     body: &[u8],
     lockbox: &[u8],
 ) -> bool {
-    let msg = commit_msg(rid, epoch, body, lockbox, &att.admins, &att.auth);
+    let msg = commit_msg(rid, epoch, body, lockbox, &att.auth, &att.admins);
     verifies(pk, CTX_COMMIT, &msg, &att.sig)
 }
 
