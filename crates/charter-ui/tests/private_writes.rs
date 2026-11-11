@@ -106,7 +106,7 @@ async fn open_issue(app: axum::Router, rid: &Rid, title: &str, body: &str) {
             .await
             .text();
         assert!(!part.contains("Write failed"), "{part}");
-        if part.contains("Confirmed in block") {
+        if part.contains("toast t-confirmed") {
             return;
         }
         assert!(Instant::now() < deadline, "never confirmed");
@@ -360,7 +360,7 @@ fn a_rotation_between_price_and_send_seals_under_the_new_epoch() {
                 .await
                 .text();
             assert!(!part.contains("Write failed"), "{part}");
-            if part.contains("Confirmed in block") {
+            if part.contains("toast t-confirmed") {
                 break;
             }
             assert!(Instant::now() < deadline, "never confirmed");
