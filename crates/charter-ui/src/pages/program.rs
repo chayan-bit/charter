@@ -8,7 +8,7 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 use serde_json::Value;
 
-use super::{App, Head, Layout, Repo, Theme, blocking, frame, html, open, short};
+use super::{App, Head, Layout, Pref, Repo, blocking, frame, html, open, short};
 use crate::cache::{MoveJson, ProgramJson};
 use crate::fold::{self, Release, Verdict};
 
@@ -36,9 +36,9 @@ impl Releases {
     }
 }
 
-fn releases_page(app: &App, theme: &Theme, r: &Repo) -> Response {
+fn releases_page(app: &App, pref: &Pref, r: &Repo) -> Response {
     let ops = r.ops();
-    let (mut l, head) = frame(app, theme, r, "releases", "Releases");
+    let (mut l, head) = frame(app, pref, r, "releases", "Releases");
     l.crumbs.push((String::new(), "releases".into()));
     html(&Releases {
         l,
@@ -48,7 +48,7 @@ fn releases_page(app: &App, theme: &Theme, r: &Repo) -> Response {
     })
 }
 
-pub async fn releases(State(app): State<Arc<App>>, t: Theme, Path(rid): Path<String>) -> Response {
+pub async fn releases(State(app): State<Arc<App>>, t: Pref, Path(rid): Path<String>) -> Response {
     blocking(move || match open(&app, &t, &rid) {
         Ok(r) => releases_page(&app, &t, &r),
         Err(e) => e,
@@ -73,6 +73,10 @@ impl ProgramPage {
     pub fn short(&self, s: &str) -> String {
         short(s)
     }
+    /// A bounty amount (wei, as the program keeps it) in tGLM.
+    pub fn glm(&self, wei: &str) -> super::money::Amount {
+        super::money::glm(wei)
+    }
     pub fn rejected(&self) -> Vec<&MoveJson> {
         self.p
             .iter()
@@ -95,11 +99,11 @@ fn entries(v: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn program_page(app: &App, theme: &Theme, r: &Repo) -> Response {
+fn program_page(app: &App, pref: &Pref, r: &Repo) -> Response {
     let p = r.view.as_ref().and_then(|v| v.program.clone());
     let state = p.as_ref().map(|p| &p.state);
-    let (mut l, head) = frame(app, theme, r, "program", "Program");
-    l.crumbs.push((String::new(), "program".into()));
+    let (mut l, head) = frame(app, pref, r, "program", "Rules and CI");
+    l.crumbs.push((String::new(), "rules".into()));
     html(&ProgramPage {
         l,
         r: head,
@@ -111,7 +115,7 @@ fn program_page(app: &App, theme: &Theme, r: &Repo) -> Response {
     })
 }
 
-pub async fn program(State(app): State<Arc<App>>, t: Theme, Path(rid): Path<String>) -> Response {
+pub async fn program(State(app): State<Arc<App>>, t: Pref, Path(rid): Path<String>) -> Response {
     blocking(move || match open(&app, &t, &rid) {
         Ok(r) => program_page(&app, &t, &r),
         Err(e) => e,

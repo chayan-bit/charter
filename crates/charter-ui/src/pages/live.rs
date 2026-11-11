@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use charter_sync::ids::parse_id;
 use tokio::sync::broadcast::error::RecvError;
 
-use super::{App, Head, Theme, blocking, frame, html, open};
+use super::{App, Head, Layout, Pref, blocking, frame, html, open};
 
 pub async fn events(State(app): State<Arc<App>>, Path(rid): Path<String>) -> Response {
     let Ok(rid) = parse_id(&rid) else {
@@ -45,17 +45,18 @@ pub async fn events(State(app): State<Arc<App>>, Path(rid): Path<String>) -> Res
 #[derive(Template)]
 #[template(path = "verify_part.html")]
 pub struct VerifyPart {
+    pub l: Layout,
     pub r: Head,
 }
 
-pub async fn verify(State(app): State<Arc<App>>, t: Theme, Path(rid): Path<String>) -> Response {
+pub async fn verify(State(app): State<Arc<App>>, t: Pref, Path(rid): Path<String>) -> Response {
     blocking(move || {
         let r = match open(&app, &t, &rid) {
             Ok(r) => r,
             Err(e) => return e,
         };
-        let (_, head) = frame(&app, &t, &r, "", "");
-        html(&VerifyPart { r: head })
+        let (l, head) = frame(&app, &t, &r, "", "");
+        html(&VerifyPart { l, r: head })
     })
     .await
 }

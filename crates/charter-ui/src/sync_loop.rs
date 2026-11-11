@@ -13,12 +13,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use charter_core::Rid;
 use charter_store::Arkiv;
 use charter_store::heads::{self, WsConfig};
-use charter_sync::ids::unhex32;
+use charter_sync::ids::{hex32, unhex32};
 use charter_sync::{Config, Keys, Repo, Want, cob};
 
 use crate::UiError;
 use crate::cache::{self, Cobs, RepoView};
 
+use crate::last::Last;
 use crate::pace::Pacer;
 
 /// A page request keeps its repo on screen (and the UI open) this long without a stream.
@@ -66,6 +67,8 @@ pub struct Round {
     pub checked_ms: u64,
     /// Background rounds are paused for the RPC quota until then.
     pub paused: Option<Instant>,
+    /// When a round or probe last succeeded (ms).
+    pub ok_ms: u64,
 }
 
 /// Which pages are open, for [`crate::pace`].
@@ -226,7 +229,14 @@ impl Shared {
 
     /// A probe found nothing new.
     pub fn checked(&self, rid: Rid) {
-        self.record(rid, |s| s.checked_ms = now_ms());
+        self.record(rid, |s| (s.checked_ms, s.ok_ms) = (now_ms(), now_ms()));
+    }
+
+    /// For the header: the latest success of any repo, and how many repos failed last.
+    pub fn health(&self) -> (Option<u64>, usize) {
+        let r = self.rounds.lock().map(|r| r.clone()).unwrap_or_default();
+        let ok = r.values().map(|x| x.ok_ms).max().filter(|t| *t > 0);
+        (ok, r.values().filter(|x| x.error.is_some()).count())
     }
 
     pub fn failed(&self, rid: Rid, error: String) {
@@ -235,7 +245,7 @@ impl Shared {
 
     pub fn recorded(&self, rid: Rid, r: Result<Outcome, UiError>) {
         self.record(rid, |s| match r {
-            Ok(Outcome::Synced(_)) => s.error = None,
+            Ok(Outcome::Synced(_)) => (s.error, s.ok_ms) = (None, now_ms()),
             Ok(Outcome::Busy) => s.busy += 1,
             Err(e) => s.error = Some(e.to_string()),
         });
@@ -318,16 +328,54 @@ async fn locked_round<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<Outcom
     let cobs_path = repo.dir.join(cache::COBS);
     let old: Cobs = cache::read(&cobs_path)?.unwrap_or_default();
     let since = cob::list_since(a, rid, old.next_block(), &old.ops()?).await?;
-    cache::write(&cobs_path, &old.merged(&since.ops, since.last_block))?;
+    let cobs = old.merged(&since.ops, since.last_block);
+    cache::write(&cobs_path, &cobs)?;
     let view_path = repo.dir.join(cache::VIEW);
     let was: Option<RepoView> = cache::read(&view_path)?;
-    let now = RepoView::of(&view, now_ms());
+    let mut now = RepoView::of(&view, now_ms());
+    (now.issues, now.patches) = (
+        cobs.opened(crate::fold::ISSUE),
+        cobs.opened(crate::fold::PATCH),
+    );
+    // Aliases learnt in earlier rounds stay; this round's peer lookups refresh them.
+    let authors = since.ops.iter().map(|o| o.author);
+    let fresh = authors.filter_map(|n| Some((hex32(&n), cob::alias_of(&n)?)));
+    now.aliases = was
+        .as_ref()
+        .map(|w| w.aliases.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .chain(std::mem::take(&mut now.aliases))
+        .chain(fresh)
+        .collect();
     let pushed = was.is_none_or(|w| w.canonical != now.canonical || w.peers != now.peers);
+    index_tips(&repo.dir, &now)?;
     cache::write(&view_path, &now)?;
     Ok(Outcome::Synced(Changes {
         pushed,
         ops: since.ops.len(),
     }))
+}
+
+/// Writes `last.json` for the view's ref tips before the view itself, so a page that reads
+/// the new view finds every tip indexed; tips already indexed are kept, not walked again.
+fn index_tips(dir: &std::path::Path, view: &RepoView) -> Result<(), UiError> {
+    let Some(ts) = crate::gitread::open(dir) else {
+        return Ok(());
+    };
+    let git = crate::gitread::local(&ts);
+    let path = dir.join(crate::last::FILE);
+    // An unreadable index is rebuilt, never fatal to the round.
+    let old: Last = cache::read(&path).ok().flatten().unwrap_or_default();
+    let tips = view
+        .canonical
+        .iter()
+        .filter_map(|(_, o)| crate::gitread::resolve(&git, None, o));
+    let fresh = Last::refresh(&git, old.clone(), tips);
+    match fresh == old {
+        true => Ok(()),
+        false => cache::write(&path, &fresh),
+    }
 }
 
 async fn run<A: Arkiv>(a: Arc<A>, cfg: Config, shared: Arc<Shared>, ws: Option<WsConfig>) {

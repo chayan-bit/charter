@@ -39,6 +39,9 @@ async fn every_page_is_under_20_kb_gzipped_with_its_css() {
         format!("/r/{h}/patches/{}", f.patch),
         format!("/r/{h}/releases"),
         format!("/r/{h}/program"),
+        format!("/r/{h}/branches"),
+        "/wallet".to_owned(),
+        "/settings".to_owned(),
     ];
     println!("app.css {css} B gzipped");
     for p in pages {

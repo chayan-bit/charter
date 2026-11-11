@@ -1,5 +1,6 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
-<div role="status">{% include "toast.html" %}</div>
+<div class="solo" role="status">{% include "toast.html" %}</div>
 {% endblock %}

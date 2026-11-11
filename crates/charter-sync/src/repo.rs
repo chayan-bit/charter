@@ -37,6 +37,16 @@ pub struct Config {
     pub alias: String,
 }
 
+/// `$CHARTER_ALIAS`, the display name a first write puts in this peer's `peer` document;
+/// empty when unset or over the 64 B the document allows.
+fn alias_from_env() -> String {
+    std::env::var("CHARTER_ALIAS")
+        .ok()
+        .map(|a| a.trim().to_owned())
+        .filter(|a| a.len() <= 64)
+        .unwrap_or_default()
+}
+
 impl Config {
     pub fn new(home: PathBuf) -> Self {
         Self {
@@ -46,7 +56,7 @@ impl Config {
             pipeline: PipelineConfig::default(),
             extra_peers: vec![],
             chunk_batch: 256,
-            alias: String::new(),
+            alias: alias_from_env(),
         }
     }
 

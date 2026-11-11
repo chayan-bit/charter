@@ -1,0 +1,1 @@
+{% if let Some(c) = last %}<div class="lastc"><b>{{ c.author }}</b><a class="msg" href="/r/{{ r.hex }}/commit/{{ c.oid }}" title="{{ c.subject }}">{{ c.subject }}</a><a class="hash" href="/r/{{ r.hex }}/commit/{{ c.oid }}" title="{{ c.oid }}">{{ self.short(c.oid) }}</a><span class="muted num">{{ self.age(c.time) }}</span></div>{% endif %}

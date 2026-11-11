@@ -1,34 +1,30 @@
 {% extends "base.html" %}
-{% import "macros.html" as u %}
+{% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
-<article class="commit">
-<h2>{{ subject }}</h2>
-{% if !body.is_empty() %}<pre class="msg">{{ body }}</pre>{% endif %}
-<div class="box">
-<table class="facts">
-<tr><th>Commit</th><td><code data-copy="{{ c.oid }}">{{ c.oid }}</code></td></tr>
-<tr><th>Author</th><td>{{ c.author }}, {{ date }}</td></tr>
-{% if c.committer != c.author %}<tr><th>Committer</th><td>{{ c.committer }}</td></tr>{% endif %}
-<tr><th>{% if c.parents.len() == 1 %}Parent{% else %}Parents{% endif %}</th><td>{% for p in c.parents %}<a href="/r/{{ r.hex }}/commit/{{ p }}"><code title="{{ p }}">{{ self.short(p.as_str()) }}</code></a> {% endfor %}{% if c.parents.is_empty() %}<span class="dim">none (root commit)</span>{% endif %}</td></tr>
-<tr><th>Git signature</th><td>{% if c.git_signed %}present, not checked here{% else %}<span class="dim">unsigned</span>{% endif %}</td></tr>
-{% if anchors.is_empty() %}<tr><th>Anchored</th><td><span class="dim">in no verified peer head</span></td></tr>{% endif %}
-{% for a in anchors %}
-<tr><th>Anchored</th><td>{% if a.delegate %}delegate{% else %}peer{% endif %} <code title="{{ a.nid }}">{{ self.short(a.nid.as_str()) }}</code> seq {{ a.seq }} at block <code>{{ a.block }}</code>, entity <code title="{{ a.key }}">{{ self.short(a.key.as_str()) }}</code></td></tr>
-<tr><th>Reachable from</th><td class="chips">{% for n in a.refs %}<code class="ref">{{ u::refname(n) }}</code>{% endfor %}</td></tr>
-<tr><th>Signatures</th><td><span class="ok">ML-DSA-65 + Ed25519 valid</span></td></tr>
-{% endfor %}
-</table>
-</div>
+<article class="solo">
+<header class="thread-head">
+<h1>{{ subject }}</h1>
+<p class="meta"><span><b>{{ c.author }}</b> committed on {{ date }}</span><a class="hash" href="/r/{{ r.hex }}/commit/{{ c.oid }}" title="{{ c.oid }}">{{ self.short(c.oid) }}</a><button class="copy js" type="button" data-copy="{{ c.oid }}" aria-label="Copy commit hash" title="Copy commit hash">{{ m::i(l.v, "copy") }}</button></p>
+</header>
+{% if !body.is_empty() %}<pre class="md sec">{{ body }}</pre>{% endif %}
+<dl class="facts sec">
+{% if c.committer != c.author %}<dt>Committer</dt><dd>{{ c.committer }}</dd>{% endif %}
+<dt>{% if c.parents.len() == 1 %}Parent{% else %}Parents{% endif %}</dt><dd>{% for p in c.parents %}<a class="hash" href="/r/{{ r.hex }}/commit/{{ p }}" title="{{ p }}">{{ self.short(p) }}</a> {% endfor %}{% if c.parents.is_empty() %}<span class="muted">none, this is the first commit</span>{% endif %}</dd>
+<dt>On Arkiv</dt><dd>{% if anchors.is_empty() %}<span class="muted">not in any verified push</span>{% else %}{% for a in anchors %}<span class="signed">{{ m::i(l.v, "seal-check") }}Pushed by {{ r.who(a.nid) }}</span> <time class="muted" title="{{ r.full(a.block) }}">{{ r.when(a.block) }}</time>, on {% for n in a.refs %}<code>{{ m::refname(n) }}</code>{% if !loop.last %}, {% endif %}{% endfor %}{% if !loop.last %}<br>{% endif %}{% endfor %}{% endif %}</dd>
+<dt>Git signature</dt><dd>{% if c.git_signed %}present, not checked here{% else %}<span class="muted">unsigned</span>{% endif %}</dd>
+</dl>
+{% if !anchors.is_empty() %}<details class="tech"><summary>Technical details</summary><dl class="facts">{% for a in anchors %}<dt>{% if a.delegate %}Maintainer{% else %}Peer{% endif %} {{ r.who(a.nid) }}</dt><dd>head seq {{ a.seq }} at block <code>{{ a.block }}</code>, entity <code title="{{ a.key }}">{{ self.short(a.key) }}</code>; ML-DSA-65 + Ed25519 valid; reachable from {% for n in a.refs %}<code>{{ n }}</code> {% endfor %}</dd>{% endfor %}<dt>Commit</dt><dd><code>{{ c.oid }}</code></dd></dl></details>{% endif %}
 </article>
+<div class="sec">
 {% for f in files %}
-<details class="file box" open data-copy="{{ f.path }}">
-<summary><code>{% if let Some(from) = f.from %}{{ from }} to {% endif %}{{ f.path }}</code><span class="add">+{{ f.add }}</span><span class="del">-{{ f.del }}</span></summary>
-{% if f.binary %}<p class="dim pad">Binary file.</p>{% else %}
-<div class="scroll" tabindex="0" role="region" aria-label="{{ f.path }}">
+<details class="file" open data-copy="{{ f.path }}">
+<summary><code>{% if let Some(from) = f.from %}{{ from }} to {% endif %}{{ f.path }}</code><span class="delta"><span class="add">+{{ f.add }}</span><span class="del">-{{ f.del }}</span></span></summary>
+{% if f.binary %}<p class="muted codefoot">Binary file.</p>{% else %}
+<div class="scroll" tabindex="0" role="region" aria-label="Changes to {{ f.path }}">
 <table class="code diff"><tbody>
 {#- Lean rows (optional </td> end tags left out, the sign drawn by CSS): long diffs are 2,000 rows. -#}
-{% for d in f.lines %}{% if d.kind == '@' %}<tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="hunk" colspan="2">{{ d.text }}</td></tr>{% else %}<tr{% if d.kind == '+' %} class=a{% else if d.kind == '-' %} class=d{% endif %}><td class=ln>{% if let Some(n) = d.old %}{{ n }}{% endif %}<td class=ln>{% if let Some(n) = d.new %}{{ n }}{% endif %}<td class=sg><td class=lc>{{ self.esc(d.text.as_str())|safe }}</tr>{% endif %}
+{% for d in f.lines %}{% if d.kind == '@' %}<tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="hunk" colspan="2">{{ d.text }}</td></tr>{% else %}<tr{% if d.kind == '+' %} class=a{% else if d.kind == '-' %} class=d{% endif %}><td class=ln>{% if let Some(n) = d.old %}{{ n }}{% endif %}<td class=ln>{% if let Some(n) = d.new %}{{ n }}{% endif %}<td class=sg><td class=lc>{{ self.esc(d.text)|safe }}</tr>{% endif %}
 {% endfor %}
 </tbody></table>
 </div>
@@ -36,4 +32,5 @@
 </details>
 {% endfor %}
 {% if hidden > 0 %}<p class="more">{{ hidden }} more diff lines. <a href="?all=1">Show all</a></p>{% endif %}
+</div>
 {% endblock %}

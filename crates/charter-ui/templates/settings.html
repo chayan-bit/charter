@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block main %}
+<div class="page-head"><div><h1>Settings</h1><p>How this computer shows things and when it asks. Saved in <code>{{ file }}</code> under <code>$CHARTER_HOME</code>; never published.</p></div></div>
+{% if saved %}<div class="notice off" role="status">{{ m::i(l.v, "check-circle") }}<p><b>Saved.</b> Every page uses it now.</p></div>{% endif %}
+{% if let Some(e) = error %}<div class="notice bad" role="alert">{{ m::i(l.v, "warning-circle") }}<p><b>Not saved.</b> {{ e }}.</p></div>{% endif %}
+<form method="post" action="/settings" hx-boost="false">
+<input type="hidden" name="csrf" value="{{ l.csrf }}">
+<section class="setting" aria-labelledby="s-names">
+<div><h2 id="s-names">Peer names</h2><p>Peers can publish an alias. You can also give anyone a nickname that only this computer knows.</p></div>
+<fieldset class="choices"><legend class="vh">Peer names</legend>
+<label class="choice"><input type="radio" name="names" value="both"{% if self.is("names", "both") %} checked{% endif %}><b>Both<span class="tag">default</span></b><small>Your nickname, with their alias after it: Ravi K (ravi).</small></label>
+<label class="choice"><input type="radio" name="names" value="alias"{% if self.is("names", "alias") %} checked{% endif %}><b>Their alias</b><small>What they published, the same on every computer.</small></label>
+<label class="choice"><input type="radio" name="names" value="nickname"{% if self.is("names", "nickname") %} checked{% endif %}><b>Your nickname</b><small>Falls back to their alias, then a short id.</small></label>
+</fieldset>
+</section>
+<section class="setting" aria-labelledby="s-nicks">
+<div><h2 id="s-nicks">Nicknames</h2><p>Up to {{ max_nick }} characters. Leave empty to remove.</p></div>
+{% if peers.is_empty() %}<p class="muted">Peers show here once a repo on this computer has synced.</p>{% else %}
+<div class="tblwrap"><table class="tbl nicks"><thead><tr><th>Peer</th><th>Their alias</th><th>Your nickname</th></tr></thead><tbody>
+{% for x in peers %}<tr><td><code title="{{ x.nid }}">{{ self.short(x.nid) }}</code><br><span class="muted small">{{ x.repos }}</span></td><td>{% if x.alias.is_empty() %}<span class="muted">none</span>{% else %}{{ x.alias }}{% endif %}</td><td><label class="vh" for="n-{{ x.nid }}">Nickname for {{ self.short(x.nid) }}</label><input class="input" id="n-{{ x.nid }}" name="nick.{{ x.nid }}" value="{{ x.nick }}" maxlength="{{ max_nick }}" autocomplete="off"></td></tr>
+{% endfor %}
+</tbody></table></div>
+{% endif %}
+</section>
+<section class="setting" aria-labelledby="s-small">
+<div><h2 id="s-small">Small writes</h2><p>Every write that costs tGLM shows the cost dialog first. You can let cheap ones go straight through.</p></div>
+<fieldset class="choices"><legend class="vh">Small writes</legend>
+<label class="choice"><input type="radio" name="small" value="always"{% if p.skip_under.is_none() %} checked{% endif %}><b>Always show the cost dialog<span class="tag">default</span></b><small>You confirm every write, whatever it costs.</small></label>
+<label class="choice"><input type="radio" name="small" value="skip"{% if p.skip_under.is_some() %} checked{% endif %}><b>Skip it for writes under a limit</b><small>A write that costs at most the limit, moves no funds and that your balance covers is sent when you submit the form. You still see what it cost, and it is in your wallet history.</small></label>
+<div class="sub"><label for="skip_under">Limit</label><input class="input" id="skip_under" name="skip_under" value="{{ self.skip() }}" inputmode="decimal" autocomplete="off" aria-describedby="skip-help"><span id="skip-help" class="muted">tGLM, at most {{ max_skip }}</span></div>
+</fieldset>
+</section>
+<section class="setting" aria-labelledby="s-merged">
+<div><h2 id="s-merged">Patch status</h2><p>A patch is open until a maintainer publishes that it is merged. Often the branch moves first.</p></div>
+<fieldset class="choices"><legend class="vh">Patch status</legend>
+<label class="choice"><input type="radio" name="merged" value="infer"{% if self.is("merged", "infer") %} checked{% endif %}><b>Merged once the default branch has it<span class="tag">default</span></b><small>Shown as merged when the default branch contains its latest commit.</small></label>
+<label class="choice"><input type="radio" name="merged" value="ops"{% if self.is("merged", "ops") %} checked{% endif %}><b>Only when a maintainer says so</b><small>Open until a merged note is published.</small></label>
+</fieldset>
+</section>
+<section class="setting" aria-labelledby="s-times">
+<div><h2 id="s-times">Times</h2><p>Times come from the block a record landed in, which nobody can fake. Comments and issues also carry the author's own clock.</p></div>
+<fieldset class="choices"><legend class="vh">Times</legend>
+<label class="choice"><input type="radio" name="times" value="block"{% if self.is("times", "block") %} checked{% endif %}><b>Block time<span class="tag">default</span></b><small>One time per record, the same on every computer.</small></label>
+<label class="choice"><input type="radio" name="times" value="both"{% if self.is("times", "both") %} checked{% endif %}><b>Block time and the author's clock</b><small>Adds the time the author's computer signed, which they control.</small></label>
+</fieldset>
+</section>
+<section class="setting" aria-labelledby="s-theme">
+<div><h2 id="s-theme">Theme</h2><p>The button in the header changes this too.</p></div>
+<fieldset class="choices"><legend class="vh">Theme</legend>
+<label class="choice"><input type="radio" name="theme" value="system"{% if self.is("theme", "system") %} checked{% endif %}><b>Same as the system<span class="tag">default</span></b></label>
+<label class="choice"><input type="radio" name="theme" value="light"{% if self.is("theme", "light") %} checked{% endif %}><b>Light</b></label>
+<label class="choice"><input type="radio" name="theme" value="dark"{% if self.is("theme", "dark") %} checked{% endif %}><b>Dark</b></label>
+</fieldset>
+</section>
+<section class="setting" aria-labelledby="s-fonts">
+<div><h2 id="s-fonts">Fonts</h2><p>Charter carries its own fonts, so pages look the same everywhere.</p></div>
+<fieldset class="choices"><legend class="vh">Fonts</legend>
+<label class="choice"><input type="radio" name="fonts" value="embedded"{% if self.is("fonts", "embedded") %} checked{% endif %}><b>Charter's fonts<span class="tag">default</span></b><small>Schibsted Grotesk and IBM Plex Mono.</small></label>
+<label class="choice"><input type="radio" name="fonts" value="system"{% if self.is("fonts", "system") %} checked{% endif %}><b>This computer's fonts</b><small>Nothing extra is loaded.</small></label>
+</fieldset>
+</section>
+<div class="save"><span class="muted small">Applies to every page when saved, without a restart.</span><button class="btn btn-ink" type="submit">Save settings</button></div>
+</form>
+{% endblock %}

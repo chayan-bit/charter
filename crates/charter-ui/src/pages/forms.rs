@@ -7,7 +7,7 @@ use askama::Template;
 use axum::extract::{Path, State};
 use axum::response::Response;
 
-use super::{App, Head, Layout, Theme, blocking, frame, html, open};
+use super::{App, Head, Layout, Pref, blocking, frame, html, open};
 use crate::gitread;
 
 #[derive(Template)]
@@ -26,7 +26,7 @@ pub struct NewRelease {
     pub head: String,
 }
 
-pub async fn new_issue(State(app): State<Arc<App>>, t: Theme, Path(rid): Path<String>) -> Response {
+pub async fn new_issue(State(app): State<Arc<App>>, t: Pref, Path(rid): Path<String>) -> Response {
     blocking(move || {
         let r = match open(&app, &t, &rid) {
             Ok(r) => r,
@@ -43,7 +43,7 @@ pub async fn new_issue(State(app): State<Arc<App>>, t: Theme, Path(rid): Path<St
 
 pub async fn new_release(
     State(app): State<Arc<App>>,
-    t: Theme,
+    t: Pref,
     Path(rid): Path<String>,
 ) -> Response {
     blocking(move || {

@@ -12,7 +12,8 @@
 //!   say so.
 //!
 //! The probe covers every entity a round reads that carries the repo's `ag.rid`: identity,
-//! bind, refs, anchors, manifests, chunks and cob ops. A peer's own key entity carries no
+//! bind, refs, anchors, heads, manifests, chunks and cob ops; creates and expiries by count
+//! and newest row, head patches (a refs-only v3 push) by the heads' `$updatedAt`. A peer's own key entity carries no
 //! rid; it changes nothing on screen until that peer writes a bind or an anchor, which the
 //! probe sees. Sealed repos tag their entities with a blinded rid, so they skip the probe
 //! and get a full round at the interval of an idle repo, on screen or not.
@@ -22,7 +23,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use charter_core::Rid;
-use charter_store::{Arkiv, B256, Pred, Query, QueryOpts, Quota, Select, StoreError, attr};
+use charter_store::{
+    Arkiv, Attrs, B256, MAX_LIMIT, OrderBy, OrderType, Pred, Query, QueryOpts, Quota, RowExt,
+    Select, StoreError, attr,
+};
 use charter_sync::{Config, SyncError};
 
 use crate::UiError;
@@ -36,22 +40,41 @@ pub const PAUSE_AT: f64 = 80.0;
 /// A 429 that names no `Retry-After` pauses this long.
 const REFUSED_PAUSE: Duration = Duration::from_secs(60);
 
-/// The repo's live entity count and its newest entity (results are in creation order).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The repo's live entity count and the last rows of its entities sorted by `ag.dev`.
+///
+/// Only heads carry `ag.dev`, and rows without the sort attribute come first in creation
+/// order (Arkiv `docs/api-spec.md` "Sorting"), so the list ends with the newest entity that
+/// is not a head, then every head. Each row keeps its `$updatedAt`, which a head patch
+/// moves: a v3 push that only moves refs patches the head in place and creates nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
     pub count: u64,
-    pub newest: Option<B256>,
+    pub tail: Vec<(B256, u64)>,
 }
 
-/// `(count, key at offset)` of the repo's entities: one `arkiv_query` of one row.
-async fn at<A: Arkiv>(a: &A, rid: &Rid, offset: u64) -> Result<(u64, Option<B256>), StoreError> {
-    let q = Query::from(Pred::eq(attr("ag.rid"), B256::from(*rid)));
+/// `(count, rows from offset)` of the repo's entities in `ag.dev` order: one `arkiv_query`.
+async fn page<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    offset: u64,
+    limit: u32,
+) -> Result<(u64, Vec<(B256, u64, bool)>), StoreError> {
+    let q = Query {
+        filter: Pred::eq(attr("ag.rid"), B256::from(*rid)),
+        order: Some(OrderBy {
+            field: attr("ag.dev"),
+            ty: OrderType::Bytes32,
+            desc: false,
+        }),
+    };
     let select = Select {
+        updated_at: true,
         count: true,
+        attrs: Attrs::Named(vec!["ag.dev".into()]),
         ..Select::default()
     };
     let opts = QueryOpts {
-        limit: 1,
+        limit,
         offset,
         select,
     };
@@ -59,23 +82,47 @@ async fn at<A: Arkiv>(a: &A, rid: &Rid, offset: u64) -> Result<(u64, Option<B256
     let count = page
         .count
         .ok_or_else(|| StoreError::Rpc("count missing".into()))?;
-    Ok((count, page.rows.first().and_then(|r| r.key)))
+    let rows = page.rows.iter().map(|r| {
+        let up = r.updated_at.or(r.created_at).unwrap_or(0);
+        (
+            r.key.unwrap_or_default(),
+            up,
+            r.attr_b256("ag.dev").is_some(),
+        )
+    });
+    Ok((count, rows.collect()))
 }
 
-/// One query when nothing changed: the row at the last known newest position. A create
-/// moves the count or the newest key, an expiry the count; then one more query finds the
-/// new newest entity.
-pub async fn probe<A: Arkiv>(a: &A, rid: &Rid, prev: Option<Probe>) -> Result<Probe, StoreError> {
-    let last = prev.map_or(0, |p| p.count.saturating_sub(1));
-    let (count, key) = at(a, rid, last).await?;
-    if prev.is_some_and(|p| (p.count, p.newest) == (count, key)) || count == 0 {
-        return Ok(Probe { count, newest: key });
-    }
-    let newest = match count - 1 == last {
-        true => key,
-        false => at(a, rid, count - 1).await?.1,
+/// One query when nothing changed: the rows of the last probe's tail, at the same offset.
+/// A create or an expiry moves the count (or, both at once, the newest non-head row), a head
+/// patch a head's `$updatedAt`; then one more query reads the new tail.
+pub async fn probe<A: Arkiv>(a: &A, rid: &Rid, prev: Option<&Probe>) -> Result<Probe, StoreError> {
+    let keys = |rows: Vec<(B256, u64, bool)>| -> Vec<(B256, u64)> {
+        rows.into_iter().map(|(k, up, _)| (k, up)).collect()
     };
-    Ok(Probe { count, newest })
+    let count = match prev {
+        Some(p) => {
+            let n = p.tail.len() as u64;
+            let (count, rows) = page(a, rid, p.count - n, n.max(1) as u32).await?;
+            let now = Probe {
+                count,
+                tail: keys(rows),
+            };
+            if now == *p || count == 0 {
+                return Ok(now);
+            }
+            count
+        }
+        None => page(a, rid, 0, 1).await?.0,
+    };
+    // shortcut: assumes fewer than 100 devices pushed to the repo; past that the tail is all
+    // heads and a create among older rows shows only in the count.
+    let (count, rows) = page(a, rid, count.saturating_sub(MAX_LIMIT.into()), MAX_LIMIT).await?;
+    let from = rows.iter().rposition(|r| !r.2).unwrap_or(0);
+    Ok(Probe {
+        count,
+        tail: keys(rows[from..].to_vec()),
+    })
 }
 
 /// Interval multiplier as the quota drains: x1 under 50 % used, x2 under 65 %, x4 under
@@ -216,8 +263,10 @@ impl Pacer {
         let st = self.repos.entry(rid).or_default();
         st.checked = Some(now);
         if private(&cfg.home, &rid) != Some(true) {
-            let p = probe(a, &rid, st.probe).await.map_err(SyncError::from)?;
-            st.dirty |= st.probe != Some(p);
+            let p = probe(a, &rid, st.probe.as_ref())
+                .await
+                .map_err(SyncError::from)?;
+            st.dirty |= st.probe.as_ref() != Some(&p);
             st.probe = Some(p);
         }
         if step == Step::Check && !st.dirty {

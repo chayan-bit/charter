@@ -130,7 +130,7 @@ async fn run_all() -> Bench {
         .await
         .expect("probe");
     m.reset();
-    charter_ui::pace::probe(&m, &rid, Some(seen))
+    charter_ui::pace::probe(&m, &rid, Some(&seen))
         .await
         .expect("probe");
     take("ui_probe_noop", &m);

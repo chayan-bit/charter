@@ -50,9 +50,15 @@ pub struct PeerInfo {
 /// The public key of `nid` from the first valid self-signed peer document.
 /// Every valid copy carries the same key, because `nid` commits to it.
 pub fn peer_key(nid: &Nid, observed: &[Observed]) -> Option<PublicKey> {
+    peer_doc(nid, observed).map(|(pk, _)| pk)
+}
+
+/// [`peer_key`] and the display alias of the same document (signed, but chosen freely by
+/// the peer, so it names and never identifies).
+pub fn peer_doc(nid: &Nid, observed: &[Observed]) -> Option<(PublicKey, String)> {
     open_all::<PeerBody>(observed).ok.into_iter().find_map(|e| {
         let pk = e.body.public_key().ok()?;
-        (pk.nid() == *nid && e.envelope.verify(&pk).is_ok()).then_some(pk)
+        (pk.nid() == *nid && e.envelope.verify(&pk).is_ok()).then_some((pk, e.body.alias))
     })
 }
 

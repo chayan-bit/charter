@@ -24,7 +24,7 @@ mkdir -p "$work"
 server_pid=""
 cleanup() {
   [[ -n "$server_pid" ]] && kill "$server_pid" 2>/dev/null || true
-  [[ -z "$keep" && -d "$work" ]] && rm -rf -- "$work"
+  [[ -z "$keep" && -d "$work" ]] && rm -rf -- "$work" || true
 }
 trap cleanup EXIT
 

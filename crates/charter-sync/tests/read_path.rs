@@ -109,6 +109,20 @@ async fn a_sync_behind_an_unchanged_probe_replays_and_a_push_is_seen_at_once() {
         rev(&work, "main"),
         "the patched head changed the probe"
     );
+
+    // Refs only: no new object, nothing created, the head is patched in place.
+    git(&work, &["branch", "side"]);
+    push2(&net, &alice, &rid, &work, &["refs/heads/side"])
+        .await
+        .expect("refs-only push");
+    let view = charter_sync::sync(&net, &repo, &charter_sync::Want::default())
+        .await
+        .expect("sync after the refs-only push");
+    let refs = charter_sync::listing(&view, Some(&alice.keys.nid())).refs;
+    assert!(
+        refs.iter().any(|(n, _)| n == "refs/heads/side"),
+        "a refs-only head patch changed the probe: {refs:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
