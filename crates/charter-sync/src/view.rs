@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use charter_core::{
     AcceptedHead, AnchorChain, CompletenessObs, Equivocation, HeadInputs, IdentityChain, Kind,
     ManifestBody, Nid, Observed, PeerInfo, RefsBody, Rid, Start, accept_head, anchor_chain,
-    bind_chain, check_control_set, check_requires, identity_chain, is_device_row, peer_key,
+    bind_chain, check_control_set, check_requires, identity_chain, is_device_row,
 };
 use charter_store::{Arkiv, Pred};
 use futures_util::future::{join_all, try_join, try_join_all};
@@ -77,12 +77,12 @@ pub async fn resolve_peer<A: Arkiv>(a: &A, rid: &Rid, nid: &Nid) -> Result<Optio
         b32("ag.nid", nid),
     ]);
     // Independent queries, sent together; the bind chain is only checked once the key is known.
-    let (docs, binds) = try_join(
-        all(a, Pred::And(vec![kind(Kind::Peer), b32("ag.nid", nid)])),
+    let (pk, binds) = try_join(
+        crate::cob::peer_key_of(a, nid),
         by_seq(a, filter, "ag.seq"),
     )
     .await?;
-    let Some(pk) = peer_key(nid, &docs) else {
+    let Some(pk) = pk else {
         return Ok(None);
     };
     let binds = bind_chain(rid, &pk, &binds)?;
