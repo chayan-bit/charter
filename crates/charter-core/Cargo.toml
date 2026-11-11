@@ -14,6 +14,8 @@ charter-crypto = { path = "../charter-crypto" }
 minicbor = { version = "2", features = ["alloc", "derive"] }
 gix-validate = "0.13"
 thiserror = "2"
+# Format v3 pack codec; already in the tree through reqwest, pure Rust.
+brotli = "9"
 
 [dev-dependencies]
 proptest = "1"

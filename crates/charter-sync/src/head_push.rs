@@ -14,6 +14,7 @@ use crate::device::device_keys;
 use crate::git::Git;
 use crate::heads::{self, V2};
 use crate::keys::Keys;
+use crate::manifest_cache;
 use crate::pieces::PIECE_SIZE;
 use crate::push::{Update, stage};
 use crate::repo::{Config, Repo};
@@ -25,6 +26,8 @@ use crate::{Result, SyncError};
 pub const SNAPSHOT_MIN_BYTES: u64 = 1 << 20;
 /// Packs since the snapshot after which the next push snapshots.
 pub const SNAPSHOT_MAX_PUSHES: usize = 64;
+/// Most snapshot layers one head lists; the refresh after that rewrites one snapshot.
+pub const MAX_LAYERS: usize = 8;
 /// Largest pack sent inline in the head tx (larger ones go as bulk pieces first).
 pub const INLINE_MAX: usize = 16 * 1024;
 
@@ -58,6 +61,8 @@ pub struct Plan {
     /// The thin pack of the pushed objects (empty for refs-only pushes).
     pub thin: Vec<u8>,
     pub snapshot: bool,
+    /// On a snapshot push: the layers kept, by git pack trailer (empty rewrites them all).
+    pub keep_layers: Vec<String>,
     /// This device's packs since its snapshot, with `tx = 0` made concrete.
     pub carried: Vec<HeadPack>,
 }
@@ -311,10 +316,19 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             .iter()
             .flat_map(|v| v.heads())
             .any(|(_, h)| !h.body.snapshot.is_empty());
-        let snapshot = !has_snapshot
-            || self
-                .snapshot_due(prev.as_ref(), &carried, thin.len())
-                .await?;
+        let layers = match (&prev, has_snapshot) {
+            (Some(p), true) => {
+                let dev = self.own_device(p)?;
+                let hashes = &p.head.body.snapshot;
+                manifest_cache::facts(self.a, self.repo, &self.rid(), &dev, hashes).await?
+            }
+            _ => vec![],
+        };
+        let snapshot = !has_snapshot || snapshot_due(&layers, &carried, thin.len());
+        let keep_layers = match snapshot {
+            true => layers_to_keep(&layers, |t| self.repo.git().has_pack(t)),
+            false => vec![],
+        };
         Ok(Plan {
             prev,
             refs,
@@ -322,6 +336,7 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             after,
             thin,
             snapshot,
+            keep_layers,
             carried,
         })
     }
@@ -374,37 +389,6 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             .unwrap_or_default()
     }
 
-    /// Head-model 4.4: piece bytes over max(1 MiB, 25% of the snapshot), 64 packs, or
-    /// more pieces than one head may list.
-    async fn snapshot_due(
-        &self,
-        prev: Option<&Prev>,
-        carried: &[HeadPack],
-        new: usize,
-    ) -> Result<bool> {
-        let new_pieces = new.div_ceil(PIECE_SIZE);
-        let pieces: usize = carried.iter().map(|p| p.pieces.len()).sum::<usize>() + new_pieces;
-        if pieces > charter_core::MAX_HEAD_PIECES
-            || carried.len() + usize::from(new > 0) > SNAPSHOT_MAX_PUSHES
-        {
-            return Ok(true);
-        }
-        let snap_bytes: u64 = match prev {
-            Some(p) => {
-                let dev = self.own_device(p)?;
-                crate::pieces::snapshot_manifests(self.a, &self.rid(), &dev, &p.head.body.snapshot)
-                    .await?
-                    .iter()
-                    .map(|(_, m)| m.size)
-                    .sum()
-            }
-            None => 0,
-        };
-        // shortcut: counts every piece as full, so a refresh comes slightly early.
-        let piece_bytes = (pieces * PIECE_SIZE) as u64;
-        Ok(piece_bytes > SNAPSHOT_MIN_BYTES.max(snap_bytes / 4))
-    }
-
     pub(crate) fn own_device(&self, p: &Prev) -> Result<charter_core::Device> {
         Ok(charter_core::Device {
             nid: self.me(),
@@ -418,6 +402,41 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
                 key: p.head.key,
             },
         })
+    }
+}
+
+/// Head-model 4.4: piece bytes over max(1 MiB, 25% of the snapshot's layers), 64 packs,
+/// or more pieces than one head may list.
+fn snapshot_due(layers: &[manifest_cache::Facts], carried: &[HeadPack], new: usize) -> bool {
+    let new_pieces = new.div_ceil(PIECE_SIZE);
+    let pieces: usize = carried.iter().map(|p| p.pieces.len()).sum::<usize>() + new_pieces;
+    if pieces > charter_core::MAX_HEAD_PIECES
+        || carried.len() + usize::from(new > 0) > SNAPSHOT_MAX_PUSHES
+    {
+        return true;
+    }
+    let snap_bytes: u64 = layers.iter().map(|f| f.size).sum();
+    // shortcut: counts every piece as full, so a refresh comes slightly early.
+    let piece_bytes = (pieces * PIECE_SIZE) as u64;
+    piece_bytes > SNAPSHOT_MIN_BYTES.max(snap_bytes / 4)
+}
+
+/// Layered refresh policy (speed-and-cost 2.8): keep every current layer and add one while
+/// fewer than [`MAX_LAYERS`] exist and each layer's pack is in the cache (`cached(trailer)`);
+/// otherwise keep none, so the refresh rewrites one compact snapshot. One rewrite in eight
+/// refreshes bounds both the layer count and the bytes of deleted refs kept alive.
+pub fn layers_to_keep(
+    layers: &[manifest_cache::Facts],
+    cached: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let ok = !layers.is_empty()
+        && layers.len() < MAX_LAYERS
+        && layers
+            .iter()
+            .all(|f| !f.trailer.is_empty() && cached(&f.trailer));
+    match ok {
+        true => layers.iter().map(|f| f.trailer.clone()).collect(),
+        false => vec![],
     }
 }
 
@@ -440,4 +459,48 @@ fn carried(prev: Option<&Prev>) -> Vec<HeadPack> {
                 .collect(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use manifest_cache::Facts;
+
+    fn f(size: u64, t: &str) -> Facts {
+        Facts {
+            size,
+            trailer: t.into(),
+        }
+    }
+
+    #[test]
+    fn a_refresh_adds_a_layer_until_the_layer_cap() {
+        let yes = |_: &str| true;
+        assert!(layers_to_keep(&[], yes).is_empty(), "no snapshot: full");
+        assert_eq!(layers_to_keep(&[f(100, "a")], yes), ["a"]);
+        assert_eq!(layers_to_keep(&[f(100, "a"), f(400, "b")], yes), ["a", "b"]);
+        let many: Vec<Facts> = (0..MAX_LAYERS as u64).map(|i| f(i + 1, "x")).collect();
+        assert_eq!(layers_to_keep(&many[1..], yes).len(), MAX_LAYERS - 1);
+        assert!(layers_to_keep(&many, yes).is_empty(), "layer cap: compact");
+    }
+
+    #[test]
+    fn a_layer_whose_pack_left_the_cache_forces_a_full_snapshot() {
+        let layers = [f(100, "a"), f(10, "b")];
+        assert!(layers_to_keep(&layers, |t| t != "b").is_empty());
+        assert!(
+            layers_to_keep(&[f(100, "")], |_| true).is_empty(),
+            "unknown trailer"
+        );
+    }
+
+    #[test]
+    fn snapshot_due_counts_every_layer() {
+        let one = [f(8 << 20, "a")];
+        let two = [f(4 << 20, "a"), f(4 << 20, "b")];
+        let pieces = 2 << 20;
+        assert!(!snapshot_due(&one, &[], pieces), "2 MiB under 25% of 8 MiB");
+        assert!(!snapshot_due(&two, &[], pieces), "the same over two layers");
+        assert!(snapshot_due(&[f(4 << 20, "a")], &[], pieces));
+    }
 }

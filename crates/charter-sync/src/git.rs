@@ -208,15 +208,20 @@ impl Git {
         }
         let hooks = dir.join("no-hooks");
         std::fs::create_dir_all(&hooks).map_err(|e| SyncError::io(hooks.display(), e))?;
-        let hooks = hooks.to_string_lossy().into_owned();
-        for (k, v) in [
-            ("uploadpack.allowAnySHA1InWant", "true"),
-            ("core.hooksPath", hooks.as_str()),
-            ("gc.auto", "0"),
-            ("core.logAllRefUpdates", "false"),
-        ] {
-            g.run(&["config", k, v], b"")?;
-        }
+        // One append instead of four `git config` spawns (git reads the last value).
+        let quoted = hooks
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let extra = format!(
+            "[uploadpack]\n\tallowAnySHA1InWant = true\n[core]\n\thooksPath = \"{quoted}\"\n\tlogAllRefUpdates = false\n[gc]\n\tauto = 0\n"
+        );
+        let config = dir.join("config");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config)
+            .and_then(|mut f| f.write_all(extra.as_bytes()))
+            .map_err(|e| SyncError::io(config.display(), e))?;
         Ok(g)
     }
 
@@ -293,9 +298,42 @@ impl Git {
         Ok(if empty { vec![] } else { bytes })
     }
 
-    /// Self-contained packs of everything reachable from `tips` (format v2 snapshots).
+    /// Self-contained packs of everything reachable from `tips` (format v2 snapshots), with
+    /// deltas searched afresh: a snapshot is paid for by the byte and kept for 30 days, and
+    /// window 50 cuts it by 9% on Charter's own repo for under 0.5 s (speed-and-cost 2.8).
     pub fn full_packs_of(&self, tips: &[String], prefix: &Path) -> Result<Vec<PathBuf>> {
-        self.full_packs(tips, &[], prefix)
+        self.full_packs_with(tips, &[], prefix, SNAPSHOT_PACK_ARGS)
+    }
+
+    /// A snapshot layer: self-contained packs of everything reachable from `tips` that no
+    /// pack in `keep` (git pack trailers of packs in this repo) holds, with the snapshot
+    /// delta search. Objects of `keep` are never delta bases, so each layer indexes alone.
+    pub fn layer_packs(
+        &self,
+        tips: &[String],
+        keep: &[String],
+        prefix: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        let keep: Vec<String> = keep
+            .iter()
+            .map(|t| format!("--keep-pack=pack-{t}.pack"))
+            .collect();
+        let mut extra: Vec<&str> = SNAPSHOT_PACK_ARGS.to_vec();
+        extra.extend(keep.iter().map(String::as_str));
+        self.full_packs_with(tips, &[], prefix, &extra)
+    }
+
+    /// Whether this repo holds the pack with git trailer `trailer`.
+    pub fn has_pack(&self, trailer: &str) -> bool {
+        let dir = match &self.git_dir {
+            Some(d) => d.join("objects/pack"),
+            None => match self.run(&["rev-parse", "--absolute-git-dir"], b"") {
+                Ok(out) => PathBuf::from(String::from_utf8_lossy(&out).trim()).join("objects/pack"),
+                Err(_) => return false,
+            },
+        };
+        trailer.bytes().all(|b| b.is_ascii_hexdigit())
+            && dir.join(format!("pack-{trailer}.pack")).is_file()
     }
 
     /// At most one thin pack; `None` when it would exceed the 100 MiB manifest cap.
@@ -337,19 +375,28 @@ impl Git {
         exclude: &[String],
         prefix: &Path,
     ) -> Result<Vec<PathBuf>> {
+        self.full_packs_with(tips, exclude, prefix, &[])
+    }
+
+    fn full_packs_with(
+        &self,
+        tips: &[String],
+        exclude: &[String],
+        prefix: &Path,
+        extra: &[&str],
+    ) -> Result<Vec<PathBuf>> {
         let input = rev_input(tips, exclude);
         let prefix_s = prefix.to_string_lossy().into_owned();
-        let out = self.run(
-            &[
-                "pack-objects",
-                "--revs",
-                "-q",
-                "--max-pack-size=100m",
-                "--delta-base-offset",
-                &prefix_s,
-            ],
-            input.as_bytes(),
-        )?;
+        let mut args = vec![
+            "pack-objects",
+            "--revs",
+            "-q",
+            "--max-pack-size=100m",
+            "--delta-base-offset",
+        ];
+        args.extend_from_slice(extra);
+        args.push(&prefix_s);
+        let out = self.run(&args, input.as_bytes())?;
         let mut packs = vec![];
         for hash in String::from_utf8_lossy(&out).lines() {
             let pack = PathBuf::from(format!("{prefix_s}-{hash}.pack"));
@@ -449,7 +496,9 @@ impl Git {
     }
 }
 
-/// Object count from a pack header (0 for an empty pack).
+/// `pack-objects` options of snapshot packs (MEASURED in speed-and-cost 2.8).
+const SNAPSHOT_PACK_ARGS: &[&str] = &["--no-reuse-delta", "--window=50"];
+
 /// Largest pack one manifest can name (1,600 chunks of 64 KiB).
 const MAX_PACK_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -468,6 +517,7 @@ fn rev_input(tips: &[String], exclude: &[String]) -> String {
     input
 }
 
+/// Object count from a pack header (0 for an empty pack).
 pub fn pack_object_count(pack: &Path) -> Result<u32> {
     use std::io::Read;
     let mut f = std::fs::File::open(pack).map_err(|e| SyncError::io(pack.display(), e))?;
@@ -478,4 +528,117 @@ pub fn pack_object_count(pack: &Path) -> Result<u32> {
         return Err(SyncError::coded(ErrorCode::BadPack, "not a git pack"));
     }
     Ok(u32::from_be_bytes([h[8], h[9], h[10], h[11]]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    fn noise(len: usize) -> Vec<u8> {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    }
+
+    /// Two near-identical 200 KB blobs, packed without deltas (as old pushes leave them).
+    fn undeltified_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = tmp.path();
+        sh(d, &["init", "-q"]);
+        let mut blob = noise(200_000);
+        std::fs::write(d.join("a.bin"), &blob).expect("write");
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-qm", "one"]);
+        blob[100] ^= 1;
+        std::fs::write(d.join("a.bin"), &blob).expect("write");
+        sh(d, &["commit", "-qam", "two"]);
+        sh(d, &["repack", "-adq", "--window=0", "--depth=0"]);
+        tmp
+    }
+
+    #[test]
+    fn a_new_cache_is_configured_without_extra_spawns() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("odd \"dir\\").join("git");
+        let g = Git::init_cache(&dir).expect("init");
+        let get = |k: &str| {
+            String::from_utf8(g.run(&["config", "--get", k], b"").expect(k)).expect("utf8")
+        };
+        assert_eq!(get("uploadpack.allowAnySHA1InWant").trim(), "true");
+        assert_eq!(get("gc.auto").trim(), "0");
+        assert_eq!(get("core.logAllRefUpdates").trim(), "false");
+        assert_eq!(
+            PathBuf::from(get("core.hooksPath").trim()),
+            dir.join("no-hooks")
+        );
+        assert!(Git::init_cache(&dir).is_ok(), "reopening is a no-op");
+    }
+
+    #[test]
+    fn snapshot_packs_recompute_deltas_the_cache_lacks() {
+        let tmp = undeltified_repo();
+        let g = Git::work(Some(tmp.path()));
+        let head = sh(tmp.path(), &["rev-parse", "HEAD"]);
+        let packs = g
+            .full_packs_of(&[head], &tmp.path().join("snap"))
+            .expect("pack");
+        let size: u64 = packs
+            .iter()
+            .map(|p| p.metadata().expect("meta").len())
+            .sum();
+        assert!(size < 300_000, "second blob stored as a delta: {size} B");
+    }
+
+    #[test]
+    fn a_layer_leaves_out_every_object_of_the_kept_packs() {
+        let tmp = undeltified_repo();
+        let d = tmp.path();
+        let g = Git::work(Some(d));
+        let pack = sh(d, &["rev-parse", "--git-path", "objects/pack"]);
+        let kept: Vec<String> = std::fs::read_dir(d.join(&pack))
+            .expect("dir")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|n| Some(n.strip_prefix("pack-")?.strip_suffix(".pack")?.to_owned()))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert!(g.has_pack(&kept[0]));
+        assert!(!g.has_pack(&"0".repeat(40)));
+        std::fs::write(d.join("b.txt"), b"new").expect("write");
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-qm", "three"]);
+        let head = sh(d, &["rev-parse", "HEAD"]);
+        let layer = g
+            .layer_packs(std::slice::from_ref(&head), &kept, &d.join("layer"))
+            .expect("layer");
+        assert_eq!(layer.len(), 1);
+        // The new commit, its tree and the new blob; nothing of the kept pack.
+        assert_eq!(pack_object_count(&layer[0]).expect("count"), 3);
+    }
 }

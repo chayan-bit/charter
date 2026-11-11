@@ -197,6 +197,48 @@ About 11 chunks of 64 KiB fit in a 30M-gas block (DERIVED), so the pipeline now 
 
 Op batching was not measured on chain; with N ops on one pipeline a post waits about one confirmation round instead of N (ESTIMATE).
 
+### 2.8 Encoding, packing and snapshot policy on branch `perf/b-lane-b` (2026-11-11)
+
+No format change: every head this branch writes is a v2 head that v0.4.0 reads.
+
+What changed:
+
+- Manifest facts cache: the size and git pack trailer of each snapshot manifest are kept by `h` in `git/arkiv-manifests.json` (`h` hashes the signed manifest, so its facts never change).
+  The snapshot policy of a push reads them from there, so a piece push no longer queries Arkiv for its own manifests (test `a_piece_push_reads_no_snapshot_manifest_it_signed_itself`).
+- Snapshot packs are built with `--no-reuse-delta --window=50`; thin packs stay as they were (MEASURED below).
+- Layered snapshots: a due refresh adds one self-contained layer (every object reachable from the merged refs that no kept layer holds, `pack-objects --keep-pack`) to the head's `snapshot` list instead of rewriting the snapshot.
+  The 8th refresh, or any refresh whose layer packs are no longer in the local cache, rewrites one compact snapshot instead; that bounds the layer count and the bytes of deleted refs kept alive.
+  The refresh threshold is unchanged and counts every layer: piece bytes over `max(1 MiB, 25 percent of all layers)`, 64 packs or 256 pieces.
+  v0.4.0 already downloads every manifest a head lists, indexes all downloads in rounds and checks connectivity over all of them, and keepalive extends every listed manifest and its chunks, so layers need no reader change (test `a_refresh_adds_a_layer_that_the_v040_reader_clones`, run against the unchanged v0.4.0 reader code).
+- A new cache is configured with one append to its `config` instead of four `git config` spawns.
+
+Snapshot pack settings, bytes and CPU seconds (MEASURED on this Mac):
+
+| Repo | default | `--no-reuse-delta`, window 10 | window 50 | window 250, depth 250 |
+|---|---|---|---|---|
+| Charter `main` | 1,808,689 | 1,681,736 (0.16 s) | 1,646,039, -9.0% (0.46 s) | 1,642,159 (1.29 s) |
+| focus-dock (binary-heavy, 13 MiB) | 12,006,713 | 11,973,110 (0.27 s) | 11,499,578, -4.2% (0.70 s) | 11,498,817 (1.15 s) |
+
+Going from window 10 to 50 saves about 7M gas per CPU second; past 50 it saves under 0.3M gas per CPU second.
+Recomputing deltas of thin packs saves 0 to 0.4% on small pushes (and is slightly worse on some), 2% only on 30-commit pushes, so thin packs keep reusing deltas.
+
+A self-contained layer is 7 to 33% larger than the thin pack of the same commits (Charter `main`, 10 to 60 commits: 786,542 vs 592,193 B and 1,554,014 vs 1,451,613 B), but a v0.4.0 refresh rewrites everything: the full snapshot is 1,645,323 B.
+
+Live on Rabdi with the release build of this branch (MEASURED 2026-11-11, own wallet, `CHARTER_TRACE=1`, gas and tGLM from receipts):
+
+| Step | Txs | Gas | tGLM | Seconds | Head `snapshot` |
+|---|---|---|---|---|---|
+| small push (3 runs) | 1 | 271,808 to 277,160 | 0.00027 | 9.6 to 11.9 | 1 layer |
+| 10 MiB push (snapshot due, adds layer 2) | 169 | 623.5M | 1.079 | 42.9 (resume after a funds stop) | 2 layers |
+| 2 MiB push (pieces) | 35 | 85.5M | 0.0887 | 27.6 | 2 layers |
+| 1 MiB push (refresh, adds layer 3 of 3 MiB) | 53 | 187.4M | 0.249 | 35.2 | 3 layers |
+| small push after the refresh | 1 | 274,786 | 0.00027 | 11.2 | 3 layers |
+
+Before (v0.4.0, profiler traces of the same steps): small push 11.9 to 13.8 s; 2 MiB push 84.9M gas, 25.4 s.
+The refresh is the cut: v0.4.0 rewrites the whole 13.1 MiB snapshot, about 210 chunks at 3.88M gas, so about 815M gas and 1.08 tGLM at the same gas price (DERIVED, not run), against 187.4M gas and 0.249 tGLM here, -77%.
+The small push drops one RPC (34 instead of 35; the manifest query took 464 to 605 ms) and spawns as many git processes as before (17); its gas is unchanged, as expected without a format change.
+A clone of the 3-layer repo with the installed v0.4.0 binary (`chart 0.4.0`, fresh home) took 9 s, `git fsck --full` is clean and `HEAD` matches the pusher.
+
 ## 3. Proposals for a much larger cut (need the user's decision)
 
 ### 3.1 Storage tiers: hot entities, cold calldata

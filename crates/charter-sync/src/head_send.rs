@@ -381,8 +381,50 @@ impl<A: Arkiv> HeadPush<'_, A> {
     }
 
     async fn content(&self, plan: &Plan) -> Result<Content> {
+        let kept: Vec<Hash32> = match &plan.prev {
+            Some(p) if !plan.keep_layers.is_empty() && !plan.after.is_empty() => {
+                p.head.body.snapshot.clone()
+            }
+            _ => vec![],
+        };
+        if plan.snapshot && kept.is_empty() {
+            let c = self.snapshot(plan).await?;
+            crate::manifest_cache::record_files(self.repo, &c.snapshot, &c.files)?;
+            return Ok(c);
+        }
         if plan.snapshot {
-            return self.snapshot(plan).await;
+            // One more layer on the kept ones (speed-and-cost 2.8), not a rewrite.
+            let tips: Vec<String> = plan.after.values().map(hex::encode).collect();
+            let prefix = self.repo.outgoing().join("snap");
+            let packs = self
+                .repo
+                .git()
+                .layer_packs(&tips, &plan.keep_layers, &prefix)?;
+            let (mut hashes, mut files) = (vec![], vec![]);
+            for f in packs {
+                let (pack_id, size, trailer, chunk_hashes) = packs::describe(&f)?;
+                let m = ManifestBody {
+                    rid: self.rid(),
+                    pack_id,
+                    trailer,
+                    size,
+                    chunk_size: charter_core::CHUNK_SIZE as u64,
+                    chunk_hashes,
+                    requires: vec![],
+                    pack_kind: 1,
+                };
+                let signed = sign(self.dev.sk(), &m)?;
+                self.upload_snapshot_pack(&f, &m, &signed.bytes).await?;
+                hashes.push(signed.h);
+                files.push((f, pack_id));
+            }
+            crate::manifest_cache::record_files(self.repo, &hashes, &files)?;
+            return Ok(Content {
+                snapshot: [kept, hashes].concat(),
+                packs: vec![],
+                inline: vec![],
+                files,
+            });
         }
         let mut packs = plan.carried.clone();
         let mut files = vec![];
