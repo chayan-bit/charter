@@ -308,6 +308,24 @@ Clones ran from empty homes and match the pusher's `HEAD` and pass `git fsck --f
 - A push whose snapshot is due however small its pack compresses (64 carried packs, 256 pieces, or carried pieces alone over the refresh threshold) builds the thin pack only to size the decision and skips its brotli.
 - A v3 reader's cache holds text objects without zlib (4.2 MB against 2.9 MB for this repo); repacking them in the fetch would cost the clone time it saves, so it is not done (head-model 13.3).
 
+#### Rerun after the review fixes (2026-11-11, MEASURED)
+
+Same method, fresh repos, after the fixes for the independent review (fresh `at`, zlib fallback over the decode cap, owner-only state files, op probe, head gas bound).
+
+| Operation | v0.4.0 s | v3 s | v0.4.0 gas | v3 gas |
+|---|---|---|---|---|
+| first push (200 KB source tree) | 32.1 | 22.5 | 5,837,652 | 4,843,463 |
+| small push (2 runs) | 13.8 / 13.9 | 6.8 / 5.7 | 273,146 / 273,625 | 259,834 / 258,963 |
+| no-op fetch (2 runs) | 4.6 / 4.6 | 2.1 / 1.5 | 0 | 0 |
+| clone right after the pushes | 7.8 | 4.1 | 0 | 0 |
+| 10 MiB push, 7 MiB Rust source and 3 MiB random (snapshot due) | 52.7 | 43.5 | 281,697,780 (0.423 tGLM) | 256,186,188 (0.349 tGLM) |
+| private first push | 35.2 | 27.4 | 7,033,155 | 6,904,325 |
+| private small push | 13.3 | 8.0 | 283,847 | 281,843 |
+
+- Both clones match the pusher's `HEAD` and pass `git fsck --full --strict`.
+- The 10 MiB push sent one head tx from `C_d` with status 1; its upload took 36 s (about 18 blocks), so it did not reach the 64-block window the fresh `at` protects, which test `a_push_that_uploads_for_many_blocks_signs_a_fresh_at_and_sends_no_follow_up_head` covers.
+- A 100 MiB push was measured locally (the 118 MiB repo above): live, v0.4.0 alone would store 133.9 MB, about 15 tGLM at this run's 10 MiB rate, far over its 1 tGLM budget.
+
 ## 3. Proposals for a much larger cut (need the user's decision)
 
 ### 3.1 Storage tiers: hot entities, cold calldata

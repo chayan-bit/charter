@@ -170,7 +170,7 @@ A recorded page is served at most once per sync, so a second read of the same ro
 The next sync of the repo takes one of three paths, falling back to the next on any failure:
 
 1. Replay, when the last full sync is less than 10 minutes old (`CHARTER_PROBE_WINDOW_SECS` overrides, in seconds) and the probe is unchanged.
-   The probe is one paged query for the `(key, $updatedAt)` of every `id`, `idacc`, `bind`, `anchor` and `head` entity of the repo, and, for a repo that pins a program, the count of its ops; both go out in one round with the live nonce reads.
+   The probe is one paged query for the `(key, $updatedAt)` of every `id`, `idacc`, `bind`, `anchor` and `head` entity of the repo, and, for a repo that pins a program, the `(key, $updatedAt)` of its ops (a count alone misses an extend, or an expiry and a create in one block); both lists go out in one round with the live nonce reads, and the op list adds a round only when it alone runs past one page.
    Any create, delete, patch, extend or expiry of those entities changes the list, so a new push, a rollback patch, a deleted or hidden head, a new device delegation and an identity revision are all seen at once.
    Only pages read at or after the probe's block are replayed (anything a page missed then happened after the probe, so it changes the next probe); the rest are sent live.
 2. Speculative: every recorded query is sent at once, and the build is served from those answers; queries it did not record go out as before.
