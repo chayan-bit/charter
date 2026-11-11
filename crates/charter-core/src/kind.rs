@@ -15,9 +15,13 @@ pub enum Kind {
     /// P2 private repos: MLS key packages, commits, welcomes and published epoch keys.
     /// Unsigned like `chunk` (MLS messages carry their own signatures); `ag.t` names the type.
     Mls,
+    /// Format v2: an identity's delegation of one device (docs/p5/head-model.md 4.1).
+    Device,
+    /// Format v2: one device's mutable head (docs/p5/head-model.md 4.2).
+    Head,
 }
 
-const ALL: [Kind; 10] = [
+const ALL: [Kind; 12] = [
     Kind::Peer,
     Kind::Bind,
     Kind::Id,
@@ -28,6 +32,8 @@ const ALL: [Kind; 10] = [
     Kind::Chunk,
     Kind::Cob,
     Kind::Mls,
+    Kind::Device,
+    Kind::Head,
 ];
 
 impl Kind {
@@ -43,6 +49,8 @@ impl Kind {
             Kind::Chunk => 8,
             Kind::Cob => 9,
             Kind::Mls => 10,
+            Kind::Device => 11,
+            Kind::Head => 12,
         }
     }
 
@@ -59,6 +67,8 @@ impl Kind {
             Kind::Chunk => "chunk",
             Kind::Cob => "cob",
             Kind::Mls => "mls",
+            Kind::Device => "device",
+            Kind::Head => "head",
         }
     }
 
@@ -77,6 +87,8 @@ impl Kind {
             Kind::Chunk => b"arkiv-git/chunk/v1",
             Kind::Cob => b"arkiv-git/cob/v1",
             Kind::Mls => b"arkiv-git/mls/v1",
+            Kind::Device => b"arkiv-git/device/v1",
+            Kind::Head => b"arkiv-git/head/v1",
         }
     }
 

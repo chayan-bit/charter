@@ -40,3 +40,10 @@ git clone arkiv::<rid>
 
 Files fetched with `curl` carry no quarantine flag, so the snippet above runs as is.
 If you download the archive in a browser and macOS refuses to open the binaries, clear the flag with `xattr -d com.apple.quarantine ~/.local/bin/git-remote-arkiv ~/.local/bin/chart ~/.local/bin/chart-mcp`.
+
+## Upgrading to v0.4.0
+
+v0.4.0 writes git data in storage format v2 (`docs/p5/head-model.md`) and still reads repos written by older versions.
+Its first push to an older repo migrates that repo, and from then on v0.3.0 and older stop on it with `E_UNSUPPORTED_VERSION` rather than show stale refs.
+Upgrade every machine and CI runner that reads a repo before or right after its first v0.4.0 push.
+Each `CHARTER_HOME` gets a device seed at `device/seed` on its first v0.4.0 push; keep it next to `keys/`, and do not copy it between machines (copy only `keys/`, so the second machine becomes its own device).

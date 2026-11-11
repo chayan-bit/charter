@@ -137,6 +137,25 @@ impl Git {
         Ok(status.code())
     }
 
+    /// The `oids` this repo has, in order (`cat-file --batch-check`).
+    pub fn present(&self, oids: &[String]) -> Result<Vec<String>> {
+        if oids.is_empty() {
+            return Ok(vec![]);
+        }
+        let input: String = oids.iter().map(|o| format!("{o}\n")).collect();
+        let out = self.run(&["cat-file", "--batch-check"], input.as_bytes())?;
+        let missing: std::collections::BTreeSet<&str> = std::str::from_utf8(&out)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.strip_suffix(" missing"))
+            .collect();
+        Ok(oids
+            .iter()
+            .filter(|o| !missing.contains(o.as_str()))
+            .cloned()
+            .collect())
+    }
+
     /// `git <args>` with a file as stdin.
     pub fn run_with_file(&self, args: &[&str], file: &Path) -> Result<Vec<u8>> {
         let f = std::fs::File::open(file).map_err(|e| SyncError::io(file.display(), e))?;
@@ -231,6 +250,34 @@ impl Git {
             return Ok(packs);
         }
         self.full_packs(tips, exclude, prefix)
+    }
+
+    /// One thin pack of everything reachable from `tips` and not from `exclude`, in memory
+    /// (format v2 pieces); empty when there is nothing to send.
+    /// Exclusions this cache lacks (another device's tips it has not fetched) are dropped:
+    /// the pack may then repeat objects, but never names one git cannot find.
+    pub fn thin_pack_bytes(&self, tips: &[String], exclude: &[String]) -> Result<Vec<u8>> {
+        let exclude = self.present(exclude)?;
+        let input = rev_input(tips, &exclude);
+        let bytes = self.run(
+            &[
+                "pack-objects",
+                "--revs",
+                "-q",
+                "--thin",
+                "--stdout",
+                "--delta-base-offset",
+            ],
+            input.as_bytes(),
+        )?;
+        let empty = bytes.len() < PACK_HEADER + 20
+            || u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) == 0;
+        Ok(if empty { vec![] } else { bytes })
+    }
+
+    /// Self-contained packs of everything reachable from `tips` (format v2 snapshots).
+    pub fn full_packs_of(&self, tips: &[String], prefix: &Path) -> Result<Vec<PathBuf>> {
+        self.full_packs(tips, &[], prefix)
     }
 
     /// At most one thin pack; `None` when it would exceed the 100 MiB manifest cap.

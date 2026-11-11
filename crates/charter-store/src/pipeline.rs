@@ -234,6 +234,8 @@ pub struct TxPipeline<'a, A: Arkiv> {
     heads_off: bool,
     /// The nonce was re-read because someone else took it; a second time is an error.
     reread: bool,
+    /// Set by [`TxPipeline::at_nonce`]: a taken nonce fails the run instead of moving on.
+    pinned: bool,
     /// A tx could not be sent or landed: send nothing more, let what is in flight land
     /// (gaps below it plugged), then fail with this.
     abort: Option<StoreError>,
@@ -254,8 +256,18 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             heads: None,
             heads_off: false,
             reread: false,
+            pinned: false,
             abort: None,
         }
+    }
+
+    /// Signs the first tx at exactly `nonce`, and fails with `NonceTooLow` instead of
+    /// re-reading when another sender of this key holds it, mined or pending. For a tx that
+    /// must not land behind someone else's (a device head, head-model 7.4).
+    pub fn at_nonce(mut self, nonce: u64) -> Self {
+        self.nonce = Some(nonce);
+        self.pinned = true;
+        self
     }
 
     /// Before each window of sends, top the sender up from `funder` so its balance covers
@@ -579,6 +591,10 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             match r {
                 Ok(()) => inflight.push(f),
                 Err(StoreError::NonceTooLow(_)) => stolen.push(f),
+                // A pending tx of this key holds the nonce.
+                Err(StoreError::Rpc(m)) if self.pinned && m.contains("underpriced") => {
+                    stolen.push(f)
+                }
                 Err(e) => lost.push((f, e)),
             }
         }
@@ -596,6 +612,13 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         if stolen.is_empty() {
             self.reread = false;
             return Ok(false);
+        }
+        if let Some(f) = stolen.first().filter(|_| self.pinned) {
+            return Err(StoreError::NonceTooLow(format!(
+                "nonce {} of {} is taken by another sender",
+                f.tx.nonce(),
+                self.address()
+            )));
         }
         // Someone else used our nonces: re-read once; a second time is an error.
         if std::mem::replace(&mut self.reread, true) {

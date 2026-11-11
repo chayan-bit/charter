@@ -14,6 +14,7 @@ mod error;
 #[cfg(feature = "fake")]
 pub mod fake;
 pub mod heads;
+mod mined;
 mod ops;
 mod opts;
 pub mod paging;
@@ -25,6 +26,7 @@ mod shape;
 mod tx;
 
 pub use error::StoreError;
+pub use mined::{MinedTx, create_op_flags, patch_op, tx_rows};
 pub use ops::{AttributeValue, ENTITY_FLAGS, create_op, derive_key, extend_op, random_salt};
 pub use opts::{Attrs, QueryOpts, QueryPage, RowExt, Select};
 pub use pipeline::{PipelineConfig, TxPipeline};
@@ -98,4 +100,16 @@ pub trait Arkiv: Send + Sync {
         &self,
         h: TxHash,
     ) -> impl Future<Output = Result<Option<TxInfo>, StoreError>> + Send;
+    /// A mined tx with its calldata; `None` if unknown or pending (head-model 8).
+    fn mined_tx(
+        &self,
+        h: TxHash,
+    ) -> impl Future<Output = Result<Option<MinedTx>, StoreError>> + Send;
+    /// Every tx of block `n` with its calldata, in block order (head-model 5.4).
+    fn block_txs(&self, n: u64) -> impl Future<Output = Result<Vec<MinedTx>, StoreError>> + Send;
+    /// Opens rows read from calldata the way `query` opens its rows. Identity by default;
+    /// P2 private repos decrypt sealed rows here.
+    fn open_rows(&self, rows: Vec<EntityData>) -> Vec<EntityData> {
+        rows
+    }
 }

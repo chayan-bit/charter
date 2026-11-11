@@ -192,6 +192,17 @@ pub enum VerifyError {
         created: u64,
         live: u64,
     },
+    #[error(
+        "device {device:02x?} control address {address:02x?} has nonce {nonce}, its head records {recorded}"
+    )]
+    HeadRollback {
+        device: Nid,
+        address: Address,
+        nonce: u64,
+        recorded: u64,
+    },
+    #[error("device {device:02x?} has {count} valid heads")]
+    DuplicateHead { device: Nid, count: usize },
     #[error("identity root or revision not live")]
     IdNotLive,
     #[error("head seq {seq:?} is below the high-water mark seq {mark}")]
@@ -206,7 +217,9 @@ pub enum VerifyError {
     BadRefs(String),
     #[error("manifest requires anchor {anchor:02x?} of peer {nid:02x?}, not verified")]
     MissingDependency { nid: Nid, anchor: Hash32 },
-    #[error("entity {key:02x?} from a tracked control address has an unsupported version")]
+    #[error(
+        "entity {key:02x?} from a tracked control address has an unsupported version; upgrade charter"
+    )]
     UnsupportedVersion { key: Hash32 },
     #[error("node view inconsistent (entityNonce changed or count above nonce)")]
     InconsistentView,
@@ -222,7 +235,9 @@ impl VerifyError {
             Crypto(e) => ErrorCode::from_crypto(*e),
             SignerMismatch => ErrorCode::BadSig,
             NotLive(_) => ErrorCode::NotLive,
-            ControlNotLive { .. } => ErrorCode::ControlNotLive,
+            ControlNotLive { .. } | HeadRollback { .. } | DuplicateHead { .. } => {
+                ErrorCode::ControlNotLive
+            }
             IdNotLive => ErrorCode::IdNotLive,
             StaleHead { .. } => ErrorCode::StaleHead,
             StaleIdentity { .. } => ErrorCode::StaleIdentity,

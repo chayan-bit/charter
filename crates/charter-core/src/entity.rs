@@ -25,8 +25,8 @@ pub struct Entity<B> {
 pub fn entity_attributes<B: Body>(env: &Envelope, env_bytes: &[u8], body: &B) -> Vec<Attribute> {
     let h = content_hash(B::KIND, env_bytes);
     let mut v = vec![
-        Attribute::str("ag.kind", B::KIND.name()),
-        Attribute::u64("ag.v", ENTITY_LAYOUT_VERSION),
+        Attribute::str("ag.kind", B::AG_KIND),
+        Attribute::u64("ag.v", B::AG_V),
         Attribute::new("ag.body", AttrValue::Bytes(env_bytes.to_vec())),
     ];
     v.extend(body.extra_attributes(&env.signer, &h));
@@ -35,16 +35,16 @@ pub fn entity_attributes<B: Body>(env: &Envelope, env_bytes: &[u8], body: &B) ->
 
 fn kind_and_bytes<B: Body>(obs: &Observed) -> Result<&[u8], FormatError> {
     match obs.attr("ag.kind") {
-        Some(AttrValue::Str(k)) if k == B::KIND.name() => {}
+        Some(AttrValue::Str(k)) if k == B::AG_KIND => {}
         other => {
             return Err(FormatError::KindMismatch {
-                expected: B::KIND.name(),
+                expected: B::AG_KIND,
                 found: format!("{other:?}"),
             });
         }
     }
     match obs.attr("ag.v") {
-        Some(AttrValue::U64(ENTITY_LAYOUT_VERSION)) => {}
+        Some(AttrValue::U64(v)) if *v == B::AG_V => {}
         Some(AttrValue::U64(v)) => {
             return Err(FormatError::Unsupported {
                 what: "entity layout version",

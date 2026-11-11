@@ -104,6 +104,10 @@ pub struct RefUpdate {
     #[serde(with = "hex::serde")]
     pub new: Vec<u8>,
     pub arkiv_order: u64,
+    /// `old` is a base the author signed (a format v2 head): `ff` is whether it equals the
+    /// accepted head, never local git ancestry, so every client folds the same verdict.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_base: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -22,6 +22,7 @@ pub async fn sync<A: Arkiv>(a: &A, repo: &Repo, want: &Want) -> Result<View> {
     let must: BTreeSet<Nid> = view.delegates().iter().chain(&want.must).copied().collect();
     let applied = apply_all(a, repo, &mut view, &state, &must).await?;
     check_connected(repo, &mut view, &must)?;
+    check_bases(repo, &mut view, &must)?;
     // After the packs are in the cache, so the program sees real git ancestry.
     view.program = crate::program::enforce(a, &view, repo.git()).await?;
     commit(repo, &view, &mut state, applied)?;
@@ -65,6 +66,20 @@ async fn apply_all<A: Arkiv>(
     }
     let failed = index_until_stuck(repo, todo, &mut applied);
     for (nid, e) in failed {
+        // A v2 head may list a pack whose thin bases left with a later snapshot: no live
+        // ref needs it then, and the connectivity check below decides (head-model 4.4).
+        if view
+            .peers
+            .get(&nid)
+            .is_some_and(|p| p.head.is_none() && p.v2.is_some())
+        {
+            // shortcut: such a pack is downloaded again on every fetch; record it if that shows up in cost.
+            warn(&format!(
+                "peer {}: a listed pack did not index ({e}); checking live refs",
+                to_text(&nid)
+            ));
+            continue;
+        }
         if view.peers.contains_key(&nid) {
             skip_or_fail(view, must, &nid, e)?;
         }
@@ -93,6 +108,24 @@ async fn download_peer<A: Arkiv>(
     queued: &[Download],
 ) -> Result<(Vec<Hash32>, Vec<Download>)> {
     let (mut known, mut fetched) = (vec![], vec![]);
+    let v2 = view.peers.get(nid).and_then(|p| p.v2.as_ref());
+    if let Some(v2) = v2.filter(|v| v.heads().next().is_some()) {
+        let in_cache = |id: &Hash32| {
+            state.applied_packs.contains(&hex32(id))
+                || state.applied_manifests.contains(&hex32(id))
+                || applied.packs.contains(id)
+                || queued.iter().any(|d| d.pack_id == *id)
+        };
+        for d in crate::pieces::download_v2(a, repo, &view.rid, v2, &in_cache).await? {
+            fetched.push(Download {
+                nid: *nid,
+                manifest: d.0,
+                pack_id: d.1,
+                tmp: d.2,
+            });
+        }
+        return Ok((known, fetched));
+    }
     let Some(head) = view.peers.get(nid).and_then(|p| p.head.as_ref()) else {
         return Ok((known, fetched));
     };
@@ -190,13 +223,45 @@ fn check_connected(repo: &Repo, view: &mut View, must: &BTreeSet<Nid>) -> Result
         .collect();
     let nids: Vec<Nid> = view.peers.keys().copied().collect();
     for nid in nids {
-        let Some(head) = view.peers.get(&nid).and_then(|p| p.head.as_ref()) else {
+        let Some(refs) = view.peers.get(&nid).and_then(|p| p.refs_body()) else {
             continue;
         };
-        if !repo.git().connected(&oids(&head.refs), &old) {
+        if !repo.git().connected(&oids(refs), &old) {
             let e = SyncError::coded(
                 ErrorCode::MissingObjects,
                 format!("refs of peer {} name objects not on Arkiv", to_text(&nid)),
+            );
+            skip_or_fail(view, must, &nid, e)?;
+        }
+    }
+    Ok(())
+}
+
+/// A format v2 base is the writer's claim that `new` fast-forwards it, and the program fold
+/// trusts it (head-model 8); every reader holding the objects of the live refs checks the
+/// claim of each winning entry and refuses a head that lies (`E_BAD_REFS`).
+fn check_bases(repo: &Repo, view: &mut View, must: &BTreeSet<Nid>) -> Result<()> {
+    let nids: Vec<Nid> = view.peers.keys().copied().collect();
+    for nid in nids {
+        let Some(v2) = view.peers.get(&nid).and_then(|p| p.v2.as_ref()) else {
+            continue;
+        };
+        let bad = v2.merged.iter().find(|(_, w)| {
+            let e = &w.entry;
+            !e.is_tombstone()
+                && !e.base.is_empty()
+                && e.base != e.oid
+                && crate::program::is_ancestor(repo.git(), &e.base, &e.oid) != Some(true)
+        });
+        if let Some((name, w)) = bad {
+            let e = SyncError::coded(
+                ErrorCode::BadRefs,
+                format!(
+                    "peer {} signed {name} at {} with base {}, which is not its ancestor",
+                    to_text(&nid),
+                    hex::encode(&w.entry.oid),
+                    hex::encode(&w.entry.base)
+                ),
             );
             skip_or_fail(view, must, &nid, e)?;
         }
@@ -216,6 +281,9 @@ fn commit(repo: &Repo, view: &View, state: &mut State, applied: Applied) -> Resu
         None => new_id,
     };
     state.set_id_mark(&id_mark);
+    for pv in view.peers.values() {
+        commit_v2(state, pv)?;
+    }
     for (nid, pv) in &view.peers {
         let Some(head) = &pv.head else { continue };
         let mark = match state.peer_mark(nid)? {
@@ -227,8 +295,8 @@ fn commit(repo: &Repo, view: &View, state: &mut State, applied: Applied) -> Resu
     state.note_equivocations(&view.equivocations);
     state.save(&repo.state_path())?;
     for (nid, pv) in &view.peers {
-        if let Some(head) = &pv.head {
-            set_namespace(repo, nid, &head.refs)?;
+        if let Some(refs) = pv.refs_body() {
+            set_namespace(repo, nid, refs)?;
         }
     }
     state.applied_packs.extend(applied.packs.iter().map(hex32));
@@ -236,6 +304,22 @@ fn commit(repo: &Repo, view: &View, state: &mut State, applied: Applied) -> Resu
         .applied_manifests
         .extend(applied.manifests.iter().map(hex32));
     state.save(&repo.state_path())
+}
+
+/// Device marks and landings of a v2 peer (head-model 6).
+fn commit_v2(state: &mut State, pv: &crate::view::PeerView) -> Result<()> {
+    let Some(v2) = &pv.v2 else { return Ok(()) };
+    for (dev, head) in v2.heads() {
+        let mark = match state.device_mark(&dev.nid)? {
+            Some(old) => old.advance(&head.mark())?,
+            None => head.mark(),
+        };
+        state.set_device_mark(&dev.nid, &mark);
+    }
+    for (h, l) in v2.landings.iter().filter(|(_, l)| l.block != u64::MAX) {
+        state.landings.insert(hex32(h), *l);
+    }
+    Ok(())
 }
 
 /// Moves `refs/namespaces/<nid>/` to exactly `refs`, in one transaction with old values.
@@ -298,8 +382,8 @@ pub fn listing(view: &View, peer: Option<&Nid>) -> Listing {
         Some(nid) => view
             .peers
             .get(nid)
-            .and_then(|p| p.head.as_ref())
-            .map(|h| oids_named(&h.refs))
+            .and_then(|p| p.refs_body())
+            .map(oids_named)
             .unwrap_or_default(),
         None if view.program.is_some() => view
             .program
@@ -311,7 +395,7 @@ pub fn listing(view: &View, peer: Option<&Nid>) -> Listing {
             let votes: BTreeMap<Nid, RefsBody> = view
                 .peers
                 .iter()
-                .filter_map(|(n, p)| p.head.as_ref().map(|h| (*n, h.refs.clone())))
+                .filter_map(|(n, p)| p.refs_body().map(|r| (*n, r.clone())))
                 .collect();
             let c = canonical_refs(id, &votes);
             c.no_quorum
@@ -339,7 +423,7 @@ fn oids_named(refs: &RefsBody) -> Vec<(String, String)> {
 pub fn own_refs(view: &View, nid: &Nid) -> Vec<(String, String)> {
     view.peers
         .get(nid)
-        .and_then(|p| p.head.as_ref())
-        .map(|h| oids_named(&h.refs))
+        .and_then(|p| p.refs_body())
+        .map(oids_named)
         .unwrap_or_default()
 }

@@ -248,20 +248,32 @@ fn revision(r: &charter_core::Revision) -> RevisionJson {
 }
 
 fn peer(nid: &Hash32, delegate: bool, pv: &charter_sync::view::PeerView) -> PeerJson {
-    let head = pv.head.as_ref();
+    // Format v2: the most recently updated device head stands for the identity.
+    let v2 = pv
+        .v2
+        .iter()
+        .flat_map(|v| v.heads())
+        .max_by_key(|(_, h)| h.updated_at)
+        .map(|(_, h)| HeadJson {
+            seq: h.body.seq,
+            anchor: hex32(&h.h),
+            block: h.updated_at,
+            key: hex32(&h.key),
+        });
+    let v1 = pv.head.as_ref().map(|h| HeadJson {
+        seq: h.anchor.body.seq,
+        anchor: hex32(&h.anchor.h),
+        block: h.anchor.position.block,
+        key: hex32(&h.anchor.position.key),
+    });
     PeerJson {
         nid: hex32(nid),
         delegate,
-        head: head.map(|h| HeadJson {
-            seq: h.anchor.body.seq,
-            anchor: hex32(&h.anchor.h),
-            block: h.anchor.position.block,
-            key: hex32(&h.anchor.position.key),
-        }),
-        refs: head
-            .map(|h| {
-                h.refs
-                    .refs
+        head: v2.or(v1),
+        refs: pv
+            .refs_body()
+            .map(|r| {
+                r.refs
                     .iter()
                     .map(|e| (e.name.clone(), hex::encode(&e.oid)))
                     .collect()

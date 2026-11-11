@@ -171,3 +171,38 @@ fn a_resumed_fold_spends_from_the_same_fuel_budget() {
     let (got, _) = cached(src, &events, &known, cp.as_ref());
     assert_eq!(got, want);
 }
+
+fn signed(order: u64, name: &str, base: Option<u8>, new: u8) -> Event {
+    match push(order, 0xd1, name, base, new) {
+        Event::Push(u) => Event::Push(charter_program::RefUpdate {
+            signed_base: true,
+            ..u
+        }),
+        e => e,
+    }
+}
+
+#[test]
+fn a_signed_base_decides_ff_whatever_objects_the_client_has() {
+    // Accepted dev = 0x10; a v2 move to 0x30 signs base 0x20 (not the accepted head).
+    let src = "fn init(repo) { #{} }";
+    let events = vec![
+        push(1, 0xd1, "refs/heads/dev", None, 0x10),
+        signed(2, "refs/heads/dev", Some(0x20), 0x30),
+        signed(3, "refs/heads/dev", Some(0x10), 0x40),
+    ];
+    let has_all = |_: &[u8], _: &[u8]| Some(true);
+    let has_none = |_: &[u8], _: &[u8]| None;
+    let long_lived = full(src, &events, &has_all);
+    let fresh = full(src, &events, &has_none);
+    assert_eq!(long_lived.accepted, fresh.accepted, "same verdicts");
+    assert_eq!(long_lived.rejected.len(), 1, "the non-ff claim is rejected");
+    assert_eq!(long_lived.heads["refs/heads/dev"], oid(0x40));
+    let (_, cp) = cached(src, &events[..2], &has_none, None);
+    assert!(
+        cp.is_some(),
+        "a signed-base fold is checkpointable without objects"
+    );
+    let (resumed, _) = cached(src, &events, &has_all, cp.as_ref());
+    assert_eq!(resumed.accepted, fresh.accepted);
+}

@@ -1,0 +1,253 @@
+//! The format v2 view of one identity (docs/p5/head-model.md sections 5 and 6): its device
+//! delegations, each device's head under the `entityNonce` bracket, and the merge of the
+//! heads into the identity's refs. Plus reading head bodies back from calldata.
+
+use std::collections::BTreeMap;
+
+use charter_core::{
+    AttrValue, Device, DeviceHead, ErrorCode, Hash32, HeadBody, HeadNonce, IdentityChain, Kind,
+    Merged, Nid, Observed, PeerInfo, RefsBody, Rid, accept_device_head, accept_own_device_head,
+    devices, merge, merged_refs, verify_entity,
+};
+use charter_store::{Arkiv, MinedTx, Pred, tx_rows};
+use futures_util::future::try_join_all;
+
+use crate::observe::{all, b32, creators, kind, to_observed};
+use crate::state::{LandingJson, State};
+use crate::{Result, SyncError};
+
+/// Blocks after `at` a body may land in and still be found (head-model 5.4).
+pub const LANDING_WINDOW: u64 = 64;
+/// Retries of the nonce bracket while `C_d` is mid-push.
+const NONCE_RETRIES: usize = 4;
+
+/// One device of an identity and its accepted head (none before its first push).
+#[derive(Debug, Clone)]
+pub struct DeviceView {
+    pub device: Device,
+    pub head: Option<DeviceHead>,
+    pub nonce: HeadNonce,
+    /// The head entity rows as observed (keepalive reads keys and expiry).
+    pub rows: Vec<Observed>,
+}
+
+/// The v2 state of one identity.
+#[derive(Debug, Clone)]
+pub struct V2 {
+    pub devices: Vec<DeviceView>,
+    pub merged: Merged,
+    /// The live refs of the merge.
+    pub refs: RefsBody,
+    /// Landing of each current head body this view resolved, by head `h`.
+    pub landings: BTreeMap<Hash32, LandingJson>,
+}
+
+impl V2 {
+    pub fn device(&self, nid: &Nid) -> Option<&DeviceView> {
+        self.devices.iter().find(|d| d.device.nid == *nid)
+    }
+
+    pub fn heads(&self) -> impl Iterator<Item = (&Device, &DeviceHead)> {
+        self.devices
+            .iter()
+            .filter_map(|d| d.head.as_ref().map(|h| (&d.device, h)))
+    }
+}
+
+fn addr(a: &[u8; 20]) -> charter_store::Address {
+    charter_store::Address::from(*a)
+}
+
+/// Head rows of `dev`, read between two `entityNonce(C_d)` reads that agree.
+async fn bracket<A: Arkiv>(a: &A, rid: &Rid, dev: &Device) -> Result<(Vec<Observed>, HeadNonce)> {
+    let filter = Pred::And(vec![
+        kind(Kind::Head),
+        b32("ag.rid", rid),
+        b32("ag.dev", &dev.nid),
+        creators(&[dev.control].into()),
+    ]);
+    let mut last = None;
+    for _ in 0..=NONCE_RETRIES {
+        let before = a.entity_nonce(addr(&dev.control)).await?;
+        let rows = all(a, filter.clone()).await?;
+        let after = a.entity_nonce(addr(&dev.control)).await?;
+        let nonce = HeadNonce {
+            address: dev.control,
+            before,
+            after,
+        };
+        if before == after {
+            return Ok((rows, nonce));
+        }
+        last = Some((rows, nonce));
+    }
+    last.ok_or_else(|| SyncError::coded(ErrorCode::InconsistentView, "no nonce observation"))
+}
+
+async fn device_view<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    nid: &Nid,
+    dev: Device,
+    identity: &IdentityChain,
+    state: &State,
+) -> Result<DeviceView> {
+    let (rows, nonce) = bracket(a, rid, &dev).await?;
+    let mark = state.device_mark(&dev.nid)?;
+    let m = mark.as_ref();
+    let head = match state.sent_head(&dev.nid)? {
+        Some(sent) => accept_own_device_head(rid, nid, &dev, identity, &rows, &nonce, m, &sent)?,
+        None => accept_device_head(rid, nid, &dev, identity, &rows, &nonce, m)?,
+    };
+    if head
+        .as_ref()
+        .is_some_and(|h| h.body.pieces_created + 1 != nonce.before)
+    {
+        crate::warn(
+            "this device's head accounts for fewer entities than its control address created \
+             (a copy of this device seed pushed at the same time); the next push repairs it",
+        );
+    }
+    Ok(DeviceView {
+        device: dev,
+        head,
+        nonce,
+        rows,
+    })
+}
+
+/// The v2 view of identity `nid` from its device delegation rows (anchor kind, `ag.v = 2`).
+pub async fn build<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    nid: &Nid,
+    info: &PeerInfo,
+    identity: &IdentityChain,
+    device_rows: &[Observed],
+    state: &State,
+) -> Result<V2> {
+    let devs = devices(rid, info, device_rows);
+    let views = try_join_all(
+        devs.into_iter()
+            .map(|d| device_view(a, rid, nid, d, identity, state)),
+    )
+    .await?;
+    let mut landings: BTreeMap<Hash32, LandingJson> = views
+        .iter()
+        .filter_map(|v| v.head.as_ref())
+        .filter_map(|h| state.landing(&h.h).map(|l| (h.h, l)))
+        .collect();
+    let merged = loop {
+        let blocks: BTreeMap<Nid, u64> = views
+            .iter()
+            .filter_map(|v| v.head.as_ref().map(|h| (v.device.nid, h)))
+            .filter_map(|(d, h)| landings.get(&h.h).map(|l| (d, l.block)))
+            .collect();
+        let heads: Vec<(Nid, &HeadBody)> = views
+            .iter()
+            .filter_map(|v| v.head.as_ref().map(|h| (v.device.nid, &h.body)))
+            .collect();
+        match merge(&heads, &blocks) {
+            Ok(m) => break m,
+            Err(need) => {
+                for v in views.iter().filter(|v| need.contains(&v.device.nid)) {
+                    let Some(h) = &v.head else { continue };
+                    // Not found within the window: never first-landed (deterministic for all).
+                    let l =
+                        landing(a, &v.device, h, LANDING_WINDOW)
+                            .await?
+                            .unwrap_or(LandingJson {
+                                tx: [0; 32],
+                                block: u64::MAX,
+                                index: u32::MAX,
+                            });
+                    landings.insert(h.h, l);
+                }
+            }
+        }
+    };
+    Ok(V2 {
+        devices: views,
+        refs: merged_refs(rid, &merged),
+        merged,
+        landings,
+    })
+}
+
+/// Rows a mined tx created or patched, opened like query rows, at the tx's position.
+pub fn calldata_rows<A: Arkiv>(a: &A, tx: &MinedTx) -> Vec<Observed> {
+    let rows = a
+        .open_rows(tx_rows(tx))
+        .into_iter()
+        .map(|mut r| {
+            r.key.get_or_insert(charter_store::B256::ZERO);
+            r.expires_at.get_or_insert(tx.block);
+            r
+        })
+        .collect();
+    to_observed(rows)
+        .into_iter()
+        .map(|o| Observed { tx: tx.index, ..o })
+        .collect()
+}
+
+fn is_head_row(o: &Observed, h: &Hash32) -> bool {
+    o.attr("ag.kind") == Some(&AttrValue::Str(Kind::Head.name().to_owned()))
+        && o.attr("ag.h") == Some(&AttrValue::Bytes32(*h))
+}
+
+fn landed(tx: &MinedTx) -> LandingJson {
+    LandingJson {
+        tx: tx.hash.0,
+        block: tx.block,
+        index: tx.index,
+    }
+}
+
+/// The tx that carried `head`'s current body: from `C_d`, in blocks `at + 1` to
+/// `min(updatedAt, at + LANDING_WINDOW)`.
+pub async fn landing<A: Arkiv>(
+    a: &A,
+    dev: &Device,
+    head: &DeviceHead,
+    window: u64,
+) -> Result<Option<LandingJson>> {
+    let at = head.body.at;
+    let last = head.updated_at.min(at.saturating_add(window));
+    for b in at.saturating_add(1)..=last {
+        for tx in a.block_txs(b).await? {
+            // The patch must target this head (or be its create, in its creation block)
+            // and the tx must have succeeded.
+            let targets = |o: &Observed| {
+                is_head_row(o, &head.h)
+                    && (o.key == head.key || (o.key == [0; 32] && tx.block == head.created_at))
+            };
+            let ours = tx.from.0.0 == dev.control && calldata_rows(a, &tx).iter().any(targets);
+            if ours && a.receipt(tx.hash).await?.is_some_and(|r| r.success) {
+                return Ok(Some(landed(&tx)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// A verified earlier body of `dev`'s head, read from the calldata of `tx`.
+pub async fn body_at<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    dev: &Device,
+    tx: &Hash32,
+) -> Result<Option<(HeadBody, LandingJson)>> {
+    let Some(mined) = a.mined_tx(charter_store::TxHash::from(*tx)).await? else {
+        return Ok(None);
+    };
+    let ok = a.receipt(mined.hash).await?.is_some_and(|r| r.success);
+    if mined.from.0.0 != dev.control || !ok {
+        return Ok(None);
+    }
+    let body = calldata_rows(a, &mined).into_iter().find_map(|o| {
+        let e = verify_entity::<HeadBody>(&o, &dev.pk).ok()?;
+        (e.body.rid == *rid).then_some(e.body)
+    });
+    Ok(body.map(|b| (b, landed(&mined))))
+}

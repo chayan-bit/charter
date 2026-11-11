@@ -32,7 +32,7 @@ pub fn sign<B: Body>(sk: &SecretKey, body: &B) -> Result<Signed> {
     })
 }
 
-fn wire(attrs: &[Attribute]) -> Vec<(&str, AttributeValue, bool)> {
+pub(crate) fn wire(attrs: &[Attribute]) -> Vec<(&str, AttributeValue, bool)> {
     attrs
         .iter()
         .map(|a| {
@@ -53,6 +53,14 @@ pub fn entity_op<B: Body>(bytes: &[u8], lifetime: u64) -> Result<Operation> {
     let body = B::decode(&env.body)?;
     let attrs = entity_attributes(&env, bytes, &body);
     Ok(create_op(&wire(&attrs), lifetime, random_salt())?)
+}
+
+/// A patch of entity `key` to the signed entity `bytes` (what a head push sends).
+pub fn entity_patch_op<B: Body>(key: Hash32, bytes: &[u8]) -> Result<Operation> {
+    let env = Envelope::decode(bytes)?;
+    let body = B::decode(&env.body)?;
+    let attrs = entity_attributes(&env, bytes, &body);
+    Ok(charter_store::patch_op(key.into(), &wire(&attrs))?)
 }
 
 pub fn chunk_op(
@@ -108,6 +116,29 @@ pub async fn send_funded<A: Arkiv>(
     Ok(p.run(jobs).await?)
 }
 
+/// [`send_funded`] with the first tx signed at exactly `nonce`; a nonce another sender of
+/// `signer` holds fails with `E_CONCURRENT_PUSH` instead of moving on (head-model 7.4).
+pub async fn send_funded_at<A: Arkiv>(
+    a: &A,
+    signer: &PrivateKeySigner,
+    wallet: &PrivateKeySigner,
+    cfg: &PipelineConfig,
+    nonce: u64,
+    jobs: Vec<Vec<Operation>>,
+) -> Result<Vec<Landed>> {
+    let chain_id = a.chain_id().await?;
+    let mut p = TxPipeline::new(a, signer.clone(), chain_id, cfg.clone())
+        .funded_by(wallet.clone())
+        .at_nonce(nonce);
+    p.run(jobs).await.map_err(|e| match e {
+        charter_store::StoreError::NonceTooLow(m) => SyncError::coded(
+            charter_core::ErrorCode::ConcurrentPush,
+            format!("{m}: another machine with this device seed is pushing; push again"),
+        ),
+        e => e.into(),
+    })
+}
+
 /// The one up-front check of a push: `wallet` plus what `spenders` already hold must cover
 /// `need` (predicted spend plus one window's reserve), else `E_INSUFFICIENT_FUNDS`.
 pub async fn check_funds<A: Arkiv>(
@@ -160,6 +191,7 @@ mod tests {
             block: 1,
             tx: 0,
             expires_at: 2,
+            updated_at: 1,
             attributes: attrs,
         };
         assert_eq!(open::<PeerBody>(&obs).expect("opens").h, s.h);

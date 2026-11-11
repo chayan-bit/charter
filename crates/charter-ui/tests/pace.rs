@@ -72,6 +72,12 @@ impl Arkiv for Counting {
     async fn transaction(&self, h: TxHash) -> Result<Option<TxInfo>, StoreError> {
         self.net.transaction(h).await
     }
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.net.mined_tx(h).await
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        self.net.block_txs(n).await
+    }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
         self.net.estimate(from, ops).await
     }

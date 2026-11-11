@@ -34,7 +34,7 @@ pub struct Verify {
 pub struct PeerRow {
     pub nid: String,
     pub delegate: bool,
-    /// `(seq, anchor h, block, entity key)`.
+    /// `(seq, signed body h (v1 anchor or v2 head), block, entity key)`.
     pub head: Option<(u64, String, u64, String)>,
 }
 

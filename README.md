@@ -157,6 +157,12 @@ Never use real funds or mainnet keys.
 6. Anywhere else: `git clone arkiv::<rid> demo-clone`.
 7. `chart status arkiv::<rid>` shows each peer's head and the minimum expiry in days, and `chart keepalive arkiv::<rid> --dry-run` shows what it would extend.
 
+### Storage format v2 (v0.4.0)
+
+From v0.4.0 a push writes one small transaction: each machine keeps its own signed head entity per repo, small pushes ride in that transaction, larger ones go first as short-lived pieces, and a kept-alive snapshot is refreshed after about 1 MiB of changes or 64 pushes (`docs/p5/head-model.md`).
+The first v0.4.0 push to an older repo migrates it automatically; no command is needed, and a second machine with a copy of `keys/` becomes a second device on its first push.
+A v0.3.0 client stops with `E_UNSUPPORTED_VERSION` on a repo once any synced peer has pushed with v0.4.0, instead of showing stale refs, so upgrade every machine that reads the repo.
+
 `CHARTER_DATA_LIFETIME=1d` shortens the data lifetime for demos; the live gate used 1 day.
 The default is 30 days for data and 182.5 days for the control plane.
 

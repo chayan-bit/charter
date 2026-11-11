@@ -263,6 +263,12 @@ impl Arkiv for Hiding<'_> {
     async fn transaction(&self, h: TxHash) -> Result<Option<TxInfo>, StoreError> {
         self.inner.transaction(h).await
     }
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.inner.mined_tx(h).await
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        self.inner.block_txs(n).await
+    }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
         self.inner.estimate(from, ops).await
     }

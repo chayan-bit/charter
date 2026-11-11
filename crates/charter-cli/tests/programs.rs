@@ -9,7 +9,7 @@ use charter_cli::backend::MEM_CHAIN_ID;
 use charter_store::fake::FileMemArkiv;
 use charter_sync::git::Git;
 use charter_sync::ids::{parse_id, parse_url};
-use charter_sync::{Config, Keys, Push, Repo, Update, Want, sync};
+use charter_sync::{Config, HeadPush, Keys, Repo, Update, Want, sync};
 use common::e2e::*;
 use common::programs::*;
 
@@ -20,7 +20,7 @@ fn clone_head(u: &User, root: &Path, url: &str, dir: &str) -> String {
 }
 
 /// A modified client: pushes `main` through the sync library directly, without the
-/// helper's program check, so the signed refs and anchor land on Arkiv anyway.
+/// helper's program check, so the signed head lands on Arkiv anyway.
 fn forced_push(u: &User, url: &str, work: &Path) {
     let home = u.home.join(".charter");
     let rid = parse_url(url.trim_start_matches("arkiv::"))
@@ -41,8 +41,10 @@ fn forced_push(u: &User, url: &str, work: &Path) {
             src: Some(main.clone()),
             dst: main,
         }];
-        let p = Push::prepare(&mem, &repo, &cfg, &keys, view, &Git::work(Some(work)), &up);
-        p.expect("prepare").run().await.expect("forced push");
+        let p = HeadPush::prepare(&mem, &repo, &cfg, &keys, view, &Git::work(Some(work)), &up);
+        Box::pin(p.expect("prepare").run())
+            .await
+            .expect("forced push");
     })
     .expect("runtime");
 }
@@ -113,7 +115,8 @@ fn branch_protection_is_enforced_on_push_and_clone() {
     // A forced push from a modified client lands on Arkiv but every client ignores it.
     let c2 = commit(&alice, &work, "v2\n");
     forced_push(&alice, &url, &work);
-    assert!(alice.arkiv(&["status", &url]).contains("delegate: seq 2"));
+    let st = alice.arkiv(&["status", &url]);
+    assert!(st.contains("delegate: seq 2"), "{st}");
     let dave = User::new(root, "dave", &log);
     assert_eq!(clone_head(&dave, root, &url, "dave"), c1, "not {c2}");
     let report = dave.arkiv(&["program", "status", "--repo", &url]);
@@ -127,8 +130,8 @@ fn branch_protection_is_enforced_on_push_and_clone() {
         "{report}"
     );
 
-    // The rejected delegate is not stuck: `old` is the accepted head and `ff` is real git
-    // ancestry, so an approved descendant of c1 (built on the rejected c2) is accepted.
+    // The rejected delegate is not stuck: the signed base of c3 is the accepted head c1
+    // (an ancestor), so an approved descendant of c1 (built on the rejected c2) is accepted.
     let c3 = commit(&alice, &work, "v3\n");
     let patch3 = post(
         &bob,

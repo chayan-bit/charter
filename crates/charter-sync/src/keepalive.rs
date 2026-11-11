@@ -56,6 +56,9 @@ pub async fn keep_set<A: Arkiv>(a: &A, view: &View) -> Result<Vec<Kept>> {
                 out.push(kept(&o, Plane::Control, *nid));
             }
         }
+        if let Some(v2) = &pv.v2 {
+            out.extend(keep_v2(a, &view.rid, *nid, v2).await?);
+        }
         if pv.head.is_none() {
             continue;
         }
@@ -92,8 +95,53 @@ pub async fn keep_set<A: Arkiv>(a: &A, view: &View) -> Result<Vec<Kept>> {
             }
         }
     }
+    for (nid, o) in crate::program::fold_v1_refs(a, view).await? {
+        out.push(kept(&o, Plane::Bulk, nid));
+    }
     out.sort_by_key(|k| (k.plane == Plane::Bulk, k.size >= CHUNK_SIZE as u64, k.key));
     out.dedup_by_key(|k| k.key);
+    Ok(out)
+}
+
+/// Format v2 (head-model 4.4): every accepted head of the identity, and the snapshot
+/// manifests and chunks each names. Pieces are never kept; their bytes live in calldata.
+async fn keep_v2<A: Arkiv>(
+    a: &A,
+    rid: &Hash32,
+    nid: Nid,
+    v2: &crate::heads::V2,
+) -> Result<Vec<Kept>> {
+    let mut out = vec![];
+    for d in &v2.devices {
+        let Some(head) = &d.head else { continue };
+        if let Some(o) = d.rows.iter().find(|o| o.key == head.key) {
+            out.push(kept(o, Plane::Control, nid));
+        }
+        let bulk = BTreeSet::from([d.device.bulk]);
+        let found = by_hashes(a, kind(Kind::Manifest), &head.body.snapshot).await?;
+        for m in found.iter().filter(|o| o.creator == d.device.bulk) {
+            let Ok(e) = charter_core::verify_entity::<charter_core::ManifestBody>(m, &d.device.pk)
+            else {
+                continue;
+            };
+            if !head.body.snapshot.contains(&e.h) {
+                continue;
+            }
+            out.push(kept(m, Plane::Bulk, nid));
+            for c in packs::landed(a, rid, &e.body.pack_id, &bulk)
+                .await?
+                .values()
+            {
+                out.push(Kept {
+                    key: c.key,
+                    expires_at: c.expires_at,
+                    size: CHUNK_SIZE as u64,
+                    plane: Plane::Bulk,
+                    peer: nid,
+                });
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -244,7 +292,14 @@ pub async fn status<A: Arkiv>(a: &A, repo: &Repo, cfg: &Config) -> Result<(View,
             PeerStatus {
                 nid: *nid,
                 delegate: view.delegates().contains(nid),
-                head: pv.chain.head().map(|l| (l.body.seq, l.position.block)),
+                // Format v2: the most recently updated device head.
+                head: pv
+                    .v2
+                    .iter()
+                    .flat_map(|v| v.heads())
+                    .max_by_key(|(_, h)| h.updated_at)
+                    .map(|(_, h)| (h.body.seq, h.updated_at))
+                    .or_else(|| pv.chain.head().map(|l| (l.body.seq, l.position.block))),
                 min_expiry_days: mine
                     .iter()
                     .map(|k| k.expires_at.saturating_sub(head) / BLOCKS_PER_DAY)

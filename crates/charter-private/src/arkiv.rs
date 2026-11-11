@@ -73,6 +73,15 @@ impl<A: Arkiv> Arkiv for Sealed<'_, A> {
     async fn transaction(&self, h: TxHash) -> Result<Option<TxInfo>, StoreError> {
         self.inner.transaction(h).await
     }
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.inner.mined_tx(h).await
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        self.inner.block_txs(n).await
+    }
+    fn open_rows(&self, rows: Vec<charter_store::EntityData>) -> Vec<charter_store::EntityData> {
+        rows.into_iter().map(|r| open_row(&self.ring, r)).collect()
+    }
     /// Estimates the sealed ops, so push cost predictions include padding.
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
         let sealed = self.seal_ops(ops.to_vec())?;

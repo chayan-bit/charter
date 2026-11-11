@@ -245,6 +245,12 @@ impl Arkiv for FileMemArkiv {
     async fn transaction(&self, h: TxHash) -> Result<Option<TxInfo>, StoreError> {
         self.with(|m, _| now(m.transaction(h)))
     }
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<crate::MinedTx>, StoreError> {
+        self.with(|m, _| now(m.mined_tx(h)))
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<crate::MinedTx>, StoreError> {
+        self.with(|m, _| now(m.block_txs(n)))
+    }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
         self.with(|m, _| now(m.estimate(from, ops)))
     }

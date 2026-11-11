@@ -136,17 +136,20 @@ impl Folder<'_> {
     fn push(&mut self, mut p: RefUpdate) {
         // `old` becomes the accepted head; `ff` is real git ancestry from it to `new` when
         // the client has the objects, else whether the pusher's claimed `old` matches it.
+        // A signed base (format v2) is decided by the claim alone, never by local objects.
         let head = self.heads.get(&p.name).cloned().unwrap_or_default();
         let ff = head.is_empty()
             || p.new.is_empty()
             || head == p.new
-            || match (self.ancestry)(&head, &p.new) {
-                Some(known) => known,
-                None => {
-                    self.undecided = true;
-                    head == p.old
-                }
-            };
+            || (p.signed_base && head == p.old)
+            || !p.signed_base
+                && match (self.ancestry)(&head, &p.new) {
+                    Some(known) => known,
+                    None => {
+                        self.undecided = true;
+                        head == p.old
+                    }
+                };
         p.old = head;
         let verdict = match self.prog.abi.check_push {
             true => self

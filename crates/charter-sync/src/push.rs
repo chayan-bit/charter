@@ -63,6 +63,43 @@ fn check_names(updates: &[Update]) -> Result<()> {
     Ok(())
 }
 
+/// Copies `updates` from `work` into the cache's staging refs of `nid`; returns
+/// `(dst, new oid hex)` per update (`None` deletes).
+pub(crate) fn stage(
+    repo: &Repo,
+    nid: &Nid,
+    work: &Git,
+    updates: &[Update],
+) -> Result<Vec<(String, Option<String>)>> {
+    check_names(updates)?;
+    let nid = *nid;
+    let refspecs: Vec<String> = updates
+        .iter()
+        .filter_map(|u| {
+            u.src
+                .as_ref()
+                .map(|s| format!("+{s}:{}{}", staging(&nid), u.dst))
+        })
+        .collect();
+    work.push_to(&repo.git_dir(), &refspecs)?;
+    let staged: std::collections::BTreeMap<String, String> =
+        repo.git().refs(&staging(&nid))?.into_iter().collect();
+    let mut planned = vec![];
+    for u in updates {
+        let oid = match &u.src {
+            None => None,
+            Some(_) => Some(
+                staged
+                    .get(&format!("{}{}", staging(&nid), u.dst))
+                    .cloned()
+                    .ok_or_else(|| SyncError::coded(ErrorCode::Internal, "staging failed"))?,
+            ),
+        };
+        planned.push((u.dst.clone(), oid));
+    }
+    Ok(planned)
+}
+
 impl<'a, A: Arkiv> Push<'a, A> {
     /// Stages `updates` from `work` and builds (or resumes) the pending push. `view` must
     /// come from a fetch sync that included this peer (`Want::must`).
@@ -75,32 +112,7 @@ impl<'a, A: Arkiv> Push<'a, A> {
         work: &Git,
         updates: &[Update],
     ) -> Result<Self> {
-        check_names(updates)?;
-        let nid = keys.nid();
-        let refspecs: Vec<String> = updates
-            .iter()
-            .filter_map(|u| {
-                u.src
-                    .as_ref()
-                    .map(|s| format!("+{s}:{}{}", staging(&nid), u.dst))
-            })
-            .collect();
-        work.push_to(&repo.git_dir(), &refspecs)?;
-        let staged: std::collections::BTreeMap<String, String> =
-            repo.git().refs(&staging(&nid))?.into_iter().collect();
-        let mut planned = vec![];
-        for u in updates {
-            let oid = match &u.src {
-                None => None,
-                Some(_) => Some(
-                    staged
-                        .get(&format!("{}{}", staging(&nid), u.dst))
-                        .cloned()
-                        .ok_or_else(|| SyncError::coded(ErrorCode::Internal, "staging failed"))?,
-                ),
-            };
-            planned.push((u.dst.clone(), oid));
-        }
+        let planned = stage(repo, &keys.nid(), work, updates)?;
         let mut push = Self {
             a,
             repo,

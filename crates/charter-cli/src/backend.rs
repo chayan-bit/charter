@@ -165,6 +165,12 @@ impl Arkiv for Backend {
     async fn transaction(&self, h: TxHash) -> Result<Option<TxInfo>, StoreError> {
         both!(self, b => b.transaction(h).await)
     }
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        both!(self, b => b.mined_tx(h).await)
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        both!(self, b => b.block_txs(n).await)
+    }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
         both!(self, b => b.estimate(from, ops).await)
     }

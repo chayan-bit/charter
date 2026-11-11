@@ -20,15 +20,18 @@ mod types;
 
 pub use attrs::{AttrValue, Attribute, check_arkiv_rules, chunk_attributes};
 pub use body::{
-    AnchorBody, BindBody, Body, CREATE, CobOpBody, IdAccBody, IdBody, MAX_ACTION, MAX_PAYLOAD,
-    MAX_TYPE_NAME, ManifestBody, PeerBody, ProgramPin, RefEntry, RefsBody, Require,
+    AnchorBody, BindBody, Body, CREATE, CobOpBody, DEVICE_LAYOUT_VERSION, DEVICE_SEQ, DeviceBody,
+    HeadBody, HeadPack, HeadRef, IdAccBody, IdBody, MAX_ACTION, MAX_HEAD_PIECES, MAX_PAYLOAD,
+    MAX_TYPE_NAME, ManifestBody, PeerBody, PieceRef, ProgramPin, RefEntry, RefsBody, Require,
 };
 pub use canonical::{CanonicalRefs, canonical_refs};
 pub use chain::{
-    AcceptedHead, AnchorChain, AnchorLink, BindChain, BindLink, CompletenessObs, Equivocation,
-    HeadInputs, IdentityChain, PeerInfo, Revision, Start, VerifiedOp, accept_head, anchor_chain,
-    bind_chain, check_completeness, check_control_set, check_requires, find_refs, identity_chain,
-    maj, peer_key, verify_ops, verify_ops_after,
+    AcceptedHead, AnchorChain, AnchorLink, BindChain, BindLink, CompletenessObs, Device,
+    DeviceHead, EntryUpdate, Equivocation, HeadInputs, HeadNonce, IdentityChain, Merged, PeerInfo,
+    Revision, Start, VerifiedOp, Winner, accept_device_head, accept_head, accept_own_device_head,
+    anchor_chain, bind_chain, check_completeness, check_control_set, check_head_nonce,
+    check_requires, devices, find_refs, identity_chain, is_device_row, maj, merge, merged_refs,
+    next_entries, peer_key, resolve_stamps, verify_ops, verify_ops_after,
 };
 pub use chunk::{CHUNK_SIZE, MAX_PACK_SIZE, chunk_count, chunk_hashes, split, verify_chunk};
 pub use entity::{ENTITY_LAYOUT_VERSION, Entity, entity_attributes, open, verify_entity};

@@ -234,6 +234,9 @@ Private repos upload sealed bytes only, as today.
 
 ### 3.4 One mutable head per peer, history as a transaction log
 
+Status: IMPLEMENTED for v0.4.0 as format v2, with the changes decided on 2026-11-11 (per-device heads, rollback check by `entityNonce`, snapshot plus pieces, collaboration ops left as entities); the design is `docs/p5/head-model.md` and the measured run is section 3.15.
+The design list below is the original proposal and is kept for the record.
+
 Measured 2026-11-09 by `eth_estimateGas` on Rabdi (impersonating each entity's owner, nothing sent):
 
 - Charter's anchors are read-only entities: a patch reverts with `ReadOnlyEntity`.
@@ -492,6 +495,41 @@ Proposal, in order:
 
 The last two columns are ESTIMATES until step 1 measures them; execution speed in GolemDB and follower bandwidth are not yet measured and could lower the ceiling.
 
+### 3.15 Format v2 on Rabdi (2026-11-11, MEASURED)
+
+Release build of v0.4.0 rebased on `main` 611da1f, against the v0.3.0 release, both on Rabdi with 1 gwei base fee; design in `docs/p5/head-model.md`.
+
+| Scenario | v0.3.0 | v0.4.0 (format v2) |
+|---|---|---|
+| (a) new repo, init plus first push | - | 38.1 s, 19 txs, 3.85M gas |
+| (b) small push, 5 interleaved rounds | 24.4 to 28.1 s, 6 txs, about 968k gas | 11.7 to 13.6 s, 1 tx, 340k to 354k gas |
+| (c) 10 MiB push (snapshot refresh) | - | 72.9 s, 164 txs, 432M gas, 0.697 tGLM |
+| (c) 2 MiB push (pieces) | - | 26.6 s, 34 txs, 84.9M gas, 0.0947 tGLM |
+| (d) migration push of a v0.3.0 repo | - | 38.4 s, 8 txs, 1.13M gas |
+| (e) two devices, different branches | - | both land, 12.6 s and 14.7 s |
+| (e) two devices, same branch | - | winner 11.7 s; loser `E_LOST_RACE` |
+| (f) clone after the pieces expired | - | 18.3 s for 12 MiB; 11.3 s for a small repo |
+| (h) private repo, push and clone | - | 31.9 s first push, 12.2 s next push, 4.2 s clone |
+
+- (b) A small push is 2x faster and 2.8x cheaper.
+  Most of the remaining 12 s is round trips: about 13 s of RPC calls at 300 to 500 ms each in the trace (the verified sync before the push, then the re-check after the receipt), of which about 3 s is the re-check; the head transaction lands in one block.
+- (c) The 10 MiB push cost more than section 3.14 estimated, because a snapshot refresh writes the whole pack as 30-day entity chunks; the base fee also rose to about 1.6 gwei during it.
+- (d) After the migration v0.3.0 fetch and clone stop with `E_UNSUPPORTED_VERSION`; the v0.4.0 fetch and a fresh clone match, the issue is still listed, `git fsck` is clean.
+- (h) No ref name, commit message or file content appears in plaintext in the calldata of the private repo's transactions.
+- (i) CI-gated program on a v2 repo: a contributor's patch pushed to its own namespace, a CI attestation by the runner key, the delegate's merge to `main`, a release and its artifact attestation, and `chart release verify` reports it valid; a push of an unreviewed commit to `main` is refused with `E_PROGRAM_REJECTED` before any transaction.
+- (j) `chart ui` shows the device head (seq, body, block) and the merged refs, and picks up a new push within one sync round.
+- The live probe for the rollback rule and the block-history depth are in `docs/p5/head-model.md` section 12.
+
+Re-run on the build with the review fixes (`aefc0b0`: pinned head nonce, fresh-read race check, signed base check, v1 refs keepalive):
+
+- (b) 3 interleaved rounds: v0.3.0 26.3 to 27.9 s, 6 txs, about 915k gas; v0.4.0 12.4 to 13.5 s, 1 tx, 265k to 271k gas.
+- (d) A v0.3.0 repo with the CI-gated program pinned before migration, a patch, a CI pass and a merge in v1: the migration push took 37.7 s (8 txs, 1.13M gas); a fresh v0.4.0 home folds it in 7.7 s to the same `main`; v0.3.0 stops with `E_UNSUPPORTED_VERSION`.
+  The fold still reads the v1 refs entities from the pin onward, so `chart keepalive` now keeps them: its keep set for that repo is 16 entities, against 14 without them.
+- (e) Different branches from two devices: both land (12.1 s and 11.6 s); same branch: winner 13.3 s, loser `E_LOST_RACE`.
+- (e) A fresh device whose first push started before another device landed `main` gets `E_LOST_RACE` ("moved refs/heads/main after git checked it") and leaves the landed commit in place.
+- (e) Two machines with one copied device seed pushing at once: one lands, the other stops with `E_CONCURRENT_PUSH` before a second head transaction, and its retry lands with both branches listed.
+- (i) Patch 27.2 s, CI 24.3 s, merge 46.3 s, release 8.7 s, attestation 19.6 s, verify from a fresh home valid; an unreviewed push gives `E_PROGRAM_REJECTED` and leaves no staging refs.
+
 ## 4. Rejected
 
 - Creating chunks with a short lifetime and extending them later: the total gas is the same; it only moves the payment and adds a data-loss risk if the extension fails to land.
@@ -504,7 +542,7 @@ The last two columns are ESTIMATES until step 1 measures them; execution speed i
 - Storage tiers (section 3.1) and the default tier for new repos.
 - Upload ahead of push (section 3.2).
 - Big pushes on chain at upload speed (section 3.14): devnet measurement, client pipelining, the Arkiv asks, striping across db-chains.
-- One mutable head per peer with history in block calldata (section 3.4), and hash-chain signatures between checkpoints (section 3.5).
+- Hash-chain signatures between checkpoints (section 3.5); the head model of section 3.4 is decided and implemented.
 - Groth16 wrap of ZK receipts: 223,898 B to under 1 KB and about 8 ops to 1, at the price of a trusted setup that `docs/p4/zk-sealed-patch.md` deliberately avoids.
 - An untrusted read cache (CDN or GitHub Releases) serving hash-verified pieces: GitHub-speed clones with an unchanged trust model; this is a product choice.
 - Ask Arkiv upstream to lift the block builder from 30M to the 200M gas its genesis configures: big pushes about 6x faster for free.
@@ -513,6 +551,6 @@ The last two columns are ESTIMATES until step 1 measures them; execution speed i
 
 - Whether a multi-op `execute` tx is all-or-nothing on Rabdi (item 4 assumes it).
 - Whether `arkiv_query` works inside a JSON-RPC batch.
-- How long Rabdi retains block history and whether its RPC watchers prune (section 3.1 depends on it).
+- Whether Rabdi's RPC watchers will prune block history later: on 2026-11-11 `eth_getTransactionByHash` still served transactions back to block 1, about 11 days (head-model section 12).
 - A fair wall-time comparison of compressed vs uncompressed responses.
-- Section 3.8 covers one key and one repo shape; multi-peer repos, snapshots and the completeness change are not exercised yet.
+- Section 3.8 covers one key and one repo shape; section 3.15 exercises two devices of one identity, a snapshot refresh and the rollback rule, but not yet a repo with several delegates.

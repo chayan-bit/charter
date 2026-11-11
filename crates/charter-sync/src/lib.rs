@@ -6,15 +6,20 @@
 //! and adds the checks core leaves to sync (chunks, packs, connectivity).
 
 pub mod cob;
+pub mod device;
 mod error;
 pub mod fetch;
 pub mod git;
+pub mod head_push;
+pub mod head_send;
+pub mod heads;
 pub mod identity;
 pub mod ids;
 pub mod keepalive;
 pub mod keys;
 pub mod observe;
 pub mod packs;
+pub mod pieces;
 pub mod program;
 pub mod push;
 pub mod push_send;
@@ -28,6 +33,7 @@ pub mod write;
 
 pub use error::{Result, SyncError, store_code};
 pub use fetch::{Listing, listing, own_refs, sync};
+pub use head_push::HeadPush;
 pub use keys::Keys;
 pub use push::{Push, Update};
 pub use push_send::{Cost, Gate};
