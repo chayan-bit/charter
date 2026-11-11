@@ -20,6 +20,7 @@ use crate::state::{PendingPush, unhex};
 use crate::view::View;
 use crate::{Result, SyncError, cob};
 
+mod ancestry;
 pub mod heads;
 pub mod proofs;
 mod publish;
@@ -130,10 +131,18 @@ fn since_block(mut v: Value, blocks: &[u64]) -> Value {
 /// Git ancestry of commit `a` to commit `b` in `git`, or `None` when git cannot decide
 /// (either commit, or any commit between them, is missing): a `None` keeps the fold from
 /// being checkpointed, so the verdict is taken again once the objects arrive.
+/// A `true` answer is kept next to the cache and never asked of git again.
 pub fn is_ancestor(git: &Git, a: &[u8], b: &[u8]) -> Option<bool> {
     let (a, b) = (hex::encode(a), hex::encode(b));
+    let pair = format!("{a} {b}");
+    if ancestry::known(git, &pair) {
+        return Some(true);
+    }
     match git.exit_code(&["merge-base", "--is-ancestor", &a, &b]) {
-        Ok(Some(0)) => Some(true),
+        Ok(Some(0)) => {
+            ancestry::remember(git, &pair);
+            Some(true)
+        }
         Ok(Some(1)) => Some(false),
         _ => None,
     }
@@ -415,7 +424,8 @@ pub async fn fold_v1_refs<A: Arkiv>(
     Ok(out)
 }
 
-/// Each delegate's v2 timeline (landing block, merge), bounded at the pin's block.
+/// Each delegate's v2 timeline (landing block, merge), bounded at the pin's block; the
+/// delegates are walked at the same time.
 async fn v2_timelines<A: Arkiv>(
     a: &A,
     view: &View,
@@ -427,15 +437,18 @@ async fn v2_timelines<A: Arkiv>(
         .as_deref()
         .map(heads::BodyCache::load)
         .unwrap_or_default();
+    let jobs = view.delegates().iter().filter_map(|nid| {
+        let v2 = view.peers.get(nid)?.v2.as_ref()?;
+        let mut mine = cache.clone();
+        Some(async move {
+            let bodies = heads::identity_bodies(a, &view.rid, v2, stop, &mut mine).await?;
+            Ok::<_, SyncError>((*nid, heads::timeline(&bodies), mine))
+        })
+    });
     let mut out = BTreeMap::new();
-    for nid in view.delegates() {
-        let Some(v2) = view.peers.get(nid).and_then(|p| p.v2.as_ref()) else {
-            continue;
-        };
-        let bodies = heads::identity_bodies(a, &view.rid, v2, stop, &mut cache).await?;
-        let timeline = heads::timeline(&bodies);
-        check_walked_bases(git, nid, &timeline)?;
-        out.insert(*nid, timeline);
+    for (nid, timeline, theirs) in futures_util::future::try_join_all(jobs).await? {
+        cache.absorb(theirs);
+        out.insert(nid, timeline);
     }
     if let Some(p) = &path {
         cache.save(p)?;
@@ -477,6 +490,19 @@ fn kind_is(o: &charter_core::Observed, k: Kind) -> bool {
 /// mismatched source is `E_PROGRAM_MISSING`: heads are never computed without the program.
 /// `git` holds the pushed objects (fetch calls this after applying packs) for ancestry.
 pub async fn enforce<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<Enforced>> {
+    finish(gather(a, view, git).await?, git)
+}
+
+/// A fold's inputs read from Arkiv: everything but git, so it can run while packs download.
+#[derive(Debug)]
+pub struct Gathered {
+    e: Enforced,
+    /// Each delegate's walked v2 timeline, for the signed-base check once objects are in.
+    timelines: BTreeMap<Nid, Vec<(u64, Merged)>>,
+}
+
+/// The network half of [`enforce`]: the program's source, ops, votes and ref events.
+pub async fn gather<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<Gathered>> {
     let head = view.identity.head();
     let Some(pin) = head.body.program.clone() else {
         return Ok(None);
@@ -504,6 +530,7 @@ pub async fn enforce<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<E
         }
     }
     let v2_orders: BTreeMap<Nid, Vec<(u64, Merged)>> = timelines
+        .clone()
         .into_iter()
         .map(|(n, t)| (n, t.into_iter().map(|(b, m)| (block_rank[&b], m)).collect()))
         .collect();
@@ -547,7 +574,7 @@ pub async fn enforce<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<E
         quorum: head.body.threshold,
         name: head.body.name.clone(),
     };
-    let mut e = Enforced {
+    let e = Enforced {
         engine: pin.engine.clone(),
         source,
         repo,
@@ -564,6 +591,18 @@ pub async fn enforce<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<E
         },
         checkpoint: None,
     };
+    Ok(Some(Gathered { e, timelines }))
+}
+
+/// The git half of [`enforce`], once the packs are in the cache: the signed-base check of
+/// every walked body, then the fold (resumed from the cached checkpoint when it applies).
+pub fn finish(g: Option<Gathered>, git: &Git) -> Result<Option<Enforced>> {
+    let Some(Gathered { mut e, timelines }) = g else {
+        return Ok(None);
+    };
+    for (nid, t) in &timelines {
+        check_walked_bases(git, nid, t)?;
+    }
     let (cached, started) = (load_checkpoint(git), std::time::Instant::now());
     (e.outcome, e.checkpoint) = fold(&e, vec![], git, cached.as_ref())?;
     if charter_store::trace::enabled() {

@@ -348,10 +348,13 @@ pub async fn body_at<A: Arkiv>(
     dev: &Device,
     tx: &Hash32,
 ) -> Result<Option<(HeadBody, LandingJson)>> {
-    let Some(mined) = a.mined_tx(charter_store::TxHash::from(*tx)).await? else {
+    let h = charter_store::TxHash::from(*tx);
+    // The tx and its receipt together: one round trip per walked body.
+    let (mined, receipt) = futures_util::future::try_join(a.mined_tx(h), a.receipt(h)).await?;
+    let Some(mined) = mined else {
         return Ok(None);
     };
-    let ok = a.receipt(mined.hash).await?.is_some_and(|r| r.success);
+    let ok = receipt.is_some_and(|r| r.success && r.tx_hash == mined.hash);
     if mined.from.0.0 != dev.control || !ok {
         return Ok(None);
     }
