@@ -159,8 +159,34 @@ async fn run_all() -> Bench {
     m.reset();
     Box::pin(fetch_on(&m, &bob, &rid)).await;
     take("fold", &m);
+
+    // A device past the head body cap (issue #24): the push that writes its ref table, a
+    // push that reuses it, and a fetch of each.
+    let rid = init(&net, &alice, "bench-refs").await;
+    let work = work_repo(tmp.path(), "refs");
+    commit_at(&work, &[("a", b"one")], "feat: one");
+    let oid = rev(&work, "HEAD");
+    let tags: Vec<String> = (0..TABLE_TAGS)
+        .map(|i| format!("refs/tags/v{i:05}"))
+        .collect();
+    let packed: String = tags.iter().map(|t| format!("{oid} {t}\n")).collect();
+    std::fs::write(work.join(".git/packed-refs"), packed).expect("packed-refs");
+    let mut names: Vec<&str> = tags.iter().map(String::as_str).collect();
+    names.push("refs/heads/main");
+    Box::pin(fetch_on(&net, &bob, &rid)).await;
+    m.reset();
+    Box::pin(push_on(&m, &alice, &rid, &work, &names)).await;
+    take("push_table_new", &m);
+    Box::pin(fetch_on(&m, &bob, &rid)).await;
+    take("fetch_table", &m);
+    commit_at(&work, &[("a", b"two")], "feat: two");
+    Box::pin(push_on(&m, &alice, &rid, &work, &["refs/heads/main"])).await;
+    take("push_table_reuse", &m);
     out
 }
+
+/// Tags of the ref-table bench: past the 62 KB head body (about 1,350 short tags).
+const TABLE_TAGS: usize = 1_500;
 
 /// Every difference between `base` and `now`, one line each; empty when they are equal.
 fn compare(base: &Bench, now: &Bench) -> Vec<String> {

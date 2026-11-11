@@ -23,6 +23,14 @@
     "bytes": 0,
     "gas": 0
   },
+  "fetch_table": {
+    "rounds": 5,
+    "calls": 11,
+    "queries": 9,
+    "txs": 0,
+    "bytes": 0,
+    "gas": 0
+  },
   "fold": {
     "rounds": 5,
     "calls": 18,
@@ -62,6 +70,22 @@
     "txs": 1,
     "bytes": 4772,
     "gas": 981520
+  },
+  "push_table_new": {
+    "rounds": 50,
+    "calls": 68,
+    "queries": 16,
+    "txs": 7,
+    "bytes": 22608,
+    "gas": 2920872
+  },
+  "push_table_reuse": {
+    "rounds": 8,
+    "calls": 22,
+    "queries": 11,
+    "txs": 1,
+    "bytes": 5828,
+    "gas": 1026409
   },
   "ui_probe_noop": {
     "rounds": 1,
