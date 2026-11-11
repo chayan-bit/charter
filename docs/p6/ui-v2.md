@@ -1,8 +1,7 @@
 # P6 v2: audit and redesign proposal for `chart ui`
 
-Status: PROPOSAL.
-Nothing here is implemented, and no Rust code was changed to write it.
-Implementation waits for the user's go-ahead, slice by slice.
+Status: slices 0 to 3 and the Settings page are BUILT on branch `ui/v2` (section 10); slices 4 to 8 are still a proposal.
+Sections 1 to 9 are the proposal as written before the build; section 10 records the decisions and what was built.
 Date: 2026-11-11.
 Branch `ui/v2`, from main at bda7571 (v0.4.0).
 Builds on `docs/p6/ui.md`, which stays the record of the v1 architecture (axum, askama, htmx, local-first, CSRF and Host guard).
@@ -350,6 +349,8 @@ All data in the mockup is made up, including the repo address; it uses no real k
 
 ## 7. Open questions
 
+Answered on 2026-11-11; see section 10.1 for who decided what.
+
 1. Name aliases: show the peer alias from the identity, or let each user keep a local nickname for peers, or both?
 2. Should small writes (for example a comment under 0.005 tGLM) ever skip the dialog after a one-time opt-in?
    The proposal says no, because the user asked for an explicit dialog before every on-chain write.
@@ -440,3 +441,96 @@ One fact from the audit that bears on it: the seed is raw 32 bytes in `keys/seed
 - Keyboard and accessibility coverage is `axe-core` on 6 pages plus the shortcut help dialog; there was no screen-reader pass.
 - The "fund 0" submit showing no feedback was seen once and not investigated.
 - The mockup was checked in Chrome only, not Safari or Firefox.
+
+## 10. Built: slices 0 to 3 and Settings
+
+### 10.1 Decisions
+
+The user said on 2026-11-11: "go with the defaults and have a settings tab where i can customize them".
+So every question in section 7 took its proposed default, and each default is a choice on the Settings page.
+
+| Question | Decided | By | Settings choice |
+|---|---|---|---|
+| 1. Peer names | Both: the local nickname with the alias after it, else the alias, else a short id | User (defaults) | Peer names, plus a nickname per peer |
+| 2. Small writes | Always show the cost dialog | User (defaults) | Small writes: always, or skip under a limit up to 0.1 tGLM |
+| 3. Fonts and icons | Embedded (Schibsted Grotesk, IBM Plex Mono, Phosphor) | User (defaults) | Fonts: Charter's or this computer's |
+| 4. Patch status | Infer "merged" when the default branch contains the patch head | User (defaults) | Patch status: infer, or only a merged op |
+| 5. Times | Block time only | User (defaults) | Times: block, or block plus the author's clock (`ts_ms`) |
+| 6. Activity and Search scope | Local cache only for now; Arkiv as a second source in slice 6 (7.1) | User | None yet; the control comes with slice 6 |
+| 7. Order | Slices 0 to 3 first | User (defaults) | - |
+| Visual direction | Folio (design A): light-first, reads like a document, one green accent meaning only "proven", ink buttons | Coordinator | Theme: system, light or dark |
+
+Folio replaced the Geist-based look of section 3.5 and the mockup of section 6: Schibsted Grotesk replaced Geist, body text is 15 px, and rules and space separate content (boxes only for dialogs, popovers and warnings).
+
+### 10.2 Settings (`/settings`)
+
+- Local only: `$CHARTER_HOME/ui/prefs.json`, written atomically with mode 0600 through charter-sync `write_json`.
+- Unknown fields are refused; a bad value or a nickname over 40 characters is refused with the reason and the file is not touched.
+- A corrupt file falls back to the defaults with a "Settings reset" notice on every page until a good file is saved; it is never overwritten silently.
+- Saving applies to the next page without a restart; each option shows which one is the default.
+- POSTs go through the same CSRF token and Origin and Host guard as every write; the header theme toggle posts to `/settings/theme`, so the theme lives in one place.
+- Settings never reads the chain: the peer table comes from the cached views.
+- A write skipped under the small-write limit lands on its status page with "Sent without asking", shows the actual cost, and is recorded in the spend ledger with `skipped: true`.
+  The limit applies only when the write moves no funds (no escrow deposit), its estimate is at most the limit, the balance covers it and no RPC quota pause is on.
+- Future work: a search-scope choice (local, or local plus Arkiv) when slice 6 is built.
+
+### 10.3 What was built
+
+- Slice 0: Folio tokens and CSS, embedded fonts (63 KB woff2, OFL) and a 31-symbol Phosphor sprite (MIT), licences in `assets/licenses/`, a favicon, the header with Repositories, Wallet and Settings, a sync indicator, the wallet chip, the theme toggle and a help button, and a phone bottom bar.
+- Slice 1: repo list rows with an attention strip (conflicts and failed syncs only), repo header with the Verified seal and a Clone popover, a branch and tag picker on the code pages, a `/r/{rid}/branches` page, a side panel (maintainers, the rule for the default branch, the address) and the last commit bar.
+- Slice 2: peer aliases (section 10.4), wall-clock times from block numbers (section 10.5), the Verified popover in plain sentences, "Maintainers", "Rules and CI" (`/r/{rid}/rules`, `/program` kept), and the red conflict banner on every repo page and the repo list.
+  Block numbers, entity keys, sequence numbers and ML-DSA details stay inside Technical details disclosures and tooltips.
+- Slice 3: the cost dialog v2 (what is published, the most it can cost, wallet now and after, how long it takes and how long it is kept, a breakdown and what will be signed), the three-step status card (signed, in a block, visible here) that shows the actual fee from the receipts, the `/wallet` page with Refresh and the spend ledger (`ui/spend.json`, newest first, never overwritten when unreadable), the low-balance warning, and Send disabled when the balance cannot cover the worst case or an RPC quota pause is on.
+  The dialog's "Wallet now" is the wallet alone, the same number as the header chip; "After, at least" subtracts only what leaves the wallet (top-ups, escrow deposits and their fees), since the repo's paying address pays the op fees.
+- Also fixed while there: `just now` instead of `0 s ago`, ordered-list markers and large amounts no longer spaced out by tabular figures, the issue-list state column aligned, table cells no longer touching, the status card no longer re-animating on every one-second poll, the author's clock no longer broken mid-phrase in the timeline margin, and `refs/heads/` dropped from ref names outside Technical details.
+
+### 10.4 Peer aliases
+
+A peer document already carried an `alias`, but `chart` never set it, so every alias on chain was empty.
+`CHARTER_ALIAS` (trimmed, at most 64 bytes) now sets it when a peer document is written.
+charter-core gained `peer_doc`, which returns the key and the alias from the peer lookup the sync already does, and charter-sync keeps the aliases it sees in a process-wide map, so naming peers costs no extra query.
+The UI stores them in `view.json` (`aliases`), merging old entries with this round's peers and op authors.
+An author whose ops were cached before this change gets a name only when a later round sees one of their ops or peer heads again.
+
+### 10.5 Times
+
+A page reads no chain to show a time: a block's time is estimated as the view's sync time minus 2 s per block behind the synced head.
+On Rabdi that is accurate to a few seconds; on the file-backed fake chain, which makes a block only when something is written, the estimates are compressed and read too recent.
+The block number stays in the tooltip ("2026-11-11 09:41 UTC, block 1,204,331") and in Technical details.
+The RPC-quota line keeps its wording ("paused: RPC quota, resumes in N min") but does not count down live; a reload shows the new value.
+
+### 10.6 Performance, before and after
+
+Measured on the test fixture with the same tests before the build (main 53f7774) and after; render times are release builds, 60 runs per page.
+
+| Measure | Before | After |
+|---|---|---|
+| `app.css` gzipped | 5,766 B | 8,962 B |
+| Largest page, HTML + CSS gzipped (budget 20 KB) | about 8.4 KB (repo home) | 12,165 B (repo home) |
+| Smallest page, HTML + CSS gzipped | about 6.9 KB (`/`) | 10,302 B (`/wallet`) |
+| Repo home render p50 / p99 | 0.35 / 0.93 ms | 0.29 / 0.52 ms |
+| Commit render p50 / p99 | 0.32 / 0.78 ms | 0.25 / 0.40 ms |
+| Repo list render p50 / p99 | 0.03 / 0.15 ms | 0.05 / 0.09 ms |
+| Branches, wallet, settings p50 | not served | 0.10, 0.01, 0.04 ms |
+| Chain queries: first sync, then per hour with no page open | 9, then 0 | 9, then 0 |
+| Chain queries per hour: idle, on screen, on screen with one change | 17, 365, 371 | 17, 365, 371 |
+
+The repo list's p50 rose by about 20 microseconds from its richer rows; its p99 fell, and issue and patch counts are now counted once per sync round into `view.json` instead of reading every repo's `cobs.json` on each render, so the list no longer grows with op count.
+Fonts and the icon sprite (63 KB and 5.4 KB gzipped) load once and are cached as immutable; the 20 KB budget of `ui.md` section 6 counts HTML and CSS.
+The writer reads the wallet balance once at start, once when pricing (as before), once after a write and on Refresh; none of these are in the sync loop.
+
+### 10.7 Known issues found during the build
+
+- A push from another terminal that only moves refs no longer shows on an open page.
+  The UI's one-query probe (`charter-ui/src/pace.rs`) notices a new or expired entity, not an entity updated in place, and format v3 heads (`8d5f1e4`, v0.5.0) update the peer head in place.
+  Seen on the fake chain: the remote lists the new branch, the probe keeps reporting no change every 10 s, and `view.json` is not rewritten.
+  This predates the redesign and is not changed here; the fix belongs in the probe (for example comparing the newest head's last-modified block) and needs its own query-count measurement against the `pace.rs` bounds.
+- The phone tab strip always fades its right edge, even when scrolled to the end.
+- The blob page has no last-commit bar, to keep it to one git walk.
+- Writes to a private repo are priced and sent sealed only once `sec/private-plumbing` lands; that branch picks the backend inside `writes/run.rs`, and this build left that choice alone.
+  The dialog reads every figure from the `Estimate` the writer produces, so it shows the sealed cost with no change here.
+
+### 10.8 Verification
+
+- Workspace tests, `cargo fmt --check` and `cargo clippy -D warnings` pass; `tests/v2.rs` adds 8 tests (vocabulary and no bare block numbers on 14 pages, aliases, branches and picker, the conflict banner, Settings applied, kept across a restart, mode 0600, bad input and missing CSRF refused, corrupt-file reset, the small-write skip, the dialog fields and the ledger, and the unfunded case).
+- The e2e run on the fake chain: 1,494 checks pass, 3 warn (two synthetic long pages over 20 KB and debug-build timing on one of them), 1 fails (the live update in section 10.7); axe reports 0 WCAG 2.1 A and AA violations on 50 page and state runs, including the confirm dialog with its breakdown open.
