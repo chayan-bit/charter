@@ -117,13 +117,23 @@ pub fn seal_op(ring: &Keyring, op: Operation) -> Result<Operation> {
         }
         OP_PATCH => {
             let p: Patch = op.payload_of().map_err(|e| internal(&e.to_string()))?;
-            Ok(match seal_attrs(ring, &p.mutations)? {
-                Some(attrs) => Operation::patch(p.entityKey, attrs),
-                None => op,
-            })
+            match seal_attrs(ring, &p.mutations)? {
+                Some(attrs) => Ok(Operation::patch(p.entityKey, attrs)),
+                // A body without `ag.rid` and `ag.kind` (a format v3 minimal head patch)
+                // cannot be sealed: refuse it rather than send it in plaintext.
+                None if has(&p.mutations, "ag.body")? && !has(&p.mutations, EPOCH)? => Err(
+                    internal("a patch without ag.rid and ag.kind cannot be sealed"),
+                ),
+                None => Ok(op),
+            }
         }
         _ => Ok(op),
     }
+}
+
+fn has(given: &[Attribute], name: &str) -> Result<bool> {
+    let w = word(name)?;
+    Ok(given.iter().any(|a| a.name == w))
 }
 
 /// The sealed attribute list, or `None` when the attributes are not an unsealed entity
@@ -269,5 +279,40 @@ mod tests {
         assert_eq!(back[1].value, serde_json::Value::from("demo"));
         assert_eq!(back[2].value, serde_json::Value::from("0x010203"));
         assert!(decode_hidden(&[3, b'a']).is_none());
+    }
+
+    fn ring() -> Keyring {
+        Keyring {
+            rid: [1; 32],
+            id_key: [2; 32],
+            epochs: std::collections::BTreeMap::from([(1, [3; 32])]),
+            roles: std::collections::BTreeMap::new(),
+            group: vec![7],
+        }
+    }
+
+    #[test]
+    fn a_patch_with_only_body_and_hash_is_refused_instead_of_sent_in_plaintext() {
+        let minimal = charter_store::patch_op(
+            charter_store::B256::repeat_byte(9),
+            &[
+                ("ag.body", AttributeValue::Bytes(vec![1, 2, 3]), false),
+                ("ag.h", AttributeValue::Bytes32([4; 32]), true),
+            ],
+        )
+        .expect("op");
+        assert!(seal_op(&ring(), minimal).is_err());
+        let full = charter_store::patch_op(
+            charter_store::B256::repeat_byte(9),
+            &[
+                ("ag.kind", AttributeValue::Str("head".into()), true),
+                ("ag.rid", AttributeValue::Bytes32([1; 32]), true),
+                ("ag.body", AttributeValue::Bytes(vec![1, 2, 3]), false),
+            ],
+        )
+        .expect("op");
+        let sealed = seal_op(&ring(), full).expect("sealed");
+        let again = seal_op(&ring(), sealed.clone()).expect("idempotent");
+        assert_eq!(again.operationData, sealed.operationData);
     }
 }
