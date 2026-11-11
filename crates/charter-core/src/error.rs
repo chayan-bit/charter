@@ -38,6 +38,8 @@ pub enum ErrorCode {
     NotMember,
     /// P2: the caller's role in a private repo does not allow the operation.
     RoleDenied,
+    /// P2: a write to a private repo was about to leave without sealing (a caller bug).
+    UnsealedPrivate,
     Internal,
 }
 
@@ -74,6 +76,7 @@ impl ErrorCode {
             ProgramRejected => "E_PROGRAM_REJECTED",
             NotMember => "E_NOT_MEMBER",
             RoleDenied => "E_ROLE_DENIED",
+            UnsealedPrivate => "E_UNSEALED_PRIVATE",
             Internal => "E_INTERNAL",
         }
     }

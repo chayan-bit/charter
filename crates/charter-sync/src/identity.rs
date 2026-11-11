@@ -46,6 +46,7 @@ async fn send_control_jobs<A: Arkiv>(
     rid: &Rid,
     jobs: Vec<Vec<Operation>>,
 ) -> Result<()> {
+    crate::guard::require_sealed(a, &cfg.home, rid)?;
     let pipeline = cfg.pipeline.ordered();
     write::send_funded(a, &keys.control(rid), &keys.wallet(), &pipeline, jobs).await?;
     Ok(())

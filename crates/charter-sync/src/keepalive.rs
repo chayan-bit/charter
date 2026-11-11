@@ -223,6 +223,7 @@ pub async fn keepalive<A: Arkiv>(
     signer: &PrivateKeySigner,
     opts: &KeepOpts,
 ) -> Result<KeepReport> {
+    crate::guard::require_sealed(a, &cfg.home, &repo.rid)?;
     let state = State::load(&repo.state_path())?;
     let want = Want {
         extra: cfg.extra_peers.iter().copied().collect(),

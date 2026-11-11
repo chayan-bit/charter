@@ -1,6 +1,8 @@
 //! The write worker: prices drafts and sends them. Sending goes through `cob::post`,
 //! `release::payload`, `TxPipeline::transfer` and `charter_escrow::ops::post`, as the
-//! CLI does; [`Tap`] wraps the backend only to record each tx hash as it is sent.
+//! CLI does; [`Tap`] wraps the backend only to record each tx hash as it is sent. Both
+//! pricing and sending pick the backend with `charter_private::for_repo`, the CLI's rule,
+//! so a private repo's draft is priced and sent sealed.
 
 use std::sync::{Arc, Mutex};
 
@@ -89,8 +91,8 @@ impl<A: Arkiv> Ctx<A> {
         self.keys.wallet().address()
     }
 
-    async fn bound(&self, rid: &Rid) -> Result<bool, String> {
-        let p = view::resolve_peer(&*self.a, rid, &self.keys.nid()).await;
+    async fn bound<B: Arkiv>(&self, b: &B, rid: &Rid) -> Result<bool, String> {
+        let p = view::resolve_peer(b, rid, &self.keys.nid()).await;
         Ok(p.map_err(err)?.is_some_and(|p| !p.binds.links.is_empty()))
     }
 
@@ -109,8 +111,9 @@ impl<A: Arkiv> Ctx<A> {
 
     /// Gas of one op step, signed with a throwaway key of the same algorithm so the
     /// entity has the exact size the real one will have; nothing of the user is signed.
-    async fn op_gas(
+    async fn op_gas<B: Arkiv>(
         &self,
+        b: &B,
         tmp: &Keys,
         d: &Draft,
         step: &Step,
@@ -124,18 +127,30 @@ impl<A: Arkiv> Ctx<A> {
         };
         ops.push(entity_op::<CobOpBody>(&s.bytes, self.cfg.control_lifetime).map_err(err)?);
         let from = self.keys.control_address(&d.rid);
-        let gas = self.a.estimate(from, &ops).await.map_err(err)?;
+        let gas = b.estimate(from, &ops).await.map_err(err)?;
         *prev = s.h;
         Ok((gas, ops.len()))
     }
 
+    /// The backend for `rid`: sealed for a private repo, so it prices the sealed size.
+    async fn for_repo<'b, B: Arkiv>(
+        &self,
+        a: &'b B,
+        rid: &Rid,
+    ) -> Result<charter_private::ForRepo<'b, B>, String> {
+        charter_private::for_repo(a, &self.cfg, Some(&self.keys), rid)
+            .await
+            .map_err(err)
+    }
+
     pub async fn prepare(&self, d: Draft) -> Result<(Draft, Estimate), String> {
+        let b = self.for_repo(&*self.a, &d.rid).await?;
         let tmp = Keys::from_seed(MasterSeed::generate().map_err(err)?);
-        let (mut prev, mut bind) = (ZERO, !self.bound(&d.rid).await?);
-        let base_fee = self.a.base_fee().await.map_err(err)?;
+        let (mut prev, mut bind) = (ZERO, !self.bound(&b, &d.rid).await?);
+        let base_fee = b.base_fee().await.map_err(err)?;
         let control = self.keys.control_address(&d.rid);
         let (w, mut have) =
-            futures_util::future::try_join(self.a.balance(self.wallet()), self.a.balance(control))
+            futures_util::future::try_join(b.balance(self.wallet()), b.balance(control))
                 .await
                 .map_err(err)?;
         let mut e = Estimate {
@@ -147,7 +162,7 @@ impl<A: Arkiv> Ctx<A> {
             let step = Self::resolve(step).await?;
             let op = match &step {
                 Step::Deposit { amount, purpose } => {
-                    let appt = ledger::load(&*self.a, &d.rid).await.map_err(|e| {
+                    let appt = ledger::load(&b, &d.rid).await.map_err(|e| {
                         format!("this repo has no escrow to fund a bounty through: {e}")
                     })?;
                     // The escrow transfer goes from the wallet itself: never topped up.
@@ -157,7 +172,7 @@ impl<A: Arkiv> Ctx<A> {
                 }
                 _ => step.clone(),
             };
-            let (gas, n) = self.op_gas(&tmp, &d, &op, &mut prev, &mut bind).await?;
+            let (gas, n) = self.op_gas(&b, &tmp, &d, &op, &mut prev, &mut bind).await?;
             self.control_tx(&mut e, &mut have, gas, base_fee);
             e.entities += n;
             steps.push(step);
@@ -182,7 +197,7 @@ impl<A: Arkiv> Ctx<A> {
         *have = have.saturating_sub(U256::from(gas) * U256::from(base_fee + pc.tip));
     }
 
-    async fn run(&self, tap: &Tap<A>, d: &Draft) -> Result<Vec<Hash32>, String> {
+    async fn run<B: Arkiv>(&self, tap: &B, d: &Draft) -> Result<Vec<Hash32>, String> {
         let (cfg, keys) = (&self.cfg, &self.keys);
         let (mut prev, mut ids) = (ZERO, vec![]);
         for step in &d.steps {
@@ -218,7 +233,10 @@ impl<A: Arkiv> Ctx<A> {
             a: self.a.clone(),
             status: status.clone(),
         };
-        let out = self.run(&tap, &d).await;
+        let out = match self.for_repo(&tap, &d.rid).await {
+            Ok(b) => self.run(&b, &d).await,
+            Err(e) => Err(e),
+        };
         let last = status.lock().ok().and_then(|s| s.txs.last().copied());
         let block = match (&out, last) {
             (Ok(_), Some(h)) => tap.receipt(h).await.ok().flatten().map(|r| r.block_number),
