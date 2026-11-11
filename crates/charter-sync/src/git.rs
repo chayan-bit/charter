@@ -293,9 +293,11 @@ impl Git {
         Ok(if empty { vec![] } else { bytes })
     }
 
-    /// Self-contained packs of everything reachable from `tips` (format v2 snapshots).
+    /// Self-contained packs of everything reachable from `tips` (format v2 snapshots), with
+    /// deltas searched afresh: a snapshot is paid for by the byte and kept for 30 days, and
+    /// window 50 cuts it by 9% on Charter's own repo for under 0.5 s (speed-and-cost 2.8).
     pub fn full_packs_of(&self, tips: &[String], prefix: &Path) -> Result<Vec<PathBuf>> {
-        self.full_packs(tips, &[], prefix)
+        self.full_packs_with(tips, &[], prefix, SNAPSHOT_PACK_ARGS)
     }
 
     /// At most one thin pack; `None` when it would exceed the 100 MiB manifest cap.
@@ -337,19 +339,28 @@ impl Git {
         exclude: &[String],
         prefix: &Path,
     ) -> Result<Vec<PathBuf>> {
+        self.full_packs_with(tips, exclude, prefix, &[])
+    }
+
+    fn full_packs_with(
+        &self,
+        tips: &[String],
+        exclude: &[String],
+        prefix: &Path,
+        extra: &[&str],
+    ) -> Result<Vec<PathBuf>> {
         let input = rev_input(tips, exclude);
         let prefix_s = prefix.to_string_lossy().into_owned();
-        let out = self.run(
-            &[
-                "pack-objects",
-                "--revs",
-                "-q",
-                "--max-pack-size=100m",
-                "--delta-base-offset",
-                &prefix_s,
-            ],
-            input.as_bytes(),
-        )?;
+        let mut args = vec![
+            "pack-objects",
+            "--revs",
+            "-q",
+            "--max-pack-size=100m",
+            "--delta-base-offset",
+        ];
+        args.extend_from_slice(extra);
+        args.push(&prefix_s);
+        let out = self.run(&args, input.as_bytes())?;
         let mut packs = vec![];
         for hash in String::from_utf8_lossy(&out).lines() {
             let pack = PathBuf::from(format!("{prefix_s}-{hash}.pack"));
@@ -449,7 +460,9 @@ impl Git {
     }
 }
 
-/// Object count from a pack header (0 for an empty pack).
+/// `pack-objects` options of snapshot packs (MEASURED in speed-and-cost 2.8).
+const SNAPSHOT_PACK_ARGS: &[&str] = &["--no-reuse-delta", "--window=50"];
+
 /// Largest pack one manifest can name (1,600 chunks of 64 KiB).
 const MAX_PACK_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -468,6 +481,7 @@ fn rev_input(tips: &[String], exclude: &[String]) -> String {
     input
 }
 
+/// Object count from a pack header (0 for an empty pack).
 pub fn pack_object_count(pack: &Path) -> Result<u32> {
     use std::io::Read;
     let mut f = std::fs::File::open(pack).map_err(|e| SyncError::io(pack.display(), e))?;
@@ -478,4 +492,73 @@ pub fn pack_object_count(pack: &Path) -> Result<u32> {
         return Err(SyncError::coded(ErrorCode::BadPack, "not a git pack"));
     }
     Ok(u32::from_be_bytes([h[8], h[9], h[10], h[11]]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    fn noise(len: usize) -> Vec<u8> {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    }
+
+    /// Two near-identical 200 KB blobs, packed without deltas (as old pushes leave them).
+    fn undeltified_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = tmp.path();
+        sh(d, &["init", "-q"]);
+        let mut blob = noise(200_000);
+        std::fs::write(d.join("a.bin"), &blob).expect("write");
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-qm", "one"]);
+        blob[100] ^= 1;
+        std::fs::write(d.join("a.bin"), &blob).expect("write");
+        sh(d, &["commit", "-qam", "two"]);
+        sh(d, &["repack", "-adq", "--window=0", "--depth=0"]);
+        tmp
+    }
+
+    #[test]
+    fn snapshot_packs_recompute_deltas_the_cache_lacks() {
+        let tmp = undeltified_repo();
+        let g = Git::work(Some(tmp.path()));
+        let head = sh(tmp.path(), &["rev-parse", "HEAD"]);
+        let packs = g
+            .full_packs_of(&[head], &tmp.path().join("snap"))
+            .expect("pack");
+        let size: u64 = packs
+            .iter()
+            .map(|p| p.metadata().expect("meta").len())
+            .sum();
+        assert!(size < 300_000, "second blob stored as a delta: {size} B");
+    }
 }
