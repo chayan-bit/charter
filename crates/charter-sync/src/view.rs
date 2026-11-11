@@ -104,24 +104,26 @@ pub fn identity_filter(rid: &Rid) -> Pred {
     Pred::And(vec![b32("ag.rid", rid), kinds])
 }
 
-/// Identity rows another step of this command just read (the private-repo check).
-static PREFETCHED: std::sync::Mutex<Option<(Rid, std::time::Instant, Vec<Observed>)>> =
-    std::sync::Mutex::new(None);
+/// Identity rows another step of this command just read (the private-repo check), by
+/// repo: a process syncing several repos at once (`chart ui`, tests) keeps each its own.
+type Prefetched = BTreeMap<Rid, (std::time::Instant, Vec<Observed>)>;
+static PREFETCHED: std::sync::Mutex<Prefetched> = std::sync::Mutex::new(BTreeMap::new());
 /// How long prefetched identity rows stand in for a fresh read.
 const PREFETCH_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Hands the rows of [`identity_filter`] to the next [`identity`] of `rid`, which uses them
 /// once (within [`PREFETCH_TTL`]) instead of querying again.
 pub fn prefetched_identity(rid: &Rid, rows: Vec<Observed>) {
-    if let Ok(mut slot) = PREFETCHED.lock() {
-        *slot = Some((*rid, std::time::Instant::now(), rows));
+    if let Ok(mut slots) = PREFETCHED.lock() {
+        slots.retain(|_, (at, _)| at.elapsed() < PREFETCH_TTL);
+        slots.insert(*rid, (std::time::Instant::now(), rows));
     }
 }
 
 fn take_prefetched(rid: &Rid) -> Option<Vec<Observed>> {
-    let mut slot = PREFETCHED.lock().ok()?;
-    match slot.take() {
-        Some((r, at, rows)) if r == *rid && at.elapsed() < PREFETCH_TTL => Some(rows),
+    let mut slots = PREFETCHED.lock().ok()?;
+    match slots.remove(rid) {
+        Some((at, rows)) if at.elapsed() < PREFETCH_TTL => Some(rows),
         _ => None,
     }
 }
@@ -446,4 +448,19 @@ fn collect_equivocations(peers: &BTreeMap<Nid, PeerView>) -> Vec<Equivocation> {
     v.sort();
     v.dedup();
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefetched_identity_rows_of_one_repo_survive_another_repos_prefetch() {
+        let (a, b): (Rid, Rid) = ([0xa1; 32], [0xb2; 32]);
+        prefetched_identity(&a, vec![]);
+        prefetched_identity(&b, vec![]);
+        assert!(take_prefetched(&a).is_some(), "b's rows must not evict a's");
+        assert!(take_prefetched(&a).is_none(), "used once");
+        assert!(take_prefetched(&b).is_some());
+    }
 }
