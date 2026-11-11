@@ -18,7 +18,7 @@ use crate::{Result, SyncError};
 
 /// Blocks after `at` a body may land in and still be found (head-model 5.4).
 pub const LANDING_WINDOW: u64 = 64;
-/// Retries of the nonce bracket while `C_d` is mid-push.
+/// Retries of the full nonce bracket while `C_d` is mid-push.
 const NONCE_RETRIES: usize = 4;
 
 /// One device of an identity and its accepted head (none before its first push).
@@ -58,14 +58,18 @@ fn addr(a: &[u8; 20]) -> charter_store::Address {
     charter_store::Address::from(*a)
 }
 
-/// Head rows of `dev`, read between two `entityNonce(C_d)` reads that agree.
-async fn bracket<A: Arkiv>(a: &A, rid: &Rid, dev: &Device) -> Result<(Vec<Observed>, HeadNonce)> {
-    let filter = Pred::And(vec![
+fn head_filter(rid: &Rid, dev: &Device) -> Pred {
+    Pred::And(vec![
         kind(Kind::Head),
         b32("ag.rid", rid),
         b32("ag.dev", &dev.nid),
         creators(&[dev.control].into()),
-    ]);
+    ])
+}
+
+/// Head rows of `dev`, read between two `entityNonce(C_d)` reads that agree.
+async fn bracket<A: Arkiv>(a: &A, rid: &Rid, dev: &Device) -> Result<(Vec<Observed>, HeadNonce)> {
+    let filter = head_filter(rid, dev);
     let mut last = None;
     for _ in 0..=NONCE_RETRIES {
         let before = a.entity_nonce(addr(&dev.control)).await?;
@@ -84,7 +88,93 @@ async fn bracket<A: Arkiv>(a: &A, rid: &Rid, dev: &Device) -> Result<(Vec<Observ
     last.ok_or_else(|| SyncError::coded(ErrorCode::InconsistentView, "no nonce observation"))
 }
 
-async fn device_view<A: Arkiv>(
+/// One device's head rows and the `entityNonce(C_d)` reads around them, already made.
+#[derive(Debug, Clone)]
+pub struct DeviceRead {
+    pub device: Device,
+    pub rows: Vec<Observed>,
+    pub nonce: HeadNonce,
+}
+
+impl DeviceRead {
+    /// The head rows of `dev`, then one `entityNonce(C_d)` read (head-model 6, short form).
+    pub async fn quick<A: Arkiv>(a: &A, rid: &Rid, dev: &Device) -> Result<Self> {
+        let rows = all(a, head_filter(rid, dev)).await?;
+        let n = a.entity_nonce(addr(&dev.control)).await?;
+        Ok(Self::after(dev, rows, n))
+    }
+
+    /// `rows`, and `n` read from `entityNonce(C_d)` after them.
+    pub fn after(dev: &Device, rows: Vec<Observed>, n: u64) -> Self {
+        let nonce = HeadNonce {
+            address: dev.control,
+            before: n,
+            after: n,
+        };
+        Self {
+            device: dev.clone(),
+            rows,
+            nonce,
+        }
+    }
+
+    /// The full `entityNonce` bracket around the head rows of `dev`.
+    pub async fn bracketed<A: Arkiv>(a: &A, rid: &Rid, dev: &Device) -> Result<Self> {
+        let (rows, nonce) = bracket(a, rid, dev).await?;
+        Ok(Self {
+            device: dev.clone(),
+            rows,
+            nonce,
+        })
+    }
+}
+
+fn accept(
+    rid: &Rid,
+    nid: &Nid,
+    identity: &IdentityChain,
+    state: &State,
+    r: &DeviceRead,
+) -> Result<Option<DeviceHead>> {
+    let (dev, rows, nonce) = (&r.device, &r.rows, &r.nonce);
+    let mark = state.device_mark(&dev.nid)?;
+    let m = mark.as_ref();
+    Ok(match state.sent_head(&dev.nid)? {
+        Some(sent) => accept_own_device_head(rid, nid, dev, identity, rows, nonce, m, &sent)?,
+        None => accept_device_head(rid, nid, dev, identity, rows, nonce, m)?,
+    })
+}
+
+/// The head accounts for exactly what `C_d` created by the nonce read.
+fn exact(head: Option<&DeviceHead>, nonce: &HeadNonce) -> bool {
+    nonce.before == nonce.after
+        && nonce.before == head.map_or(0, |h| h.body.pieces_created.saturating_add(1))
+}
+
+fn device_view(r: DeviceRead, head: Option<DeviceHead>) -> DeviceView {
+    if !exact(head.as_ref(), &r.nonce) && head.is_some() {
+        crate::warn(
+            "this device's head accounts for fewer entities than its control address created \
+             (a copy of this device seed pushed at the same time); the next push repairs it",
+        );
+    }
+    DeviceView {
+        device: r.device,
+        head,
+        nonce: r.nonce,
+        rows: r.rows,
+    }
+}
+
+/// The head of `dev`: rows then one nonce read, taken when the head accounts for exactly
+/// that nonce; anything else (a push in between, a repair, a failure) reads again inside
+/// the full bracket and decides there.
+///
+/// Why one nonce after the rows suffices (head-model 6): along a device's body chain
+/// `pieces_created` strictly increases, and once a body lands `entityNonce(C_d)` is at least
+/// its `pieces_created + 1` forever. A nonce read after the rows that equals the rows' head
+/// `pieces_created + 1` is therefore below every newer body's, so no newer body had landed.
+async fn read_device<A: Arkiv>(
     a: &A,
     rid: &Rid,
     nid: &Nid,
@@ -92,28 +182,15 @@ async fn device_view<A: Arkiv>(
     identity: &IdentityChain,
     state: &State,
 ) -> Result<DeviceView> {
-    let (rows, nonce) = bracket(a, rid, &dev).await?;
-    let mark = state.device_mark(&dev.nid)?;
-    let m = mark.as_ref();
-    let head = match state.sent_head(&dev.nid)? {
-        Some(sent) => accept_own_device_head(rid, nid, &dev, identity, &rows, &nonce, m, &sent)?,
-        None => accept_device_head(rid, nid, &dev, identity, &rows, &nonce, m)?,
-    };
-    if head
-        .as_ref()
-        .is_some_and(|h| h.body.pieces_created + 1 != nonce.before)
+    let quick = DeviceRead::quick(a, rid, &dev).await?;
+    if let Ok(head) = accept(rid, nid, identity, state, &quick)
+        && exact(head.as_ref(), &quick.nonce)
     {
-        crate::warn(
-            "this device's head accounts for fewer entities than its control address created \
-             (a copy of this device seed pushed at the same time); the next push repairs it",
-        );
+        return Ok(device_view(quick, head));
     }
-    Ok(DeviceView {
-        device: dev,
-        head,
-        nonce,
-        rows,
-    })
+    let full = DeviceRead::bracketed(a, rid, &dev).await?;
+    let head = accept(rid, nid, identity, state, &full)?;
+    Ok(device_view(full, head))
 }
 
 /// The v2 view of identity `nid` from its device delegation rows (anchor kind, `ag.v = 2`).
@@ -129,9 +206,42 @@ pub async fn build<A: Arkiv>(
     let devs = devices(rid, info, device_rows);
     let views = try_join_all(
         devs.into_iter()
-            .map(|d| device_view(a, rid, nid, d, identity, state)),
+            .map(|d| read_device(a, rid, nid, d, identity, state)),
     )
     .await?;
+    merged(a, rid, views, state).await
+}
+
+/// The devices of `nid` that `device_rows` delegate (what [`build_from`] needs reads of).
+pub fn delegated(rid: &Rid, info: &PeerInfo, device_rows: &[Observed]) -> Vec<Device> {
+    devices(rid, info, device_rows)
+}
+
+/// The v2 view of identity `nid` from head rows and nonces the caller already read: every
+/// head accepted under its reads (no retry here), then merged. The network is used only
+/// when a merge tie needs a body's landing block.
+pub async fn build_from<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    nid: &Nid,
+    identity: &IdentityChain,
+    reads: Vec<DeviceRead>,
+    state: &State,
+) -> Result<V2> {
+    let mut views = Vec::with_capacity(reads.len());
+    for r in reads {
+        let head = accept(rid, nid, identity, state, &r)?;
+        views.push(device_view(r, head));
+    }
+    merged(a, rid, views, state).await
+}
+
+async fn merged<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    views: Vec<DeviceView>,
+    state: &State,
+) -> Result<V2> {
     let mut landings: BTreeMap<Hash32, LandingJson> = views
         .iter()
         .filter_map(|v| v.head.as_ref())
