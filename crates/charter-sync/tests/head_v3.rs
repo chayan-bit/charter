@@ -384,7 +384,7 @@ async fn a_head_patch_that_grows_by_almost_its_whole_calldata_lands_in_one_tx() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_push_whose_snapshot_is_due_whatever_it_sends_skips_brotli() {
+async fn a_push_whose_snapshot_is_due_whatever_it_sends_builds_no_thin_pack() {
     let net = Net::new();
     let alice = Peer::new(&net, 1);
     let rid = init(&net, &alice, "due").await;
@@ -428,6 +428,10 @@ async fn a_push_whose_snapshot_is_due_whatever_it_sends_skips_brotli() {
         .expect("small push");
     commit(&work, &[("c.txt", b"three")], "feat: three");
     let (snapshot, thin, stored) = plan_of(work.clone()).await;
-    assert!(snapshot && thin > 0, "due with any new piece");
-    assert_eq!(stored, 0, "the thin pack is never brotli-encoded");
+    assert!(snapshot, "due with any new piece");
+    assert_eq!(
+        (thin, stored),
+        (0, 0),
+        "the thin pack is neither built nor encoded"
+    );
 }

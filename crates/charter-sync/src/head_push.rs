@@ -5,8 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use charter_core::{
-    DeviceHead, ErrorCode, Hash32, HeadFormat, HeadRef, Merged, Nid, Pack, PackPieces, PieceRef,
-    PieceRun, RefEntry, RefsBody, Winner, ZERO, codec, is_device_row, next_entries, resolve_stamps,
+    DeviceHead, ErrorCode, Hash32, HeadFormat, HeadRef, MAX_PACK_SIZE, Merged, Nid, Pack,
+    PackPieces, PieceRef, PieceRun, RefEntry, RefsBody, Winner, ZERO, codec, is_device_row,
+    next_entries, resolve_stamps,
 };
 use charter_store::Arkiv;
 
@@ -375,14 +376,6 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             .iter()
             .flat_map(|v| v.heads())
             .any(|(_, h)| !h.body.snapshot.is_empty());
-        // Without a snapshot this push writes one, so a thin pack would go unused.
-        let thin = match tips.is_empty() || !has_snapshot {
-            true => vec![],
-            false => {
-                let max = charter_core::MAX_PACK_SIZE;
-                self.repo.git().thin_pack_bytes(&tips, &exclude, max)?
-            }
-        };
         let carried = carried(prev.as_ref());
         let layers = match (&prev, has_snapshot) {
             (Some(p), true) => {
@@ -393,13 +386,24 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             _ => vec![],
         };
         let due = |new: usize| !has_snapshot || snapshot_due(&layers, &carried, new);
-        // A snapshot due however small the pack compresses never sends it: no brotli.
-        let forced = !thin.is_empty() && due(1);
-        let (codec, stored) = match thin.is_empty() || forced {
+        // A push whose snapshot is due with any new piece (always so without a snapshot)
+        // never sends a thin pack, so it neither builds nor encodes one.
+        // shortcut: a refs-only push right at the threshold refreshes one push early.
+        let forced = !tips.is_empty() && due(1);
+        let thin = match tips.is_empty() || forced {
+            true => vec![],
+            false => self
+                .repo
+                .git()
+                .thin_pack_bytes(&tips, &exclude, MAX_PACK_SIZE)?,
+        };
+        // Its zlib fallback can still pass what readers decode: send a snapshot instead.
+        let oversize = thin.len() as u64 > MAX_PACK_SIZE;
+        let (codec, stored) = match thin.is_empty() || oversize {
             true => (codec::Codec::Raw, vec![]),
             false => codec::encode(&thin),
         };
-        let snapshot = forced || due(stored.len());
+        let snapshot = forced || oversize || due(stored.len());
         let keep_layers = match snapshot {
             true => layers_to_keep(&layers, |t| self.repo.git().has_pack(t)),
             false => vec![],

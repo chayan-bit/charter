@@ -305,7 +305,8 @@ Clones ran from empty homes and match the pusher's `HEAD` and pass `git fsck --f
   v3 builds no thin pack, then three raw packs with `--no-reuse-delta --window=50` (11.2 s, 71 CPU s) and brotli q6 (4.4 s): 77.7 MB stored, -42%.
   Window 10 instead would take 9.8 s (35 CPU s) plus 6.4 s of brotli for 97.4 MB in five packs, so window 50 is both faster end to end and smaller.
   The 12.4 s of extra CPU buys 56 MB fewer bytes on chain, which at the measured 10 MiB push rate (about 0.1 MB/s, 2.7) is several minutes and about 3.4 tGLM less (3.92M gas per 64 KiB chunk, section 1), so the setting stays unconditional.
-- A push whose snapshot is due however small its pack compresses (64 carried packs, 256 pieces, or carried pieces alone over the refresh threshold) builds the thin pack only to size the decision and skips its brotli.
+- A push whose snapshot is due with any new piece (64 carried packs, 256 pieces, or carried pieces alone over the refresh threshold) builds no thin pack and runs no brotli; a refs-only push right at that threshold therefore refreshes one push early.
+- A thin pack whose zlib fallback still passes the 100 MiB decode cap is sent as a snapshot instead.
 - A v3 reader's cache holds text objects without zlib (4.2 MB against 2.9 MB for this repo); repacking them in the fetch would cost the clone time it saves, so it is not done (head-model 13.3).
 
 #### Rerun after the review fixes (2026-11-11, MEASURED)
