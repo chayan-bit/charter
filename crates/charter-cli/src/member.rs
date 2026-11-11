@@ -16,23 +16,26 @@ use crate::cmd::InitArgs;
 pub enum MemberCmd {
     /// Publish a fresh MLS key package and print its id for an admin.
     Keypackage,
-    /// Admin only: add the owner of a key package with a role (admin, write or read).
+    /// Admin only: add the owner of a key package with a role (admin, write or read), or
+    /// with --device another device of an existing member (its role is kept).
     Add {
         #[arg(long)]
         repo: String,
         #[arg(long = "key-package")]
         key_package: String,
-        #[arg(long, default_value = "write")]
+        #[arg(long, default_value = "write", conflicts_with = "device")]
         role: Role,
+        #[arg(long)]
+        device: bool,
     },
-    /// Admin only: remove a member, which rotates the content key.
+    /// Admin only: remove a member from all of its devices, which rotates the keys.
     Remove {
         #[arg(long)]
         repo: String,
         #[arg(long)]
         member: String,
     },
-    /// Members and roles of a private repo.
+    /// Members, roles and device (MLS leaf) counts of a private repo.
     List {
         #[arg(long)]
         repo: String,
@@ -73,23 +76,32 @@ pub async fn member_cmd<A: Arkiv>(a: &A, cfg: &Config, cmd: &MemberCmd) -> Resul
             repo,
             key_package,
             role,
+            device,
         } => {
             let rid = rid_of(repo)?;
             let kp = unhex32(key_package)?;
-            let nid = charter_private::add_member(a, cfg, &keys, &rid, &kp, *role).await?;
-            println!("added {} as {role:?}", to_text(&nid));
+            if *device {
+                let nid = charter_private::add_device(a, cfg, &keys, &rid, &kp).await?;
+                println!("added a device of {}", to_text(&nid));
+            } else {
+                let nid = charter_private::add_member(a, cfg, &keys, &rid, &kp, *role).await?;
+                println!("added {} as {role:?}", to_text(&nid));
+            }
         }
         MemberCmd::Remove { repo, member } => {
             let (rid, nid): (_, Nid) = (rid_of(repo)?, parse_id(member)?);
             charter_private::remove_member(a, cfg, &keys, &rid, &nid).await?;
-            println!("removed {}; the content key rotated", to_text(&nid));
+            println!(
+                "removed {} from every device; the keys rotated",
+                to_text(&nid)
+            );
         }
         MemberCmd::List { repo } => {
-            let (_, ring) = charter_private::member_ring(a, cfg, &keys, &rid_of(repo)?).await?;
-            println!("epoch {}", ring.current()?.0);
-            for (nid, role) in &ring.roles {
-                let nid = unhex32(nid).map(|n| to_text(&n))?;
-                println!("{nid} {role:?}");
+            let (epoch, list) = charter_private::members(a, cfg, &keys, &rid_of(repo)?).await?;
+            println!("epoch {epoch}");
+            for (nid, role, leaves) in list {
+                let s = if leaves == 1 { "" } else { "s" };
+                println!("{} {role:?} {leaves} device{s}", to_text(&nid));
             }
         }
     }
