@@ -246,7 +246,10 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
 - For a v2 update, `RefUpdate.old` is the signed `base` of the winning entry, and `ff` is true exactly when the identity's previously accepted value equals that base; the fold never looks at git ancestry for a v2 update, so a fresh clone missing old objects and a long-lived client reach the same verdict.
 - The base is the writer's claim, so every fetch checks it where all clients hold the same objects: after the connectivity check, each winning entry of every synced v2 peer must have a base that is an ancestor of its oid (or no base), else that peer's head is refused with `E_BAD_REFS` (a delegate's refusal fails the fetch).
   This holds for every client because the live refs' full history is in every cache after a fetch.
-  Not covered: a body with a false base that the same device replaces before any client fetched it is only seen by the fold, which does not check ancestry; the forced commit stays visible in the walked history, and readers that synced while it was current refused it.
+  The fold runs the same check on the winning entries of every body it walks, so a false base that the same device covers with its next body before any client fetched it is still refused with `E_BAD_REFS` by every client that holds both commits.
+  A check that git cannot decide (an object is absent) passes; honest bodies never fail it, so clients only differ where one of them holds proof of a forgery, and that client fails closed.
+  The check runs on every fold and is never cached, so a fold checkpoint made by a client that lacked the objects cannot hide a later refusal.
+  Not covered: a forgery whose forced commit is absent from every client's objects (it can then never be proven, and no live ref reaches it).
 - Fetched bodies are cached under the repo directory (`git/arkiv-head-bodies.json`), so each fetch walks only the bodies it has not seen.
 - What depends on block history: a fresh client of a pinned repo reads every body since the pin from calldata, which needs Rabdi to serve those transactions (it serves them back to block 1, section 12); the walk is bounded by the pin, so re-pinning a program resets it.
   If that history were pruned, the fold fails closed with `E_CONTROL_NOT_LIVE` instead of guessing.

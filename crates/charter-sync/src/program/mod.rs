@@ -433,12 +433,40 @@ async fn v2_timelines<A: Arkiv>(
             continue;
         };
         let bodies = heads::identity_bodies(a, &view.rid, v2, stop, &mut cache).await?;
-        out.insert(*nid, heads::timeline(&bodies));
+        let timeline = heads::timeline(&bodies);
+        check_walked_bases(git, nid, &timeline)?;
+        out.insert(*nid, timeline);
     }
     if let Some(p) = &path {
         cache.save(p)?;
     }
     Ok(out)
+}
+
+/// Head-model 8: a winning entry of any walked body whose signed base git proves is not an
+/// ancestor of its oid is `E_BAD_REFS`. Absent objects (`None`) pass: honest bodies never
+/// give `Some(false)`, so clients only differ where one of them holds proof of a forgery.
+/// Run on every fold, never cached, so a checkpoint made without the objects hides nothing.
+fn check_walked_bases(git: &Git, nid: &Nid, timeline: &[(u64, Merged)]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for (name, w) in timeline.iter().flat_map(|(_, m)| m.iter()) {
+        let e = &w.entry;
+        if e.is_tombstone() || e.base.is_empty() || e.base == e.oid {
+            continue;
+        }
+        if seen.insert((&e.base, &e.oid)) && is_ancestor(git, &e.base, &e.oid) == Some(false) {
+            return Err(SyncError::coded(
+                ErrorCode::BadRefs,
+                format!(
+                    "peer {} signed {name} at {} with base {}, which is not its ancestor",
+                    crate::ids::to_text(nid),
+                    hex::encode(&e.oid),
+                    hex::encode(&e.base)
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn kind_is(o: &charter_core::Observed, k: Kind) -> bool {

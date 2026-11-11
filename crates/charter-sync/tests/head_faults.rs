@@ -519,3 +519,69 @@ async fn a_repair_never_overwrites_a_head_a_copied_seed_landed_after_the_plan() 
     let names: Vec<&str> = refs.refs.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["refs/heads/main", "refs/heads/t-branch"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_base_covered_by_the_next_body_before_any_fetch_fails_the_fold() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "covered-base").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    pushed(&net, &alice, &rid, tmp.path(), 1).await;
+    let src = include_str!("../../../programs/bounty.rhai");
+    charter_sync::program::publish(&net, &alice.cfg, &alice.keys, &rid, "rhai/1", src)
+        .await
+        .expect("publish");
+    let pin = charter_core::ProgramPin {
+        engine: "rhai/1".into(),
+        hash: charter_program::Program::hash(src),
+    };
+    let st = charter_sync::state::State::default();
+    charter_sync::identity::propose(&net, &alice.cfg, &alice.keys, &rid, &st, |b| {
+        charter_core::IdBody {
+            program: Some(pin),
+            ..b.clone()
+        }
+    })
+    .await
+    .expect("pin");
+    let work = tmp.path().join("work");
+    let accepted = hex::decode(rev(&work, "HEAD")).expect("hex");
+    git(&work, &["checkout", "-q", "--orphan", "x"]);
+    commit(&work, &[("x", b"unrelated")], "feat: x");
+    let ra = alice.repo(&rid);
+    let forced = charter_sync::Update {
+        src: Some("refs/heads/x".into()),
+        dst: "refs/heads/main".into(),
+    };
+    let hp = Box::pin(prepare2(&net, &alice, &ra, &work, &[forced]))
+        .await
+        .expect("prepare");
+    // A modified client: the cover push is listed before the forgery, so its own sync
+    // never refuses the forged body.
+    git(&work, &["checkout", "-q", "-b", "cover"]);
+    commit(&work, &[("c", b"cover")], "feat: cover");
+    let cover = Box::pin(prepare2(
+        &net,
+        &alice,
+        &ra,
+        &work,
+        &[upd("refs/heads/cover")],
+    ))
+    .await
+    .expect("prepare cover");
+    let state = charter_sync::state::State::load(&ra.state_path()).expect("state");
+    let mut plan = Box::pin(hp.plan(&state)).await.expect("plan");
+    for e in plan.refs.iter_mut().filter(|e| e.name == "refs/heads/main") {
+        e.base = accepted.clone();
+    }
+    Box::pin(hp.finish(plan)).await.expect("forged body lands");
+    // The next body (a new branch) clears the forged base before any reader fetched.
+    let state = charter_sync::state::State::load(&ra.state_path()).expect("state");
+    let plan = Box::pin(cover.plan(&state)).await.expect("plan cover");
+    Box::pin(cover.finish(plan)).await.expect("cover lands");
+    drop(ra);
+
+    let carol = Peer::new(&net, 3);
+    let r = Box::pin(clone_into(&net, &carol, &rid, &tmp.path().join("c"))).await;
+    assert_eq!(code(r), "E_BAD_REFS", "the fold sees the forged base");
+}
