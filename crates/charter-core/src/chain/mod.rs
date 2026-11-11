@@ -15,7 +15,7 @@ pub use anchor::{AnchorChain, AnchorLink, Start, anchor_chain};
 pub use bind::{BindChain, BindLink, bind_chain};
 pub use cob::{VerifiedOp, verify_ops, verify_ops_after};
 pub use head::{
-    Device, DeviceHead, EntryUpdate, HeadNonce, Merged, Winner, accept_device_head,
+    Device, DeviceHead, EntryUpdate, HeadFormat, HeadNonce, Merged, Winner, accept_device_head,
     accept_own_device_head, check_head_nonce, devices, is_device_row, merge, merged_refs,
     next_entries, resolve_stamps,
 };

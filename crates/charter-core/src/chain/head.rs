@@ -9,8 +9,8 @@ use crate::attrs::AttrValue;
 use crate::marks::PeerMark;
 use crate::types::{Address, Hash32, Nid, Observed, Position, Rid};
 use crate::{
-    DEVICE_LAYOUT_VERSION, DeviceBody, Entity, HeadBody, HeadRef, Plane, RefEntry, RefsBody,
-    VerifyError,
+    DEVICE_LAYOUT_VERSION, DeviceBody, Entity, HeadBody, HeadBodyV3, HeadRef, Pack, Plane,
+    RefEntry, RefsBody, VerifyError,
 };
 use charter_crypto::PublicKey;
 
@@ -67,13 +67,26 @@ pub struct HeadNonce {
     pub after: u64,
 }
 
+/// The wire format of a device head body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadFormat {
+    /// `ag.v = 1`, envelope kind `head` (head-model 4.2).
+    V2,
+    /// `ag.v = 3`, envelope kind `head3` (head-model 13).
+    V3,
+}
+
 /// An accepted device head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceHead {
     pub device: Nid,
     pub control: Address,
     pub key: Hash32,
+    /// The fields both formats share; `body.packs` is empty for a v3 head, read [`Self::packs`].
     pub body: HeadBody,
+    pub format: HeadFormat,
+    /// The packs since the snapshot, in either format.
+    pub packs: Vec<Pack>,
     pub h: Hash32,
     pub envelope_bytes: Vec<u8>,
     /// `$createdAt` of the head entity.
@@ -92,7 +105,51 @@ impl DeviceHead {
     }
 }
 
-fn to_head(e: Entity<HeadBody>, dev: &Device, updated_at: u64) -> DeviceHead {
+/// A head row opened in either format: the shared fields as a v2 body, and its packs.
+struct Opened {
+    e: Entity<HeadBody>,
+    format: HeadFormat,
+    packs: Vec<Pack>,
+}
+
+impl Opened {
+    fn v2(e: Entity<HeadBody>) -> Self {
+        let packs = e.body.packs.iter().map(Pack::from_v2).collect();
+        Self {
+            e,
+            format: HeadFormat::V2,
+            packs,
+        }
+    }
+
+    /// `None` only for a codec a validated body cannot carry.
+    fn v3(e: Entity<HeadBodyV3>) -> Option<Self> {
+        let packs = e
+            .body
+            .packs
+            .iter()
+            .map(Pack::from_v3)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        let body = e.body.shared();
+        Some(Self {
+            e: Entity {
+                position: e.position,
+                creator: e.creator,
+                expires_at: e.expires_at,
+                envelope: e.envelope,
+                body,
+                h: e.h,
+                envelope_bytes: e.envelope_bytes,
+            },
+            format: HeadFormat::V3,
+            packs,
+        })
+    }
+}
+
+fn to_head(o: Opened, dev: &Device, updated_at: u64) -> DeviceHead {
+    let e = o.e;
     DeviceHead {
         device: dev.nid,
         control: dev.control,
@@ -102,6 +159,8 @@ fn to_head(e: Entity<HeadBody>, dev: &Device, updated_at: u64) -> DeviceHead {
         updated_at,
         envelope_bytes: e.envelope_bytes,
         body: e.body,
+        format: o.format,
+        packs: o.packs,
     }
 }
 
@@ -128,21 +187,33 @@ pub fn check_head_nonce(
     Ok(())
 }
 
-/// The one validly signed head of `dev` among `observed`, without the nonce check.
+/// The one validly signed head of `dev` among `observed`, in either format, without the
+/// nonce check.
 fn valid_head(
     rid: &Rid,
     nid: &Nid,
     dev: &Device,
     identity: &IdentityChain,
     observed: &[Observed],
-) -> Result<Option<Entity<HeadBody>>, VerifyError> {
-    let opened = open_all::<HeadBody>(observed);
-    // A head a newer client wrote: say so instead of reporting a missing head.
-    fail_unsupported(&opened.unsupported, &BTreeSet::from([dev.control]))?;
-    let mut valid: Vec<Entity<HeadBody>> = opened
+) -> Result<Option<Opened>, VerifyError> {
+    let v2 = open_all::<HeadBody>(observed);
+    let v3 = open_all::<HeadBodyV3>(observed);
+    // A head a newer client wrote (neither layout version): say so instead of reporting a
+    // missing head.
+    let unknown: Vec<(Address, Hash32)> = v2
+        .unsupported
+        .iter()
+        .filter(|u| v3.unsupported.contains(u))
+        .copied()
+        .collect();
+    fail_unsupported(&unknown, &BTreeSet::from([dev.control]))?;
+    let opened = v2
         .ok
         .into_iter()
-        .filter(|e| {
+        .map(Opened::v2)
+        .chain(v3.ok.into_iter().filter_map(Opened::v3));
+    let mut valid: Vec<Opened> = opened
+        .filter(|Opened { e, .. }| {
             e.envelope.signer == dev.nid
                 && e.creator == dev.control
                 && e.body.rid == *rid
@@ -162,11 +233,12 @@ fn valid_head(
 
 /// The local high-water mark (head-model 5.2 rule 5), then the accepted head.
 fn after_mark(
-    e: Entity<HeadBody>,
+    o: Opened,
     dev: &Device,
     observed: &[Observed],
     mark: Option<&PeerMark>,
 ) -> Result<DeviceHead, VerifyError> {
+    let e = &o.e;
     if let Some(m) = mark {
         if e.body.seq < m.seq {
             return Err(VerifyError::StaleHead {
@@ -181,8 +253,8 @@ fn after_mark(
     let up = observed
         .iter()
         .find(|o| o.key == e.position.key)
-        .map_or(e.position.block, |o| o.updated_at);
-    Ok(to_head(e, dev, up))
+        .map_or(e.position.block, |r| r.updated_at);
+    Ok(to_head(o, dev, up))
 }
 
 /// Accepts the head of `dev` (head-model 5.2) from the head rows of identity `nid`.
@@ -196,7 +268,7 @@ pub fn accept_device_head(
     mark: Option<&PeerMark>,
 ) -> Result<Option<DeviceHead>, VerifyError> {
     let head = valid_head(rid, nid, dev, identity, observed)?;
-    check_head_nonce(dev, head.as_ref().map(|e| &e.body), nonce)?;
+    check_head_nonce(dev, head.as_ref().map(|o| &o.e.body), nonce)?;
     head.map(|e| after_mark(e, dev, observed, mark)).transpose()
 }
 
@@ -225,8 +297,8 @@ pub fn accept_own_device_head(
         other => return other,
     };
     match valid_head(rid, nid, dev, identity, observed)? {
-        Some(e) if e.h == *sent && nonce.before == nonce.after => {
-            after_mark(e, dev, observed, mark).map(Some)
+        Some(o) if o.e.h == *sent && nonce.before == nonce.after => {
+            after_mark(o, dev, observed, mark).map(Some)
         }
         _ => Err(err),
     }

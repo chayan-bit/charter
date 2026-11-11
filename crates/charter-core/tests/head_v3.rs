@@ -1,8 +1,8 @@
 //! Format v3 (docs/p5/head-model.md section 13): compact piece runs, pack codecs, minimal
 //! head patches, and the stop of a v0.4.0 reader on a v3 head.
 //!
-//! `accept_device_head`, `open` and the v2 body here are unchanged since v0.4.0 (bda7571),
-//! so the first test runs the v0.4.0 reader itself against v3 rows.
+//! `common::v040` is the v0.4.0 (bda7571) head acceptance, so the first test runs the
+//! v0.4.0 reader itself against v3 rows; the current reader accepts them.
 
 mod common;
 
@@ -83,6 +83,117 @@ fn the_v040_reader_stops_on_a_v3_head_with_unsupported_version() {
     let (row, _) = observe(&peers()[1], &v3(w.rid, 0, 3), DEV_CONTROL, 41, 0);
     assert_eq!(row.attr("ag.v"), Some(&AttrValue::U64(3)));
     assert_eq!(row.attr("ag.kind"), Some(&AttrValue::Str("head".into())));
+    let err = common::v040::accept_device_head(
+        &w.rid,
+        &alice().nid,
+        &d,
+        &identity,
+        std::slice::from_ref(&row),
+        &nonce(2),
+    )
+    .expect_err("v0.4.0 cannot read v3");
+    assert_eq!(err.code(), ErrorCode::UnsupportedVersion);
+    assert_eq!(err.code().as_str(), "E_UNSUPPORTED_VERSION");
+}
+
+#[test]
+fn the_v040_reader_still_accepts_a_v2_head() {
+    let w = world();
+    let (_, identity, d) = device(w);
+    let body = v3(w.rid, 0, 3).shared();
+    let (row, _) = observe(&peers()[1], &body, DEV_CONTROL, 41, 0);
+    let head = common::v040::accept_device_head(
+        &w.rid,
+        &alice().nid,
+        &d,
+        &identity,
+        std::slice::from_ref(&row),
+        &nonce(2),
+    )
+    .expect("v2 head")
+    .expect("present");
+    assert_eq!(head.body, body);
+}
+
+#[test]
+fn a_v3_head_is_accepted_with_its_runs_codec_and_shared_fields() {
+    let w = world();
+    let (_, identity, d) = device(w);
+    let body = v3(w.rid, 0, 3);
+    let (row, h) = observe(&peers()[1], &body, DEV_CONTROL, 41, 0);
+    let head = accept_device_head(
+        &w.rid,
+        &alice().nid,
+        &d,
+        &identity,
+        std::slice::from_ref(&row),
+        &nonce(2),
+        None,
+    )
+    .expect("v3 head")
+    .expect("present");
+    assert_eq!(head.format, HeadFormat::V3);
+    assert_eq!(head.h, h);
+    assert_eq!(head.body, body.shared(), "shared fields, no v2 packs");
+    assert_eq!(
+        head.packs,
+        vec![Pack {
+            pack_id: [6; 32],
+            codec: codec::Codec::Brotli,
+            pieces: PackPieces::Runs(body.packs[0].runs.clone()),
+        }]
+    );
+    assert_eq!(head.packs[0].piece_count(), 3);
+}
+
+#[test]
+fn a_v2_head_lists_its_packs_as_tx_pieces() {
+    let w = world();
+    let (_, identity, d) = device(w);
+    let mut body = v3(w.rid, 0, 3).shared();
+    body.packs = vec![HeadPack {
+        pack_id: [6; 32],
+        pieces: vec![PieceRef {
+            tx: [7; 32],
+            sha256: [8; 32],
+        }],
+    }];
+    let (row, _) = observe(&peers()[1], &body, DEV_CONTROL, 41, 0);
+    let head = accept_device_head(
+        &w.rid,
+        &alice().nid,
+        &d,
+        &identity,
+        std::slice::from_ref(&row),
+        &nonce(2),
+        None,
+    )
+    .expect("v2 head")
+    .expect("present");
+    assert_eq!(head.format, HeadFormat::V2);
+    assert_eq!(head.packs[0].codec, codec::Codec::Raw);
+    assert_eq!(head.packs[0].pieces, PackPieces::Txs(body.packs[0].pieces.clone()));
+}
+
+#[test]
+fn a_v2_and_a_v3_head_of_one_device_are_a_duplicate() {
+    let w = world();
+    let (_, identity, d) = device(w);
+    let (a, _) = observe(&peers()[1], &v3(w.rid, 0, 3), DEV_CONTROL, 41, 0);
+    let (b, _) = observe(&peers()[1], &v3(w.rid, 1, 3).shared(), DEV_CONTROL, 42, 0);
+    let err = accept_device_head(&w.rid, &alice().nid, &d, &identity, &[a, b], &nonce(2), None)
+        .expect_err("two heads");
+    assert_eq!(err.code(), ErrorCode::ControlNotLive);
+}
+
+#[test]
+fn an_unknown_head_version_still_stops_the_current_reader() {
+    let w = world();
+    let (_, identity, d) = device(w);
+    let (mut row, _) = observe(&peers()[1], &v3(w.rid, 0, 3), DEV_CONTROL, 41, 0);
+    for a in row.attributes.iter_mut().filter(|a| a.name == "ag.v") {
+        a.value = AttrValue::U64(4);
+    }
     let err = accept_device_head(
         &w.rid,
         &alice().nid,
@@ -92,9 +203,8 @@ fn the_v040_reader_stops_on_a_v3_head_with_unsupported_version() {
         &nonce(2),
         None,
     )
-    .expect_err("v0.4.0 cannot read v3");
+    .expect_err("v4");
     assert_eq!(err.code(), ErrorCode::UnsupportedVersion);
-    assert_eq!(err.code().as_str(), "E_UNSUPPORTED_VERSION");
 }
 
 #[test]

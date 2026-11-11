@@ -5,6 +5,7 @@ mod cob;
 mod head;
 mod head_v3;
 mod id;
+mod pack;
 mod peer;
 mod refs;
 
@@ -19,6 +20,7 @@ pub use head_v3::{
     open_head_calldata, runs,
 };
 pub use id::{IdBody, ProgramPin};
+pub use pack::{Pack, PackPieces};
 pub use peer::{BindBody, IdAccBody, PeerBody};
 pub use refs::{RefEntry, RefsBody};
 

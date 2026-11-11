@@ -23,14 +23,15 @@ pub use attrs::{AttrValue, Attribute, check_arkiv_rules, chunk_attributes};
 pub use body::{
     AnchorBody, BindBody, Body, CREATE, CobOpBody, DEVICE_LAYOUT_VERSION, DEVICE_SEQ, DeviceBody,
     HEAD_V3_LAYOUT_VERSION, HeadBody, HeadBodyV3, HeadPack, HeadRef, IdAccBody, IdBody, MAX_ACTION,
-    MAX_HEAD_PIECES, MAX_PAYLOAD, MAX_TYPE_NAME, ManifestBody, PackV3, PeerBody, PieceRef,
+    MAX_HEAD_PIECES, MAX_PAYLOAD, MAX_TYPE_NAME, ManifestBody, Pack, PackPieces, PackV3, PeerBody,
+    PieceRef,
     PieceRun, ProgramPin, RefEntry, RefsBody, Require, head_patch_attributes, open_head_calldata,
     runs,
 };
 pub use canonical::{CanonicalRefs, canonical_refs};
 pub use chain::{
     AcceptedHead, AnchorChain, AnchorLink, BindChain, BindLink, CompletenessObs, Device,
-    DeviceHead, EntryUpdate, Equivocation, HeadInputs, HeadNonce, IdentityChain, Merged, PeerInfo,
+    DeviceHead, EntryUpdate, Equivocation, HeadFormat, HeadInputs, HeadNonce, IdentityChain, Merged, PeerInfo,
     Revision, Start, VerifiedOp, Winner, accept_device_head, accept_head, accept_own_device_head,
     anchor_chain, bind_chain, check_completeness, check_control_set, check_head_nonce,
     check_requires, devices, find_refs, identity_chain, is_device_row, maj, merge, merged_refs,

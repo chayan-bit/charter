@@ -100,8 +100,9 @@ pub struct HeadBodyV3 {
 }
 
 impl HeadBodyV3 {
-    /// The v2 rules for everything but packs (refs, stamps, oid lengths, `prev_tx`).
-    fn v2_rules(&self) -> Result<(), FormatError> {
+    /// The fields both formats share, as a v2 body without packs: what the merge, the
+    /// rollback check and the program fold read, so a v3 timeline folds as v2 would.
+    pub fn shared(&self) -> HeadBody {
         HeadBody {
             rid: self.rid,
             nid: self.nid,
@@ -110,12 +111,33 @@ impl HeadBodyV3 {
             at: self.at,
             pieces_created: self.pieces_created,
             refs: self.refs.clone(),
-            snapshot: vec![],
+            snapshot: self.snapshot.clone(),
             packs: vec![],
             prev_tx: self.prev_tx,
             object_hash: self.object_hash,
         }
-        .validate()
+    }
+
+    /// `shared`'s fields (its v2 packs ignored) with `packs`.
+    pub fn from_shared(shared: &HeadBody, packs: Vec<PackV3>) -> Self {
+        Self {
+            rid: shared.rid,
+            nid: shared.nid,
+            seq: shared.seq,
+            id_head: shared.id_head,
+            at: shared.at,
+            pieces_created: shared.pieces_created,
+            refs: shared.refs.clone(),
+            snapshot: shared.snapshot.clone(),
+            packs,
+            prev_tx: shared.prev_tx,
+            object_hash: shared.object_hash,
+        }
+    }
+
+    /// The v2 rules for everything but packs (refs, stamps, oid lengths, `prev_tx`).
+    fn v2_rules(&self) -> Result<(), FormatError> {
+        self.shared().validate()
     }
 }
 
