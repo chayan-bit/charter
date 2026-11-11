@@ -359,7 +359,7 @@ MEASURED on Rabdi on 2026-11-11 with the v0.4.0 release build rebased on `main` 
 
 ## 13. Format v3 (design for v0.5.0, core code on branch `perf/b-lane-b`)
 
-Status: designed 2026-11-11; the `charter-core` encode, decode and policy are implemented and tested, the readers and writers are wired after lanes A and C merge.
+Status: designed 2026-11-11 and wired on `perf/batch-b` the same day: every push writes v3, readers read v2 and v3.
 Format v3 changes only the bytes of the device head and of the packs it names; entities, keys, the rollback rule, the merge and the program fold stay as in sections 4 to 8.
 
 ### 13.1 Encoding
@@ -389,6 +389,13 @@ PieceRun = [block: uint, index: uint, count: uint]
   Arkiv applies a patch as attribute mutations merged into the stored entity (`arkiv-reth-executor`, `Op::Patch` with `apply_mutations`; `MemArkiv` does the same), so the other attributes stay as the create wrote them.
   Readers that open a body from calldata (the landing search of 5.4 and the body walk of section 8) accept a row with only those two attributes when `ag.h` matches the envelope (`open_head_calldata`).
 - The marker piece of a push with no inline piece is a create with no attributes and an empty payload from `C_d`: it still raises `entityNonce(C_d)`, which is all the rollback rule needs.
+  A head tx that creates anything else from `C_d` (an inline piece or a snapshot manifest) sends no marker; `pieces_created` counts every create of `C_d` in head txs.
+- Snapshot manifests of up to 32 KiB in all are created by `C_d` in the head tx instead of by `B_d` beside the last chunks; larger ones keep the v2 path.
+  Readers and keepalive accept a manifest created by either device address.
+  Root cause (MEASURED by lane A, explained here): GolemDB charges `write.index_term_create` (about 2,004 units in the genesis weights) for each index term it does not find, and it looks terms up in the commit the block started from (`IndexJoin.create_term = !reader.origin_term_exists(..)` in `golemdb/crates/record/src/plan.rs`).
+  A manifest in the same block as its chunks therefore pays again for terms the chunks create in that block, about 6k gas more than v0.4.0, which sent it a block later.
+  In the head tx it lands a block after the chunks, needs no tx of its own and replaces the marker.
+- Private repos (a backend that seals) send full head patches: the sealing layer seals only ops naming `ag.rid` and `ag.kind`, and refuses a minimal patch rather than sending it in plaintext.
 - ABI framing stays: the node requires the canonical ABI encoding of the precompile call, so the zero padding cannot be cut client-side.
 
 ### 13.3 Pack codec
@@ -412,8 +419,9 @@ PieceRun = [block: uint, index: uint, count: uint]
 - Reader cache: `index-pack` keeps the pack as given, so the objects of a v3 pack sit in the cache without zlib.
   For text-heavy packs that is about 2.5 times today's size (Charter snapshot: 4,043,666 B in the cache against 1,646,039 B); binary packs barely grow (focus-dock: 12,345,246 B against 12,006,713 B).
   A local recompress of the pack's objects by path (`pack-objects --revs <tips> --no-reuse-object --window=10`) brings the Charter snapshot back to 1,647,895 B in 0.5 s on a loaded Mac; without paths (`--batch-all-objects`) it reaches only 2,550,809 B, and for the binary pack it costs 2.6 s to save 6% (MEASURED).
-  Rule: after indexing a v3 pack whose stored bytes are under half its decoded size (text that brotli shrank well), the reader repacks the objects reachable from the refs it just verified with that command in the same fetch; other packs stay as indexed.
-  That keeps text repos at today's cache size for about 0.12 s per decoded MiB and leaves binary repos 3% larger, so a clone of a 10 MiB text repo gets about 1.2 s slower (ESTIMATE).
+  Decision (2026-11-11): readers do not repack in the fetch.
+  The repack costs about 0.12 s per decoded MiB, and the project rule is that no operation gets slower than v0.4.0; a clone of Charter's repo downloads the same number of chunk pages either way, so the repack would be pure added time.
+  The cache of a text repo is therefore about 2.5 times larger than v0.4.0's; disk is not part of the speed and cost rule, and a later maintenance command can recompress off the critical path.
   A device's own snapshot layers keep their indexed pack (the layer policy finds them by git trailer), so the writer never repacks its own snapshot packs.
 
 ### 13.4 Migration and old clients
