@@ -111,7 +111,7 @@ pub fn refs(r: &Repo) -> Vec<RefRow> {
                 seg: seg(bare),
                 tag,
                 default: !tag && bare == default,
-                tip: gitread::tip(&r.git, oid),
+                tip: r.tip(oid),
             })
         })
         .collect();
@@ -224,10 +224,10 @@ pub fn home_page(app: &App, pref: &Pref, r: &Repo) -> Response {
     let commit = gitread::resolve(&r.git, r.view.as_ref(), &default);
     let entries = commit
         .as_deref()
-        .and_then(|c| gitread::tree_with_last(&r.git, c, ""))
+        .and_then(|c| Some(r.last.fill(c, "", gitread::tree(&r.git, c, "")?)))
         .unwrap_or_default();
     let readme = commit.as_deref().and_then(|c| readme(r, c, &entries));
-    let last = commit.as_deref().and_then(|c| gitread::tip(&r.git, c));
+    let last = commit.as_deref().and_then(|c| r.tip(c));
     html(&Home {
         l,
         r: head,

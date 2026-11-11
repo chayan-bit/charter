@@ -153,6 +153,38 @@ async fn branches_page_lists_branches_and_tags_with_their_last_commit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_last_commit_bar_comes_from_the_rounds_index_and_is_left_out_while_cold() {
+    let f = fixture();
+    let dir = fixture().alice.home.path().join("repos").join(&f.hex);
+    assert!(
+        dir.join(charter_ui::last::FILE).exists(),
+        "the sync round wrote the index"
+    );
+    let warm = page(&format!("/r/{}/blob/main/src/main.rs", f.hex)).await;
+    assert!(
+        warm.contains("class=\"lastc\""),
+        "the blob page has the bar"
+    );
+    let h = home();
+    let cold = h
+        .path()
+        .join("repos")
+        .join(&f.hex)
+        .join(charter_ui::last::FILE);
+    std::fs::remove_file(cold).expect("rm");
+    let app = app_for(h.path());
+    for path in ["", "/tree/main/src", "/blob/main/src/main.rs"] {
+        let r = send(app.clone(), req(&format!("/r/{}{path}", f.hex))).await;
+        assert_eq!(r.status, StatusCode::OK, "{path}");
+        // The repo home's bar is the tip commit itself, one object read.
+        assert!(
+            path.is_empty() || !r.text().contains("class=\"lastc\""),
+            "no walk, no bar while cold: {path}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_equivocation_shows_the_red_banner_on_every_repo_page() {
     let f = fixture();
     let h = home();

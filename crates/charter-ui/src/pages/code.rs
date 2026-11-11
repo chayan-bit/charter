@@ -108,10 +108,11 @@ fn tree_page(app: &App, pref: &Pref, r: &Repo, rev: &str, path: &str) -> Respons
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    let Some(entries) = gitread::tree_with_last(&r.git, &at.commit, &at.path) else {
+    let Some(entries) = gitread::tree(&r.git, &at.commit, &at.path) else {
         return error_page(app, pref, StatusCode::NOT_FOUND, "No such directory.");
     };
-    let last = gitread::last_change(&r.git, &at.commit, &at.path);
+    let entries = r.last.fill(&at.commit, &at.path, entries);
+    let last = r.last.get(&at.commit, &at.path);
     let (mut l, head) = frame(app, pref, r, "code", "Tree");
     crumbs(&mut l, r, &at);
     html(&Tree {
@@ -212,7 +213,7 @@ fn blob_page(app: &App, pref: &Pref, r: &Repo, rev: &str, path: &str, all: bool)
         total,
         lines,
         binary,
-        last: gitread::last_change(&r.git, &at.commit, &at.path),
+        last: r.last.get(&at.commit, &at.path),
         rev: at.rev,
         path: at.path,
     })

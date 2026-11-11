@@ -2,7 +2,6 @@
 //! subprocess and no lock on the request path. Every ref and path from a URL is validated
 //! here; refs resolve only through the verified canonical refs or a full oid.
 
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use gix::ObjectId;
@@ -76,7 +75,7 @@ pub struct Entry {
     pub oid: String,
     pub size: Option<u64>,
     pub name: String,
-    /// The newest commit that changed it, when the page asked ([`last_changes`]).
+    /// The newest commit that changed it, when the page asked ([`crate::last`]).
     pub last: Option<CommitRow>,
 }
 
@@ -90,12 +89,6 @@ fn tree_at<'r>(git: &'r Git, commit: &str, path: &str) -> Option<gix::Tree<'r>> 
     e.mode()
         .is_tree()
         .then(|| git.find_tree(e.object_id()).ok())?
-}
-
-/// The id of whatever is at `<commit>:<path>`.
-fn id_at(git: &Git, commit: ObjectId, path: &str) -> Option<ObjectId> {
-    let root = git.find_commit(commit).ok()?.tree().ok()?;
-    Some(root.lookup_entry_by_path(path).ok()??.object_id())
 }
 
 /// Entries of the tree at `<commit>:<path>`, directories first, then by name; `None` if
@@ -140,7 +133,7 @@ pub fn blob(git: &Git, commit: &str, path: &str) -> Option<Vec<u8>> {
     Some(blob.detach().data)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommitRow {
     pub oid: String,
     pub author: String,
@@ -148,7 +141,7 @@ pub struct CommitRow {
     pub subject: String,
 }
 
-fn row(git: &Git, id: ObjectId) -> Option<CommitRow> {
+pub(crate) fn row(git: &Git, id: ObjectId) -> Option<CommitRow> {
     let c = git.find_commit(id).ok()?;
     let a = c.author().ok()?;
     Some(CommitRow {
@@ -166,7 +159,7 @@ pub fn tip(git: &Git, commit: &str) -> Option<CommitRow> {
 }
 
 /// Commits reachable from `commit`, newest commit time first (as `git log` orders them).
-fn walk<'r>(
+pub(crate) fn walk<'r>(
     git: &'r Git,
     commit: &str,
 ) -> Option<impl Iterator<Item = gix::revision::walk::Info<'r>> + use<'r>> {
@@ -188,141 +181,6 @@ pub fn log(git: &Git, commit: &str, skip: usize, n: usize) -> Vec<CommitRow> {
         .take(n)
         .filter_map(|i| row(git, i.id))
         .collect()
-}
-
-/// The newest commit from `commit` that changed `path` (all of it for `""`): its entry
-/// differs from that of every parent.
-// shortcut: no history simplification, so a side-branch change that a merge dropped can
-// show; switch to gix's path-filtered walk if it lands.
-pub fn last_change(git: &Git, commit: &str, path: &str) -> Option<CommitRow> {
-    for info in walk(git, commit)? {
-        if path.is_empty() {
-            return row(git, info.id);
-        }
-        let mine = id_at(git, info.id, path);
-        let parents = &info.parent_ids;
-        let changed = if parents.is_empty() {
-            mine.is_some()
-        } else {
-            parents.iter().all(|p| id_at(git, *p, path) != mine)
-        };
-        if changed {
-            return row(git, info.id);
-        }
-    }
-    None
-}
-
-/// Most commits [`last_changes`] walks; an entry unchanged within them shows no commit.
-// shortcut: a bounded walk, not a commit-graph path index; add a per-(commit, path) cache
-// if very long histories need every entry filled.
-pub const ENTRY_WALK: usize = 2_000;
-
-/// Name to blob or tree id, for the directory `tree` (empty if there is none).
-type Dir = HashMap<String, ObjectId>;
-
-struct Dirs<'g> {
-    git: &'g Git,
-    path: &'g str,
-    ids: HashMap<ObjectId, Option<ObjectId>>,
-    trees: HashMap<ObjectId, std::rc::Rc<Dir>>,
-}
-
-impl Dirs<'_> {
-    /// The id of the directory at `path` in `commit`.
-    fn id(&mut self, commit: ObjectId) -> Option<ObjectId> {
-        let (git, path) = (self.git, self.path);
-        *self.ids.entry(commit).or_insert_with(|| match path {
-            "" => git
-                .find_commit(commit)
-                .ok()?
-                .tree_id()
-                .ok()
-                .map(|i| i.detach()),
-            p => id_at(git, commit, p),
-        })
-    }
-
-    fn entries(&mut self, tree: Option<ObjectId>) -> std::rc::Rc<Dir> {
-        let Some(t) = tree else {
-            return std::rc::Rc::default();
-        };
-        let git = self.git;
-        self.trees
-            .entry(t)
-            .or_insert_with(|| {
-                let tree = git.find_tree(t).ok();
-                let d = tree.as_ref().and_then(|t| t.decode().ok());
-                let names = d.iter().flat_map(|d| d.entries.iter());
-                std::rc::Rc::new(
-                    names
-                        .map(|e| (e.filename.to_string(), e.oid.to_owned()))
-                        .collect(),
-                )
-            })
-            .clone()
-    }
-}
-
-/// For each entry of the directory `<commit>:<path>`, the newest commit that changed it
-/// (as [`last_change`] decides), from one walk that stops once every entry is placed. A
-/// commit whose directory equals a parent's changed none of them, so most steps compare
-/// two ids.
-pub fn last_changes(git: &Git, commit: &str, path: &str) -> HashMap<String, CommitRow> {
-    let mut d = Dirs {
-        git,
-        path,
-        ids: HashMap::new(),
-        trees: HashMap::new(),
-    };
-    let mut out = HashMap::new();
-    let (Some(head), Some(w)) = (oid(commit), walk(git, commit)) else {
-        return out;
-    };
-    let top = d.id(head);
-    let mut want: HashSet<String> = d.entries(top).keys().cloned().collect();
-    for info in w.take(ENTRY_WALK) {
-        if want.is_empty() {
-            break;
-        }
-        let mine = d.id(info.id);
-        let parents: Vec<Option<ObjectId>> = info.parent_ids.iter().map(|p| d.id(*p)).collect();
-        if parents.contains(&mine) {
-            continue;
-        }
-        let here = d.entries(mine);
-        let before: Vec<_> = parents.iter().map(|p| d.entries(*p)).collect();
-        let changed: Vec<String> = want
-            .iter()
-            .filter(|n| {
-                let x = here.get(*n);
-                (x.is_some() || !before.is_empty()) && before.iter().all(|p| p.get(*n) != x)
-            })
-            .cloned()
-            .collect();
-        let Some(r) = (!changed.is_empty()).then(|| row(git, info.id)).flatten() else {
-            continue;
-        };
-        for n in changed {
-            want.remove(&n);
-            out.insert(n, r.clone());
-        }
-    }
-    out
-}
-
-/// [`tree`] with each entry's [`last_changes`] commit filled in.
-pub fn tree_with_last(git: &Git, commit: &str, path: &str) -> Option<Vec<Entry>> {
-    let mut last = last_changes(git, commit, path);
-    let v = tree(git, commit, path)?;
-    Some(
-        v.into_iter()
-            .map(|e| Entry {
-                last: last.remove(&e.name),
-                ..e
-            })
-            .collect(),
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

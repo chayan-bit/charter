@@ -150,26 +150,20 @@ fn gix_reads_match_the_git_cli() {
         page.join("\n"),
         cli(&["log", "--format=%H", "--skip=1", "-n2", &merge])
     );
-    for p in ["", "a.txt", "dir", "new.txt", "s.txt", "bin.dat"] {
-        let want = cli(&[
-            "log",
-            "-1",
-            "--format=%H",
-            &merge,
-            "--",
-            if p.is_empty() { "." } else { p },
-        ]);
-        let got = gitread::last_change(&g, &merge, p)
-            .map(|c| c.oid)
-            .unwrap_or_default();
+    // Every path of the tip, folders included, as `git log -1 -- <path>` names it.
+    let idx = charter_ui::last::Last::refresh(&g, Default::default(), [merge.clone()]);
+    let paths = cli(&["ls-tree", "-r", "-t", "--name-only", &merge]);
+    for p in std::iter::once("").chain(paths.lines()) {
+        let spec = if p.is_empty() { "." } else { p };
+        let want = cli(&["log", "-1", "--format=%H", &merge, "--", spec]);
+        let got = idx.get(&merge, p).map(|c| c.oid).unwrap_or_default();
         assert_eq!(got, want, "last change of {p:?}");
     }
-    let all = gitread::last_changes(&g, &merge, "");
-    for e in gitread::tree(&g, &merge, "").expect("root") {
-        let want = cli(&["log", "-1", "--format=%H", &merge, "--", &e.name]);
-        let got = all.get(&e.name).map(|c| c.oid.clone()).unwrap_or_default();
-        assert_eq!(got, want, "last change of entry {}", e.name);
-    }
+    let entries = idx.fill(&merge, "", gitread::tree(&g, &merge, "").expect("root"));
+    assert!(
+        entries.iter().all(|e| e.last.is_some()),
+        "every root entry has its commit"
+    );
     let ls: Vec<String> = gitread::tree(&g, &merge, "")
         .expect("tree")
         .iter()

@@ -19,6 +19,7 @@ use charter_sync::{Config, Keys, Repo, Want, cob};
 use crate::UiError;
 use crate::cache::{self, Cobs, RepoView};
 
+use crate::last::Last;
 use crate::pace::Pacer;
 
 /// A page request keeps its repo on screen (and the UI open) this long without a stream.
@@ -345,11 +346,33 @@ async fn locked_round<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<Outcom
         .chain(fresh)
         .collect();
     let pushed = was.is_none_or(|w| w.canonical != now.canonical || w.peers != now.peers);
+    index_tips(&repo.dir, &now)?;
     cache::write(&view_path, &now)?;
     Ok(Outcome::Synced(Changes {
         pushed,
         ops: since.ops.len(),
     }))
+}
+
+/// Writes `last.json` for the view's ref tips before the view itself, so a page that reads
+/// the new view finds every tip indexed; tips already indexed are kept, not walked again.
+fn index_tips(dir: &std::path::Path, view: &RepoView) -> Result<(), UiError> {
+    let Some(ts) = crate::gitread::open(dir) else {
+        return Ok(());
+    };
+    let git = crate::gitread::local(&ts);
+    let path = dir.join(crate::last::FILE);
+    // An unreadable index is rebuilt, never fatal to the round.
+    let old: Last = cache::read(&path).ok().flatten().unwrap_or_default();
+    let tips = view
+        .canonical
+        .iter()
+        .filter_map(|(_, o)| crate::gitread::resolve(&git, None, o));
+    let fresh = Last::refresh(&git, old.clone(), tips);
+    match fresh == old {
+        true => Ok(()),
+        false => cache::write(&path, &fresh),
+    }
 }
 
 async fn run<A: Arkiv>(a: Arc<A>, cfg: Config, shared: Arc<Shared>, ws: Option<WsConfig>) {

@@ -13,6 +13,7 @@ pub mod diff;
 pub mod fold;
 pub mod gitread;
 pub mod highlight;
+pub mod last;
 pub mod markdown;
 pub mod pace;
 mod pages;

@@ -28,6 +28,7 @@ use charter_sync::ids::{hex32, parse_id, to_text};
 
 use crate::cache::{self, Cobs, RepoView};
 use crate::gitread::{self, Git};
+use crate::last::{self, Last};
 use crate::prefs::{Fonts, Prefs, Store};
 use crate::sync_loop::{Round, Shared, mins_until};
 use crate::{assets, fold};
@@ -36,6 +37,8 @@ use people::{Clock, People};
 pub use verify::Verify;
 
 /// Shared by every handler.
+type Opened = (u64, gix::ThreadSafeRepository, Arc<Last>);
+
 pub struct App {
     pub home: PathBuf,
     pub shared: Arc<Shared>,
@@ -44,8 +47,9 @@ pub struct App {
     pub writer: Option<Arc<crate::writes::Writer>>,
     /// Local preferences (`ui/prefs.json`).
     pub prefs: Store,
-    /// One gix handle per repo, keyed by the `synced_ms` of the view it was opened under.
-    repos: Mutex<HashMap<Rid, (u64, gix::ThreadSafeRepository)>>,
+    /// One gix handle and last-commit index per repo, keyed by the `synced_ms` of the view
+    /// they were read under.
+    repos: Mutex<HashMap<Rid, Opened>>,
 }
 
 impl App {
@@ -68,17 +72,23 @@ impl App {
         }
     }
 
-    /// The repo's handle, opened once and reopened after each sync round so new refs and
-    /// packs show.
-    fn git(&self, rid: Rid, dir: &Path, synced: u64) -> Option<Git> {
+    /// The repo's handle and `last.json`, read once and again after each sync round so new
+    /// refs, packs and tips show.
+    fn git(&self, rid: Rid, dir: &Path, synced: u64) -> Option<(Git, Arc<Last>)> {
         let mut m = self.repos.lock().ok()?;
-        if let Some((_, ts)) = m.get(&rid).filter(|(s, _)| *s == synced) {
-            return Some(gitread::local(ts));
+        if let Some((_, ts, last)) = m.get(&rid).filter(|(s, _, _)| *s == synced) {
+            return Some((gitread::local(ts), last.clone()));
         }
         let ts = gitread::open(dir)?;
         let g = gitread::local(&ts);
-        m.insert(rid, (synced, ts));
-        Some(g)
+        let last: Arc<Last> = Arc::new(
+            cache::read(&dir.join(last::FILE))
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        );
+        m.insert(rid, (synced, ts, last.clone()));
+        Some((g, last))
     }
 }
 
@@ -222,11 +232,21 @@ pub struct Repo {
     pub hex: String,
     pub dir: PathBuf,
     pub git: Git,
+    /// The last-commit index of the ref tips; empty until a sync round writes it.
+    pub last: Arc<Last>,
     pub view: Option<RepoView>,
     pub round: Round,
 }
 
 impl Repo {
+    /// A commit's row: a lookup in the last-commit index when it is a ref tip, else one
+    /// object read.
+    pub fn tip(&self, commit: &str) -> Option<gitread::CommitRow> {
+        self.last
+            .get(commit, "")
+            .or_else(|| gitread::tip(&self.git, commit))
+    }
+
     pub fn name(&self) -> String {
         self.view
             .as_ref()
@@ -262,7 +282,7 @@ pub fn open(app: &App, pref: &Pref, rid: &str) -> Result<Repo, Response> {
     app.shared.focus(rid);
     let view: Option<RepoView> = cache::read(&dir.join(cache::VIEW)).ok().flatten();
     let synced = view.as_ref().map_or(0, |v| v.synced_ms);
-    let Some(git) = app.git(rid, &dir, synced) else {
+    let Some((git, last)) = app.git(rid, &dir, synced) else {
         let msg = "The git cache of this repo cannot be opened.";
         return Err(error_page(
             app,
@@ -275,6 +295,7 @@ pub fn open(app: &App, pref: &Pref, rid: &str) -> Result<Repo, Response> {
         rid,
         view,
         git,
+        last,
         round: app.shared.round(&rid),
         hex,
         dir,
