@@ -32,6 +32,8 @@ pub struct Net {
     pub queries: Mutex<Vec<String>>,
     /// Blocks read through `block_txs`.
     pub block_reads: std::sync::atomic::AtomicUsize,
+    /// While set, polling a receipt mines nothing, so sends pile up unmined.
+    hold: std::sync::atomic::AtomicBool,
 }
 
 impl Net {
@@ -42,7 +44,13 @@ impl Net {
             fee: Mutex::new(None),
             queries: Mutex::new(vec![]),
             block_reads: Default::default(),
+            hold: Default::default(),
         }
+    }
+
+    /// Stops (or resumes) mining on receipt polls, to make writers race.
+    pub fn hold_mining(&self, on: bool) {
+        self.hold.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Accept but never mine every send from `sender` after the next `after` ones.
@@ -136,6 +144,9 @@ impl Arkiv for Net {
     async fn receipt(&self, h: TxHash) -> Result<Option<Receipt>, StoreError> {
         if let Some(r) = self.mem.receipt(h).await? {
             return Ok(Some(r));
+        }
+        if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(None);
         }
         let n = self.mem.mine();
         let held = *self.fee.lock().expect("lock");

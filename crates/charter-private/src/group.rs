@@ -22,13 +22,14 @@ use crate::seal::blind;
 /// `id_key || content key`: everything needed to find and open one epoch's entities.
 pub type Grant = zeroize::Zeroizing<Vec<u8>>;
 
-/// Publishes a fresh key package from the wallet, with this identity's signature over the
-/// MLS signature key it carries (`ag.pk`, `ag.sig`); returns its id for `member add`.
+/// Publishes a fresh key package from the wallet for this machine's device, with this
+/// identity's signature over the MLS signature key and the device it carries (`ag.pk`,
+/// `ag.sig`); returns its id for `member add`.
 pub async fn publish_key_package<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys) -> Result<Hash32> {
     let mut mls = Mls::open(&cfg.home, keys.nid())?;
     let kp = mls.key_package()?;
     let id = charter_crypto::sha256(&kp);
-    let binding = auth::sign_leaf(keys, &mls.signature_key())?;
+    let binding = auth::sign_leaf(keys, &mls.signature_key(), &mls.device()?)?;
     mls.kps.push(id);
     mls.save()?;
     let attrs = vec![
@@ -108,13 +109,14 @@ pub async fn member_ring<A: Arkiv>(
     }
 }
 
-/// The current epoch and every member with its role and number of MLS leaves (devices).
+/// The current epoch and every member with its role, number of MLS leaves (devices), and
+/// how many of those name no device (made before 0.6.0: a device revoke cannot find them).
 pub async fn members<A: Arkiv>(
     a: &A,
     cfg: &Config,
     keys: &Keys,
     rid: &Rid,
-) -> Result<(u64, Vec<(Nid, Role, usize)>)> {
+) -> Result<(u64, Vec<(Nid, Role, usize, usize)>)> {
     let (mls, ring) = member_ring(a, cfg, keys, rid).await?;
     let leaves = Mls::leaves(&mls.load(&ring.group)?);
     let list = ring
@@ -122,7 +124,8 @@ pub async fn members<A: Arkiv>(
         .iter()
         .filter_map(|(n, r)| {
             let nid: Nid = hex::decode(n).ok()?.try_into().ok()?;
-            Some((nid, *r, leaves.get(&nid).copied().unwrap_or(0)))
+            let (n, unbound) = leaves.get(&nid).copied().unwrap_or_default();
+            Some((nid, *r, n, unbound))
         })
         .collect();
     Ok((ring.current()?.0, list))
@@ -169,15 +172,15 @@ async fn add<A: Arkiv>(
         .find(|o| msg::bytes(o, "ag.body").is_some_and(|b| charter_crypto::sha256(b) == *kp_id))
         .ok_or_else(|| SyncError::coded(ErrorCode::NotLive, "no live key package with that id"))?;
     let kp = msg::bytes(row, "ag.body").unwrap_or_default();
-    let (nid, sig_key) = mls.kp_identity(kp)?;
-    let bound = match (msg::bytes(row, "ag.pk"), msg::bytes(row, "ag.sig")) {
-        (Some(pk), Some(sig)) => auth::leaf_bound(&nid, pk, sig, &sig_key),
+    let (nid, device, sig_key) = mls.kp_identity(kp)?;
+    let bound = match (device, msg::bytes(row, "ag.pk"), msg::bytes(row, "ag.sig")) {
+        (Some(d), Some(pk), Some(sig)) => auth::leaf_bound(&nid, pk, sig, &sig_key, &d),
         _ => false,
     };
     if !bound {
         return Err(bad(
-            "this key package is not signed by the identity it names; the invitee must run \
-             `chart member keypackage` on charter 0.5.1 or later",
+            "this key package is not signed by the identity it names for one of its devices; \
+             the invitee must run `chart member keypackage` on charter 0.6.0 or later",
         ));
     }
     match (role, ring.role(&nid)) {
@@ -202,17 +205,8 @@ async fn add<A: Arkiv>(
     }
     let (epoch, key) = mls.epoch_key(&g, rid)?;
     ring.epochs.insert(epoch, key);
-    finish(
-        a,
-        cfg,
-        keys,
-        &mls,
-        ring,
-        pre,
-        commit,
-        Some((*kp_id, welcome, mls.history_key(&g, rid)?)),
-    )
-    .await?;
+    let welcome = Some((*kp_id, welcome, mls.history_key(&g, rid)?));
+    finish(a, cfg, keys, &mls, ring, pre, commit, welcome).await?;
     Ok(nid)
 }
 
@@ -234,20 +228,26 @@ pub async fn remove_member<A: Arkiv>(
     let (epoch, key) = mls.epoch_key(&g, rid)?;
     ring.epochs.insert(epoch, key);
     ring.id_rot.insert(epoch, mls.id_key(&g, rid)?);
-    finish(a, cfg, keys, &mls, ring, pre, commit, None).await
+    finish(a, cfg, keys, &mls, ring, pre, commit, None).await?;
+    Ok(())
 }
 
 /// What a commit needs from before it: whether it migrates a legacy repo (then the caller
 /// must be a root delegate), the heads to pin, and this admin's peer document if it has none
 /// yet (readers look its key up to check the attestation). Two queries on the add and remove
 /// paths, three on the migrating one.
-struct Pre {
+pub(crate) struct Pre {
     migrate: bool,
     pinned: BTreeSet<String>,
     peer: Option<charter_store::Operation>,
 }
 
-async fn prepare<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys, ring: &Keyring) -> Result<Pre> {
+pub(crate) async fn prepare<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    ring: &Keyring,
+) -> Result<Pre> {
     let migrate = ring.format < FORMAT;
     if migrate
         && !root_rows(a, ring)
@@ -284,8 +284,9 @@ async fn prepare<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys, ring: &Keyring) -> 
     })
 }
 
+/// Sends the commit (and welcome) and saves the MLS state and the keyring it returns.
 #[allow(clippy::too_many_arguments)]
-async fn finish<A: Arkiv>(
+pub(crate) async fn finish<A: Arkiv>(
     a: &A,
     cfg: &Config,
     keys: &Keys,
@@ -294,7 +295,7 @@ async fn finish<A: Arkiv>(
     pre: Pre,
     commit: Vec<u8>,
     welcome: Option<Welcome>,
-) -> Result<()> {
+) -> Result<Keyring> {
     if pre.migrate {
         ring.format = FORMAT;
     }
@@ -314,7 +315,8 @@ async fn finish<A: Arkiv>(
         ring.rotated.insert(epoch, block);
     }
     mls.save()?;
-    ring.save(&cfg.home)
+    ring.save(&cfg.home)?;
+    Ok(ring)
 }
 
 /// A Welcome for key package `.0` and the epoch's history key (`.2`).

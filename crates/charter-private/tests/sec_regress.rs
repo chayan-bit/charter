@@ -330,8 +330,9 @@ fn a_key_package_claiming_the_admins_nid_is_refused() {
         let kp = fake.key_package().expect("kp");
         let id = charter_crypto::sha256(&kp);
         // Even with mallory's own (valid) identity signature attached.
-        let sig =
-            charter_private::auth::sign_leaf(&mallory.keys, &fake.signature_key()).expect("sig");
+        let dev = fake.device().expect("device");
+        let sig = charter_private::auth::sign_leaf(&mallory.keys, &fake.signature_key(), &dev)
+            .expect("sig");
         let attrs = vec![
             ("ag.h", b32(id), true),
             (
@@ -500,7 +501,10 @@ fn removal_drops_every_device_of_the_member() {
         let (_, list) = charter_private::members(&net, &alice.cfg, &alice.keys, &rid)
             .await
             .expect("list");
-        assert!(list.contains(&(bob.keys.nid(), Role::Write, 2)), "{list:?}");
+        assert!(
+            list.contains(&(bob.keys.nid(), Role::Write, 2, 0)),
+            "{list:?}"
+        );
         ring(&net, &bob, &rid).await.expect("bob");
         ring(&net, &bob2, &rid).await.expect("bob2");
         charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &bob.keys.nid())

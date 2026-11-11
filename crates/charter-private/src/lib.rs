@@ -14,6 +14,7 @@ pub mod join;
 pub mod keyring;
 pub mod mls;
 pub mod msg;
+pub mod revoked;
 pub mod seal;
 pub mod select;
 

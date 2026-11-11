@@ -129,17 +129,29 @@ impl Mls {
         r
     }
 
-    fn credential(&self) -> CredentialWithKey {
-        CredentialWithKey {
-            credential: BasicCredential::new(self.nid.to_vec()).into(),
+    /// This machine's head-model device (docs/p5/head-model.md 4.1): the leaf this state
+    /// makes is that device's, so a revoke of the device names exactly this leaf.
+    pub fn device(&self) -> Result<Nid> {
+        let home = self
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&self.path);
+        Ok(charter_sync::device::device_keys(home)?.nid())
+    }
+
+    /// The leaf credential: `nid || device`.
+    fn credential(&self) -> Result<CredentialWithKey> {
+        Ok(CredentialWithKey {
+            credential: BasicCredential::new([self.nid, self.device()?].concat()).into(),
             signature_key: self.signer.to_public_vec().into(),
-        }
+        })
     }
 
     /// A fresh key package (its secrets stay in storage); returns its TLS bytes.
     pub fn key_package(&self) -> Result<Vec<u8>> {
         let kp = KeyPackage::builder()
-            .build(SUITE, &self.provider, &self.signer, self.credential())
+            .build(SUITE, &self.provider, &self.signer, self.credential()?)
             .map_err(|e| mls_err("key package", e))?;
         kp.key_package()
             .tls_serialize_detached()
@@ -155,7 +167,7 @@ impl Mls {
             &self.signer,
             &create_config(),
             GroupId::from_slice(&gid),
-            self.credential(),
+            self.credential()?,
         )
         .map_err(|e| mls_err("create group", e))
     }
@@ -183,11 +195,16 @@ impl Mls {
 
     /// Removes every leaf naming `nid` (all of its devices); returns the commit.
     pub fn remove(&self, g: &mut MlsGroup, nid: &Nid) -> Result<Vec<u8>> {
-        let leaves: Vec<LeafNodeIndex> = g
-            .members()
-            .filter(|m| nid_of(&m.credential).is_ok_and(|n| n == *nid))
-            .map(|m| m.index)
+        let leaves: Vec<LeafNodeIndex> = Self::device_leaves(g)
+            .into_iter()
+            .filter(|(_, n, _)| n == nid)
+            .map(|(i, _, _)| i)
             .collect();
+        self.remove_leaves(g, &leaves)
+    }
+
+    /// Removes `leaves` (and nothing else); returns the commit.
+    pub fn remove_leaves(&self, g: &mut MlsGroup, leaves: &[LeafNodeIndex]) -> Result<Vec<u8>> {
         if leaves.is_empty() {
             return Err(SyncError::coded(
                 ErrorCode::NotMember,
@@ -195,20 +212,32 @@ impl Mls {
             ));
         }
         let (commit, _, _) = g
-            .remove_members(&self.provider, &self.signer, &leaves)
+            .remove_members(&self.provider, &self.signer, leaves)
             .map_err(|e| mls_err("remove", e))?;
         g.merge_pending_commit(&self.provider)
             .map_err(|e| mls_err("merge", e))?;
         ser(&commit)
     }
 
-    /// Leaves per nid (a member on several devices has several).
-    pub fn leaves(g: &MlsGroup) -> BTreeMap<Nid, usize> {
+    /// Every leaf: its index, member nid and device (`None` for a leaf made before leaves
+    /// named their device).
+    pub fn device_leaves(g: &MlsGroup) -> Vec<(LeafNodeIndex, Nid, Option<Nid>)> {
+        g.members()
+            .filter_map(|m| {
+                let (n, d) = identity_of(&m.credential).ok()?;
+                Some((m.index, n, d))
+            })
+            .collect()
+    }
+
+    /// Leaves per nid (a member on several devices has several), and how many of them name
+    /// no device.
+    pub fn leaves(g: &MlsGroup) -> BTreeMap<Nid, (usize, usize)> {
         let mut out = BTreeMap::new();
-        for m in g.members() {
-            if let Ok(n) = nid_of(&m.credential) {
-                *out.entry(n).or_insert(0) += 1;
-            }
+        for (_, n, d) in Self::device_leaves(g) {
+            let e: &mut (usize, usize) = out.entry(n).or_default();
+            e.0 += 1;
+            e.1 += usize::from(d.is_none());
         }
         out
     }
@@ -218,17 +247,15 @@ impl Mls {
         self.signer.to_public_vec()
     }
 
-    /// The nid a key package claims and the MLS signature key it carries.
-    pub fn kp_identity(&self, kp: &[u8]) -> Result<(Nid, Vec<u8>)> {
+    /// The nid and device a key package claims and the MLS signature key it carries.
+    pub fn kp_identity(&self, kp: &[u8]) -> Result<(Nid, Option<Nid>, Vec<u8>)> {
         let kp = KeyPackageIn::tls_deserialize_exact(kp)
             .map_err(|e| mls_err("key package", e))?
             .validate(self.provider.crypto(), ProtocolVersion::Mls10)
             .map_err(|e| mls_err("key package", e))?;
         let leaf = kp.leaf_node();
-        Ok((
-            nid_of(leaf.credential())?,
-            leaf.signature_key().as_slice().to_vec(),
-        ))
+        let (nid, device) = identity_of(leaf.credential())?;
+        Ok((nid, device, leaf.signature_key().as_slice().to_vec()))
     }
 
     /// A copy of the OpenMLS storage, to undo a join or commit that fails a later check.
@@ -350,8 +377,18 @@ fn ser(m: &MlsMessageOut) -> Result<Vec<u8>> {
 
 /// The nid a basic credential names.
 pub fn nid_of(c: &Credential) -> Result<Nid> {
+    identity_of(c).map(|(n, _)| n)
+}
+
+/// The nid and device a basic credential names: `nid || device`, or `nid` alone for a
+/// leaf made before leaves named their device.
+pub fn identity_of(c: &Credential) -> Result<(Nid, Option<Nid>)> {
     let b = BasicCredential::try_from(c.clone()).map_err(|e| mls_err("credential", e))?;
-    b.identity()
-        .try_into()
-        .map_err(|e| mls_err("credential", e))
+    let id = b.identity();
+    let nid = |b: &[u8]| -> Result<Nid> { b.try_into().map_err(|e| mls_err("credential", e)) };
+    match id.len() {
+        32 => Ok((nid(id)?, None)),
+        64 => Ok((nid(&id[..32])?, Some(nid(&id[32..])?))),
+        n => Err(mls_err("credential", format!("{n}-byte identity"))),
+    }
 }

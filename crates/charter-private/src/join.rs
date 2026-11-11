@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use charter_crypto::PublicKey;
 
 use charter_core::{AttrValue, ErrorCode, IdBody, Nid, Observed, Rid};
-use charter_store::{Arkiv, Pred, Query};
+use charter_store::{Arkiv, EntityData, Pred, Query};
 use charter_sync::{Config, Keys, Result, SyncError, observe, view};
 
 use crate::auth::{
@@ -20,7 +20,7 @@ use crate::msg::{
     T_COMMIT, T_GROUP, T_PUB, T_WELCOME, bytes, find, open_box, rid_pred, tag, u64_of,
 };
 use crate::seal::{Key, blind};
-use crate::{Sealed, entity};
+use crate::{Sealed, entity, revoked};
 
 /// This member's MLS state and up-to-date keyring for `rid` (`None`: not a member).
 pub async fn refresh<A: Arkiv>(
@@ -35,9 +35,15 @@ pub async fn refresh<A: Arkiv>(
         ring = join(a, &mls, rid).await?;
     }
     if let Some(r) = ring.as_mut() {
-        let mut member = apply_commits(a, &mls, r).await?;
+        let (mut member, revokes) = apply_commits(a, &mls, r).await?;
         if !member {
             member = rejoin(a, &mls, keys, r).await?;
+        }
+        // Boxed: a rare path whose commit future would otherwise grow every refresh's stack.
+        if member
+            && let Some(next) = Box::pin(revoked::remove(a, cfg, keys, &mls, r, &revokes)).await?
+        {
+            *r = next;
         }
         // An epoch end past the next epoch, or past the current one while still a member,
         // came from a commit nobody applied (a keyring saved before 0.5.1 kept any).
@@ -56,7 +62,7 @@ pub async fn refresh<A: Arkiv>(
 async fn rejoin<A: Arkiv>(a: &A, mls: &Mls, keys: &Keys, ring: &mut Keyring) -> Result<bool> {
     if let Some(mut fresh) = join(a, mls, &ring.rid).await?
         && fresh.current()?.0 > ring.current()?.0
-        && apply_commits(a, mls, &mut fresh).await?
+        && apply_commits(a, mls, &mut fresh).await?.0
     {
         *ring = fresh;
         return Ok(true);
@@ -209,11 +215,11 @@ async fn on_record<A: Arkiv>(
     Ok(true)
 }
 
-type Records<'c> = BTreeMap<u64, Vec<(&'c Observed, CommitAtt)>>;
+pub(crate) type Records<'c> = BTreeMap<u64, Vec<(&'c Observed, CommitAtt)>>;
 
 /// The commit rows of `rows` whose public attestation opens under the generation-0 id key
 /// `gen0`, by epoch, in Arkiv order.
-fn records<'c>(rows: &'c [Observed], gen0: &Key, rid: &Rid) -> Records<'c> {
+pub(crate) fn records<'c>(rows: &'c [Observed], gen0: &Key, rid: &Rid) -> Records<'c> {
     let mut by_ep: Records = BTreeMap::new();
     for c in rows {
         let Some(ep) = u64_of(c, "ag.ep") else {
@@ -264,7 +270,7 @@ async fn canonical<'c, A: Arkiv>(
 
 /// The first of `cands` (one epoch's commits, in Arkiv order) validly signed by one of
 /// `admins`; looks each signer's key up once.
-async fn first_signed<'c, A: Arkiv>(
+pub(crate) async fn first_signed<'c, A: Arkiv>(
     a: &A,
     pks: &mut BTreeMap<Nid, Option<PublicKey>>,
     rid: &Rid,
@@ -293,7 +299,7 @@ async fn first_signed<'c, A: Arkiv>(
     Ok(None)
 }
 
-fn nids(set: Option<&BTreeSet<String>>) -> BTreeSet<Nid> {
+pub(crate) fn nids(set: Option<&BTreeSet<String>>) -> BTreeSet<Nid> {
     set.into_iter()
         .flatten()
         .filter_map(|n| hex::decode(n).ok()?.try_into().ok())
@@ -326,12 +332,25 @@ fn root_of(rid: &Rid, rows: &[Observed]) -> Option<Vec<Nid>> {
 /// Applies attested admin commits for the next epochs; any other commit is skipped and
 /// undone. Stops once this member is removed: it then holds no key for later epochs, and
 /// the commit that removed it (an admin's, as MLS authenticates) ends its last epoch.
-/// Returns whether it is still a member.
-async fn apply_commits<A: Arkiv>(a: &A, mls: &Mls, ring: &mut Keyring) -> Result<bool> {
+/// Returns whether it is still a member, and the repo's device records (revokes and
+/// delegations, [`revoked::device_records`]), read in the same query as the commits.
+pub(crate) async fn apply_commits<A: Arkiv>(
+    a: &A,
+    mls: &Mls,
+    ring: &mut Keyring,
+) -> Result<(bool, Vec<EntityData>)> {
     let mut g = mls.load(&ring.group)?;
     loop {
         let gens = ring.id_keys().count();
-        let rows = find(a, T_COMMIT, vec![rid_pred(ring)]).await?;
+        let commits = Pred::And(vec![
+            observe::kind(charter_core::Kind::Mls),
+            Pred::eq(charter_store::attr("ag.t"), T_COMMIT),
+            rid_pred(ring),
+        ]);
+        let q = Query::from(Pred::Or(vec![commits, revoked::device_records(ring)]));
+        let raw = charter_store::paging::offset_all(a, &q, observe::full_select()).await?;
+        let (devices, raw): (Vec<_>, Vec<_>) = raw.into_iter().partition(revoked::is_device_row);
+        let rows = observe::to_observed(raw);
         derive_history(ring, &rows);
         for c in &rows {
             if !g.is_active() {
@@ -376,7 +395,7 @@ async fn apply_commits<A: Arkiv>(a: &A, mls: &Mls, ring: &mut Keyring) -> Result
         }
         // A removal started a new id-key generation: its later commits use it.
         if ring.id_keys().count() == gens || !g.is_active() {
-            return Ok(g.is_active());
+            return Ok((g.is_active(), devices));
         }
     }
 }

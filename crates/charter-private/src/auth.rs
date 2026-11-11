@@ -18,7 +18,7 @@ use charter_sync::{Keys, Result, SyncError};
 use crate::keyring::Role;
 use crate::seal::{Key, aad, blind, open, seal};
 
-pub const CTX_LEAF: &[u8] = b"charter-mls-leaf";
+pub const CTX_LEAF: &[u8] = b"charter-mls-leaf-device";
 pub const CTX_COMMIT: &[u8] = b"charter-mls-commit";
 pub const CTX_WELCOME: &[u8] = b"charter-mls-welcome";
 pub const CTX_GRANT: &[u8] = b"charter-mls-grant";
@@ -51,18 +51,20 @@ fn sign(keys: &Keys, ctx: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| SyncError::coded(ErrorCode::Internal, format!("sign: {e:?}")))
 }
 
-fn leaf_msg(sig_key: &[u8], nid: &Nid) -> Vec<u8> {
-    [sig_key, nid.as_slice()].concat()
+fn leaf_msg(sig_key: &[u8], nid: &Nid, device: &Nid) -> Vec<u8> {
+    [sig_key, nid.as_slice(), device.as_slice()].concat()
 }
 
-/// This member's signature over its MLS signature key.
-pub fn sign_leaf(keys: &Keys, sig_key: &[u8]) -> Result<Vec<u8>> {
-    sign(keys, CTX_LEAF, &leaf_msg(sig_key, &keys.nid()))
+/// This member's signature over its MLS signature key and the device (head-model device
+/// nid) the leaf is for, so a revoke of that device names exactly this leaf.
+pub fn sign_leaf(keys: &Keys, sig_key: &[u8], device: &Nid) -> Result<Vec<u8>> {
+    sign(keys, CTX_LEAF, &leaf_msg(sig_key, &keys.nid(), device))
 }
 
-/// Whether `sig` by the key `pk` (which must be `nid`'s) binds `sig_key` to `nid`.
-pub fn leaf_bound(nid: &Nid, pk: &[u8], sig: &[u8], sig_key: &[u8]) -> bool {
-    pk_of(nid, pk).is_some_and(|pk| verifies(&pk, CTX_LEAF, &leaf_msg(sig_key, nid), sig))
+/// Whether `sig` by the key `pk` (which must be `nid`'s) binds `sig_key` to `nid`'s device
+/// `device`.
+pub fn leaf_bound(nid: &Nid, pk: &[u8], sig: &[u8], sig_key: &[u8], device: &Nid) -> bool {
+    pk_of(nid, pk).is_some_and(|pk| verifies(&pk, CTX_LEAF, &leaf_msg(sig_key, nid, device), sig))
 }
 
 /// What an admin attests for a commit (`kp = None`) or a welcome for key package `kp`.
@@ -337,22 +339,23 @@ mod tests {
     }
 
     #[test]
-    fn a_leaf_binding_only_verifies_for_its_own_nid_and_key() {
+    fn a_leaf_binding_only_verifies_for_its_own_nid_key_and_device() {
         let keys = Keys::from_seed(charter_crypto::MasterSeed::from_bytes([1; 32]));
         let other = Keys::from_seed(charter_crypto::MasterSeed::from_bytes([2; 32]));
-        let sig = sign_leaf(&keys, b"mls key").expect("sign");
+        let dev = [7; 32];
+        let sig = sign_leaf(&keys, b"mls key", &dev).expect("sign");
         let pk = keys.pk().as_bytes();
-        assert!(leaf_bound(&keys.nid(), pk, &sig, b"mls key"));
-        assert!(!leaf_bound(&keys.nid(), pk, &sig, b"other key"));
+        assert!(leaf_bound(&keys.nid(), pk, &sig, b"mls key", &dev));
+        assert!(!leaf_bound(&keys.nid(), pk, &sig, b"other key", &dev));
         assert!(
-            !leaf_bound(&other.nid(), pk, &sig, b"mls key"),
+            !leaf_bound(&keys.nid(), pk, &sig, b"mls key", &[8; 32]),
+            "another device"
+        );
+        assert!(
+            !leaf_bound(&other.nid(), pk, &sig, b"mls key", &dev),
             "pk is not that nid's"
         );
-        assert!(!leaf_bound(
-            &other.nid(),
-            other.pk().as_bytes(),
-            &sig,
-            b"mls key"
-        ));
+        let theirs = other.pk().as_bytes();
+        assert!(!leaf_bound(&other.nid(), theirs, &sig, b"mls key", &dev));
     }
 }
