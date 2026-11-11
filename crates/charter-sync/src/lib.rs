@@ -25,6 +25,7 @@ pub mod pieces;
 pub mod program;
 pub mod push;
 pub mod push_send;
+pub mod ref_table;
 pub mod release;
 pub mod repo;
 pub mod search;

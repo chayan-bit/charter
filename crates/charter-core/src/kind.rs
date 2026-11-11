@@ -21,9 +21,11 @@ pub enum Kind {
     Head,
     /// Format v3: the same head with compact piece runs and pack codecs (head-model 13).
     HeadV3,
+    /// Format v4: a v3 head whose refs overflow into a ref table (head-model 14).
+    HeadV4,
 }
 
-const ALL: [Kind; 13] = [
+const ALL: [Kind; 14] = [
     Kind::Peer,
     Kind::Bind,
     Kind::Id,
@@ -37,6 +39,7 @@ const ALL: [Kind; 13] = [
     Kind::Device,
     Kind::Head,
     Kind::HeadV3,
+    Kind::HeadV4,
 ];
 
 impl Kind {
@@ -55,6 +58,7 @@ impl Kind {
             Kind::Device => 11,
             Kind::Head => 12,
             Kind::HeadV3 => 13,
+            Kind::HeadV4 => 14,
         }
     }
 
@@ -75,6 +79,7 @@ impl Kind {
             Kind::Head => "head",
             // The content-hash tag; the entity is still stored as `ag.kind = 'head'`.
             Kind::HeadV3 => "head3",
+            Kind::HeadV4 => "head4",
         }
     }
 
@@ -96,6 +101,7 @@ impl Kind {
             Kind::Device => b"arkiv-git/device/v1",
             Kind::Head => b"arkiv-git/head/v1",
             Kind::HeadV3 => b"arkiv-git/head/v3",
+            Kind::HeadV4 => b"arkiv-git/head/v4",
         }
     }
 

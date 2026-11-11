@@ -27,6 +27,10 @@ pub use body::{
     PieceRef, PieceRun, ProgramPin, RefEntry, RefsBody, Require, head_patch_attributes,
     open_head_calldata, runs,
 };
+pub use body::{
+    HEAD_V4_LAYOUT_VERSION, HeadBodyV4, MAX_TABLE_PIECES, MAX_TABLE_SIZE, RefTable, decode_table,
+    effective_refs, encode_table,
+};
 pub use canonical::{CanonicalRefs, canonical_refs};
 pub use chain::{
     AcceptedHead, AnchorChain, AnchorLink, BindChain, BindLink, CompletenessObs, Device,

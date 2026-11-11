@@ -195,7 +195,7 @@ pub fn positions(runs: &[PieceRun], here: &LandingJson) -> Vec<(u64, u32)> {
         .collect()
 }
 
-async fn run_bytes<A: Arkiv>(
+pub(crate) async fn run_bytes<A: Arkiv>(
     a: &A,
     rid: &Rid,
     senders: &BTreeSet<Address>,

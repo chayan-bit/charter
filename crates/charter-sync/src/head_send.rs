@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use charter_core::codec::{self, Codec};
 use charter_core::{
-    Body, DeviceBody, ErrorCode, Hash32, HeadBodyV3, MAX_PACK_SIZE, ManifestBody, Pack, PackPieces,
-    PieceRun, ZERO, chunk_count, entity_attributes, head_patch_attributes, resolve_stamps, runs,
+    Body, DeviceBody, ErrorCode, Hash32, HeadBodyV3, HeadBodyV4, HeadRef, MAX_PACK_SIZE,
+    MAX_TABLE_PIECES, ManifestBody, Pack, PackPieces, PieceRun, RefTable, ZERO, chunk_count,
+    entity_attributes, head_patch_attributes, max_body_len, resolve_stamps, runs,
 };
 use charter_store::{Arkiv, Operation, TxHash, U256, create_op_flags, patch_op, random_salt};
 use futures_util::future::try_join_all;
@@ -23,7 +24,7 @@ use crate::push_send::{Cost, first_write_ops};
 use crate::repo::{CONTROL_LIFETIME, staging};
 use crate::state::{LandingJson, State};
 use crate::write::{self, chunk_op, entity_op, sign, wire};
-use crate::{Result, SyncError, packs, warn};
+use crate::{Result, SyncError, packs, ref_table, warn};
 
 /// Creation flags of a head: `permissionlessExtension`, not readonly, so `C_d` can patch it.
 const HEAD_FLAGS: u8 = 2;
@@ -369,7 +370,10 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 plan.stored.len()
             )
         });
-        let content = Box::pin(self.content(&plan)).await?;
+        let choice = self.refs_choice(&plan);
+        let mut content = Box::pin(self.content(&plan, choice.inline(&plan.refs))).await?;
+        let table = Box::pin(self.upload_table(&choice)).await?;
+        content.uploaded |= table.as_ref().is_some_and(|(_, new)| *new);
         drop(t);
         let t = span(|| {
             format!(
@@ -377,7 +381,10 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 content.inline.iter().map(Vec::len).sum::<usize>()
             )
         });
-        let landed = Box::pin(self.send_heads(&plan, &content, pre, &mut state)).await?;
+        let refs = choice.inline(&plan.refs).to_vec();
+        let table = table.map(|(t, _)| t);
+        let landed =
+            Box::pin(self.send_heads(&plan, &content, (refs, table), pre, &mut state)).await?;
         drop(t);
         let t = span(|| "push.recheck".into());
         let v2 = Box::pin(self.own_v2(&state))
@@ -419,7 +426,51 @@ impl<A: Arkiv> HeadPush<'_, A> {
         Ok(out)
     }
 
-    async fn content(&self, plan: &Plan) -> Result<Content> {
+    /// How the next body carries `plan.refs` (head-model 14.3): inline when a v3 body
+    /// fits, else with the previous ref table or a new one.
+    fn refs_choice(&self, plan: &Plan) -> ref_table::Choice {
+        let rows = plan.prev.as_ref().and_then(|p| {
+            let t = p.head.refs_table.as_ref()?;
+            Some((t, ref_table::cached(&t.table_id)?, p.landing.block))
+        });
+        let prev = rows.as_ref().map(|(t, r, l)| (*t, r.as_slice(), *l));
+        let max = max_body_len(self.dev.pk().alg().sig_len());
+        // The carried packs and one new pack, as `inline_fits` bounds them.
+        let packs = packs_bound(plan) + 40 + 2 * 20;
+        ref_table::choose(&plan.refs, prev, packs, max)
+    }
+
+    /// Sends a new ref table's pieces from `B_d` before the head tx (reusing pieces a
+    /// refused attempt landed, issue #26); the table the body names and whether it is new.
+    async fn upload_table(&self, choice: &ref_table::Choice) -> Result<Option<(RefTable, bool)>> {
+        let rows = match choice {
+            ref_table::Choice::Inline => return Ok(None),
+            ref_table::Choice::Reuse { table, .. } => return Ok(Some((table.clone(), false))),
+            ref_table::Choice::New { table, .. } => table,
+        };
+        let (codec, stored, table_id) = ref_table::stored(rows);
+        let pieces: Vec<&[u8]> = stored.chunks(PIECE_SIZE).collect();
+        if pieces.len() > MAX_TABLE_PIECES {
+            return Err(SyncError::coded(
+                ErrorCode::RefsTooLarge,
+                format!(
+                    "this device's ref table needs {} pieces, at most {MAX_TABLE_PIECES} fit",
+                    pieces.len()
+                ),
+            ));
+        }
+        let at = self.bulk_pieces(&pieces).await?;
+        ref_table::remember(table_id, std::sync::Arc::new(rows.clone()));
+        let t = RefTable {
+            table_id,
+            codec: codec as u8,
+            runs: runs(&at),
+            stamp: 0,
+        };
+        Ok(Some((t, true)))
+    }
+
+    async fn content(&self, plan: &Plan, inline_refs: &[HeadRef]) -> Result<Content> {
         let kept: Vec<Hash32> = match &plan.prev {
             Some(p) if !plan.keep_layers.is_empty() && !plan.after.is_empty() => {
                 p.head.body.snapshot.clone()
@@ -450,7 +501,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 .join(format!("v3-{}.pack", hex32(&pack_id)));
             std::fs::write(&file, &plan.thin).map_err(|e| SyncError::io(file.display(), e))?;
             files.push((file, pack_id));
-            let pieces = match plan.stored.len() <= INLINE_MAX && inline_fits(plan) {
+            let pieces = match plan.stored.len() <= INLINE_MAX && inline_fits(plan, inline_refs) {
                 true => {
                     inline.push(plan.stored.clone());
                     vec![PieceRun::HERE]
@@ -705,13 +756,10 @@ impl<A: Arkiv> HeadPush<'_, A> {
         prev_key: Option<Hash32>,
         full: bool,
     ) -> Result<(Operation, Hash32)> {
-        let s = sign(self.dev.sk(), body)?;
-        let attrs = match (prev_key, full) {
-            (Some(_), false) => head_patch_attributes(&s.bytes),
-            _ => {
-                let env = charter_core::Envelope::decode(&s.bytes)?;
-                entity_attributes(&env, &s.bytes, body)
-            }
+        // A body naming a ref table is signed and stored as v4 (head-model 14.2).
+        let (s, attrs) = match body.refs_table.is_some() {
+            true => head_attrs(self.dev.sk(), &HeadBodyV4(body.clone()), prev_key, full)?,
+            false => head_attrs(self.dev.sk(), body, prev_key, full)?,
         };
         let op = match prev_key {
             None => create_op_flags(
@@ -730,6 +778,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
         &self,
         plan: &Plan,
         content: &Content,
+        (mut refs, mut table): (Vec<HeadRef>, Option<RefTable>),
         mut pre: Pre,
         state: &mut State,
     ) -> Result<Vec<(Hash32, LandingJson)>> {
@@ -743,7 +792,6 @@ impl<A: Arkiv> HeadPush<'_, A> {
             ),
             None => (0, 0, ZERO, None),
         };
-        let mut refs = plan.refs.clone();
         let mut packs = content
             .packs
             .iter()
@@ -754,7 +802,12 @@ impl<A: Arkiv> HeadPush<'_, A> {
             .collect::<Result<Vec<_>>>()?;
         let mut inline = content.inline.clone();
         let mut manifests = content.manifests.clone();
-        let mut full = migrates(plan.prev.as_ref()) || self.a.seals();
+        // A move between v3 and v4 changes `ag.v`: that patch sets every attribute (14.3).
+        let was_v4 = plan
+            .prev
+            .as_ref()
+            .is_some_and(|p| p.head.refs_table.is_some());
+        let mut full = migrates(plan.prev.as_ref()) || self.a.seals() || was_v4 != table.is_some();
         let mut out = vec![];
         for _ in 0..3 {
             let c_d = self.dev.control_address(&rid);
@@ -822,8 +875,8 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 packs: packs.clone(),
                 prev_tx,
                 object_hash: 1,
+                refs_table: table.clone(),
             };
-            body.validate()?;
             let (head, h) = self.head_op(&body, key, full)?;
             let mut ops = inline
                 .iter()
@@ -878,6 +931,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 key = Some(self.created_head_key(&rid).await?);
             }
             refs = resolve_stamps(&refs, landing.block);
+            table = table.map(|t| t.resolved(landing.block));
             for p in &mut packs {
                 p.runs = here_at(&p.runs, &landing);
             }
@@ -1002,17 +1056,39 @@ async fn tokio_sleep(d: Duration) {
 
 /// Upper bound of the head body's bytes plus 16 KiB of inline pieces stays inside one tx
 /// (head-model 4.2); otherwise the pack goes as bulk pieces.
-fn inline_fits(plan: &Plan) -> bool {
-    let refs: usize = plan.refs.iter().map(|e| e.name.len() + 2 * 32 + 32).sum();
-    let pieces: usize = plan
-        .carried
+fn inline_fits(plan: &Plan, inline_refs: &[HeadRef]) -> bool {
+    let refs: usize = inline_refs.iter().map(|e| e.name.len() + 2 * 32 + 32).sum();
+    let body = 512 + refs + packs_bound(plan) + charter_core::ENVELOPE_OVERHEAD + 3_373;
+    // Attribute and ABI framing of the head and the piece ops, generously.
+    body + body / 4 + INLINE_MAX + 8_192 <= charter_store::MAX_RAW_TX_BYTES
+}
+
+/// Upper bound of the body bytes of the packs `plan` carries.
+fn packs_bound(plan: &Plan) -> usize {
+    plan.carried
         .iter()
         .map(|p| match &p.pieces {
             PackPieces::Txs(t) => t.len() * 72 + 40,
             PackPieces::Runs(r) => r.len() * 20 + 40,
         })
-        .sum();
-    let body = 512 + refs + pieces + charter_core::ENVELOPE_OVERHEAD + 3_373;
-    // Attribute and ABI framing of the head and the piece ops, generously.
-    body + body / 4 + INLINE_MAX + 8_192 <= charter_store::MAX_RAW_TX_BYTES
+        .sum()
+}
+
+/// `body` signed, and the attributes of its create or full patch, or of a minimal patch.
+fn head_attrs<B: Body>(
+    sk: &charter_crypto::SecretKey,
+    body: &B,
+    prev_key: Option<Hash32>,
+    full: bool,
+) -> Result<(crate::write::Signed, Vec<charter_core::Attribute>)> {
+    body.validate()?;
+    let s = sign(sk, body)?;
+    let attrs = match (prev_key, full) {
+        (Some(_), false) => head_patch_attributes(B::KIND, &s.bytes),
+        _ => {
+            let env = charter_core::Envelope::decode(&s.bytes)?;
+            entity_attributes(&env, &s.bytes, body)
+        }
+    };
+    Ok((s, attrs))
 }

@@ -5,11 +5,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use charter_core::{Body, Device, DeviceHead, Hash32, HeadBody, Merged, Nid, Rid, ZERO, merge};
+use std::sync::Arc;
+
+use charter_core::{
+    Body, Device, DeviceHead, Hash32, HeadBody, Merged, Nid, RefTable, Rid, ZERO, decode_table,
+    encode_table, merge,
+};
 use charter_store::Arkiv;
 use serde::{Deserialize, Serialize};
 
-use crate::heads::{LANDING_WINDOW, V2, body_at, landing};
+use crate::heads::{LANDING_WINDOW, V2, landing, raw_body_at};
 use crate::ids::hex32;
 use crate::state::{LandingJson, read_json, write_json};
 use crate::{Result, SyncError};
@@ -23,16 +28,35 @@ pub struct BodyAt {
 }
 
 /// Verified bodies by landing tx, cached next to the git cache (calldata never changes).
+/// A v4 body is kept with its field 7 only, its ref table once by `table_id` (head-model
+/// 14.4), so a long walk of a large device stores each table once.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BodyCache {
     bodies: BTreeMap<String, (String, LandingJson)>,
     /// Landing of a current head, by head `h`.
     current: BTreeMap<String, LandingJson>,
+    /// The ref table of each cached v4 body (CBOR hex), by landing tx.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    table_of: BTreeMap<String, String>,
+    /// Decoded tables (canonical CBOR hex), by `table_id`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tables: BTreeMap<String, String>,
 }
 
 impl BodyCache {
+    /// The cache file, its tables handed to the process's table cache.
     pub fn load(path: &Path) -> Self {
-        read_json(path).ok().flatten().unwrap_or_default()
+        let c: Self = read_json(path).ok().flatten().unwrap_or_default();
+        for (id, t) in &c.tables {
+            let id = hex::decode(id)
+                .ok()
+                .and_then(|b| <Hash32>::try_from(b).ok());
+            let refs = hex::decode(t).ok().and_then(|b| decode_table(&b).ok());
+            if let (Some(id), Some(refs)) = (id, refs) {
+                crate::ref_table::remember(id, Arc::new(refs));
+            }
+        }
+        c
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -43,17 +67,32 @@ impl BodyCache {
     pub fn absorb(&mut self, other: Self) {
         self.bodies.extend(other.bodies);
         self.current.extend(other.current);
+        self.table_of.extend(other.table_of);
+        self.tables.extend(other.tables);
     }
 
-    fn get(&self, tx: &Hash32) -> Option<(HeadBody, LandingJson)> {
+    fn get(&self, tx: &Hash32) -> Option<(HeadBody, Option<RefTable>, LandingJson)> {
         let (hex_body, l) = self.bodies.get(&hex32(tx))?;
         let body = HeadBody::decode(&hex::decode(hex_body).ok()?).ok()?;
-        Some((body, *l))
+        let table = match self.table_of.get(&hex32(tx)) {
+            Some(t) => Some(minicbor::decode(&hex::decode(t).ok()?).ok()?),
+            None => None,
+        };
+        Some((body, table, *l))
     }
 
-    fn put(&mut self, body: &HeadBody, l: LandingJson) {
+    fn put(&mut self, body: &HeadBody, table: Option<&RefTable>, l: LandingJson) {
         self.bodies
             .insert(hex32(&l.tx), (hex::encode(body.encode()), l));
+        let Some(t) = table else { return };
+        let Ok(t_bytes) = minicbor::to_vec(t) else {
+            return;
+        };
+        self.table_of.insert(hex32(&l.tx), hex::encode(t_bytes));
+        if let Some(refs) = crate::ref_table::cached(&t.table_id) {
+            self.tables
+                .insert(hex32(&t.table_id), hex::encode(encode_table(&refs)));
+        }
     }
 }
 
@@ -85,11 +124,15 @@ pub async fn walk<A: Arkiv>(
             break;
         }
         let tx = last.body.prev_tx;
-        let (body, l) = match cache.get(&tx) {
+        let (raw, table, l) = match cache.get(&tx) {
             Some(x) => x,
-            None => body_at(a, rid, dev, &tx)
+            None => raw_body_at(a, rid, dev, &tx)
                 .await?
                 .ok_or_else(|| broken(dev, "prev_tx does not carry a body of this device"))?,
+        };
+        let body = match &table {
+            Some(t) => crate::ref_table::effective(a, rid, dev, &raw, t).await?,
+            None => raw.clone(),
         };
         if body.seq + 1 != last.body.seq
             || body.nid != last.body.nid
@@ -97,7 +140,7 @@ pub async fn walk<A: Arkiv>(
         {
             return Err(broken(dev, "prev_tx chain is not consecutive"));
         }
-        cache.put(&body, l);
+        cache.put(&raw, table.as_ref(), l);
         out.push(BodyAt {
             device: dev.nid,
             body,

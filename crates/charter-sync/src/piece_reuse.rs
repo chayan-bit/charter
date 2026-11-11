@@ -69,11 +69,12 @@ pub(crate) async fn reusable<A: Arkiv>(
 
 /// Records where each piece of this upload landed, for a retry of the same push.
 pub(crate) fn record(outgoing: &Path, pieces: &[&[u8]], at: &[(u64, u32)]) -> Result<()> {
-    let r: Record = pieces
-        .iter()
-        .map(|p| sha_hex(p))
-        .zip(at.iter().copied())
-        .collect();
+    // Added to what this push already recorded: a push may upload a pack and a ref table.
+    let mut r: Record = read_json(&path(outgoing))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    r.extend(pieces.iter().map(|p| sha_hex(p)).zip(at.iter().copied()));
     write_json(&path(outgoing), &r)
 }
 

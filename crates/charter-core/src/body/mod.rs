@@ -4,6 +4,7 @@ mod anchor;
 mod cob;
 mod head;
 mod head_v3;
+mod head_v4;
 mod id;
 mod pack;
 mod peer;
@@ -18,6 +19,10 @@ pub use head::{
 pub use head_v3::{
     HEAD_V3_LAYOUT_VERSION, HeadBodyV3, PackV3, PieceRun, head_patch_attributes,
     open_head_calldata, runs,
+};
+pub use head_v4::{
+    HEAD_V4_LAYOUT_VERSION, HeadBodyV4, MAX_TABLE_PIECES, MAX_TABLE_SIZE, RefTable, decode_table,
+    effective_refs, encode_table,
 };
 pub use id::{IdBody, ProgramPin};
 pub use pack::{Pack, PackPieces};

@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use charter_core::{
     AttrValue, Device, DeviceHead, ErrorCode, Hash32, HeadBody, HeadNonce, IdentityChain, Kind,
-    Merged, Nid, Observed, PeerInfo, RefsBody, Rid, accept_device_head, accept_own_device_head,
-    devices, merge, merged_refs, open_head_calldata, verify_entity,
+    Merged, Nid, Observed, PeerInfo, RefTable, RefsBody, Rid, accept_device_head,
+    accept_own_device_head, devices, merge, merged_refs, open_head_calldata, verify_entity,
 };
 use charter_store::{Arkiv, MinedTx, Pred, tx_rows};
 use futures_util::future::try_join_all;
@@ -181,11 +181,27 @@ async fn read_device<A: Arkiv>(
     if let Ok(head) = accept(rid, nid, identity, state, &quick)
         && exact(head.as_ref(), &quick.nonce)
     {
+        let head = Box::pin(with_table(a, rid, &dev, head)).await?;
         return Ok(device_view(quick, head));
     }
     let full = DeviceRead::bracketed(a, rid, &dev).await?;
     let head = accept(rid, nid, identity, state, &full)?;
+    let head = Box::pin(with_table(a, rid, &dev, head)).await?;
     Ok(device_view(full, head))
+}
+
+/// A v4 head with its ref table overlaid (head-model 14.4); other heads as they are.
+async fn with_table<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    dev: &Device,
+    head: Option<DeviceHead>,
+) -> Result<Option<DeviceHead>> {
+    let Some(mut h) = head else {
+        return Ok(None);
+    };
+    crate::ref_table::resolve(a, rid, dev, &mut h).await?;
+    Ok(Some(h))
 }
 
 /// The v2 view of identity `nid` from its device delegation rows (anchor kind, `ag.v = 2`).
@@ -199,9 +215,10 @@ pub async fn build<A: Arkiv>(
     state: &State,
 ) -> Result<V2> {
     let devs = devices(rid, info, device_rows);
+    // Boxed: these futures are large, and tests poll them on 2 MiB threads.
     let views = try_join_all(
         devs.into_iter()
-            .map(|d| read_device(a, rid, nid, d, identity, state)),
+            .map(|d| Box::pin(read_device(a, rid, nid, d, identity, state))),
     )
     .await?;
     merged(a, rid, views, state).await
@@ -310,13 +327,14 @@ pub async fn landing<A: Arkiv>(
     Ok(None)
 }
 
-/// A verified earlier body of `dev`'s head, read from the calldata of `tx`.
-pub async fn body_at<A: Arkiv>(
+/// A verified earlier body of `dev`'s head, read from the calldata of `tx`, with the ref
+/// table of a v4 body (head-model 14) still to overlay: [`body_at`] does that.
+pub async fn raw_body_at<A: Arkiv>(
     a: &A,
     rid: &Rid,
     dev: &Device,
     tx: &Hash32,
-) -> Result<Option<(HeadBody, LandingJson)>> {
+) -> Result<Option<(HeadBody, Option<RefTable>, LandingJson)>> {
     let h = charter_store::TxHash::from(*tx);
     // The tx and its receipt together: one round trip per walked body.
     let (mined, receipt) = futures_util::future::try_join(a.mined_tx(h), a.receipt(h)).await?;
@@ -329,16 +347,36 @@ pub async fn body_at<A: Arkiv>(
     }
     let body = calldata_rows(a, &mined)
         .into_iter()
-        .find_map(|o| head_body(&o, dev).filter(|b| b.rid == *rid));
-    Ok(body.map(|b| (b, landed(&mined))))
+        .find_map(|o| head_body(&o, dev).filter(|(b, _)| b.rid == *rid));
+    Ok(body.map(|(b, t)| (b, t, landed(&mined))))
 }
 
-/// The head body a calldata row carries, signed by `dev`: a v2 body, or a v3 body (full row
-/// or minimal patch) as its shared fields, which is all the program fold reads.
-fn head_body(o: &Observed, dev: &Device) -> Option<HeadBody> {
+/// A verified earlier body of `dev`'s head, read from the calldata of `tx`, with effective
+/// refs.
+pub async fn body_at<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    dev: &Device,
+    tx: &Hash32,
+) -> Result<Option<(HeadBody, LandingJson)>> {
+    let Some((body, table, l)) = raw_body_at(a, rid, dev, tx).await? else {
+        return Ok(None);
+    };
+    let body = match table {
+        Some(t) => crate::ref_table::effective(a, rid, dev, &body, &t).await?,
+        None => body,
+    };
+    Ok(Some((body, l)))
+}
+
+/// The head body a calldata row carries, signed by `dev`: a v2 body, or a v3 or v4 body
+/// (full row or minimal patch) as its shared fields and the v4 ref table, which is all the
+/// program fold reads.
+fn head_body(o: &Observed, dev: &Device) -> Option<(HeadBody, Option<RefTable>)> {
     if let Ok(e) = verify_entity::<HeadBody>(o, &dev.pk) {
-        return Some(e.body);
+        return Some((e.body, None));
     }
     let (envelope, body, _) = open_head_calldata(o).ok()?;
-    (envelope.signer == dev.nid && envelope.verify(&dev.pk).is_ok()).then(|| body.shared())
+    (envelope.signer == dev.nid && envelope.verify(&dev.pk).is_ok())
+        .then(|| (body.shared(), body.refs_table.clone()))
 }
