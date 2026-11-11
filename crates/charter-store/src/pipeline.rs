@@ -48,6 +48,9 @@ pub struct PipelineConfig {
     /// The jobs depend on each other in order (control and COB posts): a job is never
     /// sent again behind txs that already went out after it; the run fails instead.
     pub ordered: bool,
+    /// Bulk runs pace at the block gas target ([`PipelineConfig::bulk`]): about half the
+    /// fee of a big push, about a third more wall time (`CHARTER_PACE=economy`).
+    pub economy: bool,
 }
 
 impl Default for PipelineConfig {
@@ -66,18 +69,25 @@ impl Default for PipelineConfig {
             reuse_estimates: true,
             use_heads: true,
             ordered: false,
+            economy: false,
         }
     }
 }
 
 impl PipelineConfig {
-    /// For many large independent txs (a big upload): up to the block gas target (half
-    /// the limit, EIP-1559 elasticity 2) unconfirmed, refilled as each block lands. The base
-    /// fee rises only above the target: a 10 MiB push that kept blocks 91% full moved it
-    /// from 1.00 to 2.64 gwei over 10 blocks (MEASURED on Rabdi, 2026-11-11).
+    /// For many large independent txs (a big upload): up to two blocks of gas unconfirmed,
+    /// so every block this sender can get is full and the next block's txs already wait in
+    /// the pool. In economy mode, up to the block gas target (half the limit, EIP-1559
+    /// elasticity 2), refilled as each block lands: the base fee rises only above the
+    /// target. MEASURED on Rabdi, 2026-11-11: a 10 MiB push at full blocks moved it from
+    /// 1.00 to 2.64 gwei and cost 1.218 tGLM in 96.9 s; at the target, 0.625 tGLM in 134 s.
     pub fn bulk(&self) -> Self {
+        let pace_percent = match self.economy {
+            true => 50,
+            false => self.pace_percent.max(200),
+        };
         Self {
-            pace_percent: 50,
+            pace_percent,
             ..self.clone()
         }
     }

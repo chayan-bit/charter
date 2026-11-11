@@ -51,6 +51,18 @@ fn lifetime(var: &str, old: &str, default: u64) -> Result<u64, CliError> {
     }
 }
 
+/// `CHARTER_PACE`: `economy` paces big uploads at the block gas target (about half the
+/// fee, about a third more wall time); unset, empty or `default` keeps full blocks.
+fn economy(v: Option<&str>) -> Result<bool, CliError> {
+    match v.unwrap_or_default() {
+        "" | "default" => Ok(false),
+        "economy" => Ok(true),
+        other => Err(CliError::Usage(format!(
+            "CHARTER_PACE: expected `default` or `economy`, got `{other}`"
+        ))),
+    }
+}
+
 /// `CHARTER_BACKEND`, else the pre-rename `ARKIV_GIT_BACKEND`.
 fn backend_var() -> Option<String> {
     env_compat("CHARTER_BACKEND", "ARKIV_GIT_BACKEND").map(|v| v.to_string_lossy().into_owned())
@@ -90,6 +102,8 @@ pub async fn connect() -> Result<(Backend, Config), CliError> {
         "ARKIV_GIT_CONTROL_LIFETIME",
         cfg.control_lifetime,
     )?;
+    let pace = std::env::var("CHARTER_PACE").ok();
+    cfg.pipeline.economy = economy(pace.as_deref())?;
     Ok((backend, cfg))
 }
 
@@ -197,5 +211,14 @@ mod tests {
         );
         assert!(target(Some("mem:")).is_err());
         assert!(target(Some("http://x")).is_err());
+    }
+
+    #[test]
+    fn pace_variable_selects_default_or_economy() {
+        assert!(!economy(None).expect("unset"));
+        assert!(!economy(Some("")).expect("empty"));
+        assert!(!economy(Some("default")).expect("default"));
+        assert!(economy(Some("economy")).expect("economy"));
+        assert!(economy(Some("cheap")).is_err());
     }
 }

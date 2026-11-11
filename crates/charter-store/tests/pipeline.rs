@@ -420,9 +420,9 @@ async fn a_funded_run_over_many_blocks_reads_the_balance_once() {
     let spy = Spy::new(fake.clone(), false);
     let cfg = PipelineConfig::default().bulk();
     let mut p = TxPipeline::new(&spy, key.clone(), CHAIN, cfg).funded_by(funder);
-    let jobs: Vec<_> = (0..12).map(|i| vec![blob(65_536, DAY, i)]).collect();
+    let jobs: Vec<_> = (0..24).map(|i| vec![blob(65_536, DAY, i)]).collect();
     let landed = with_miner(fake.clone(), p.run(jobs)).await.expect("run");
-    assert_eq!(landed.len(), 12);
+    assert_eq!(landed.len(), 24);
     assert!(gas_by_block(&landed).len() > 2, "paced over several blocks");
     assert_eq!(
         spy.balances(),
@@ -500,11 +500,45 @@ async fn one_estimate_prices_every_chunk_of_a_shape() {
     assert_eq!(spy.estimates(), 3, "reuse can be switched off");
 }
 
+/// Blocks a bulk run of 40 chunks lands in under `cfg`.
+async fn bulk_blocks(cfg: PipelineConfig) -> usize {
+    let (fake, key) = setup();
+    let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, cfg.bulk());
+    let jobs: Vec<_> = (0..40).map(|i| vec![blob(65_536, DAY, i)]).collect();
+    let landed = with_miner(fake.clone(), p.run(jobs)).await.expect("run");
+    assert_eq!(landed.len(), 40);
+    gas_by_block(&landed).len()
+}
+
 #[tokio::test(start_paused = true)]
-async fn bulk_fills_each_block_up_to_the_gas_target_so_the_base_fee_never_rises() {
+async fn default_bulk_never_takes_more_blocks_than_v0_4_0_and_economy_trades_blocks_for_fee() {
+    // v0.4.0: up to two blocks of gas unconfirmed, so each block takes all it can hold.
+    let v040 = PipelineConfig {
+        pace_percent: 200,
+        ..PipelineConfig::default()
+    };
+    let economy = PipelineConfig {
+        economy: true,
+        ..PipelineConfig::default()
+    };
+    let (old, now) = (
+        bulk_blocks(v040).await,
+        bulk_blocks(PipelineConfig::default()).await,
+    );
+    assert!(now <= old, "default {now} blocks, v0.4.0 {old}");
+    let slow = bulk_blocks(economy).await;
+    assert!(slow > now, "economy {slow} blocks, default {now}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn economy_bulk_fills_each_block_up_to_the_gas_target_so_the_base_fee_never_rises() {
     let (fake, key) = setup();
     let fee0 = fake.base_fee().await.expect("fee");
-    let cfg = PipelineConfig::default().bulk();
+    let cfg = PipelineConfig {
+        economy: true,
+        ..PipelineConfig::default()
+    }
+    .bulk();
     let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, cfg);
     let jobs: Vec<_> = (0..40).map(|i| vec![blob(65_536, DAY, i)]).collect();
     let (landed, t) = with_miner(fake.clone(), p.run_measured(jobs))

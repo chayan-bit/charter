@@ -239,6 +239,21 @@ The refresh is the cut: v0.4.0 rewrites the whole 13.1 MiB snapshot, about 210 c
 The small push drops one RPC (34 instead of 35; the manifest query took 464 to 605 ms) and spawns as many git processes as before (17); its gas is unchanged, as expected without a format change.
 A clone of the 3-layer repo with the installed v0.4.0 binary (`chart 0.4.0`, fresh home) took 9 s, `git fsck --full` is clean and `HEAD` matches the pusher.
 
+### 2.9 Write latency and pacing modes on branch `perf/batch-b` (2026-11-11)
+
+The write path drops round trips without a format change: the chain-id probe rides in the first read's batch, the head tx is signed from what setup and the plan already read (no estimate under 32 KiB, no balance re-read, the tx index from the receipt), the re-check after the head tx reads the peer and the device heads together, the snapshot manifest goes with its last chunks, a first push tops up C_d and the control address in one transfer, and a funded run reads its balance once and counts each landed tx's unused reserve back instead of reading again.
+MEASURED on Rabdi against v0.4.0 (lane A build, own wallet, interleaved runs): small push 12.6 / 11.9 / 10.0 s to 9.5 / 9.4 / 6.6 s, refs-only push 12.6 / 11.9 s to 9.0 / 7.9 s, first push 31.4 s to 23.0 s, each at the same gas.
+
+Big uploads (pieces and snapshot chunks) have two pacing modes; the project rule is that no change may make any operation slower or more expensive, so the default keeps v0.4.0's speed.
+
+- Default: up to two blocks of gas unconfirmed, as in v0.4.0, so each block takes all the chunks it can hold (7 of 3.88M gas in a 30M block) and the next block's chunks already wait in the pool; a push never needs more blocks than in v0.4.0.
+  Holding chunks back to spread them evenly would mean refilling once per block, and a refill that misses the next block costs a whole block (7 of 63 blocks missed on the 10 MiB run below), so the default does not spread.
+  Full blocks raise the base fee 12.5% per block (1.00 to 2.64 gwei over a 10 MiB push), so the default keeps v0.4.0's fee for big pushes; it keeps every saving that costs no time: the single balance read, the manifest with the chunks and the single top-up.
+- Economy, `CHARTER_PACE=economy`: up to the block gas target (15M, half the limit) unconfirmed, refilled as each block lands, so the base fee never rises.
+  MEASURED: a 10 MiB push cost 0.625 tGLM in 134.0 s against v0.4.0's 1.218 tGLM in 96.9 s (-49% fee, +38% time); a 2 MiB push cost 0.127 instead of 0.155 tGLM, its content phase 28.9 s instead of 23.1 s.
+
+Format v3 (brotli, lane B) cuts the bytes of source repos by 28 to 35%; once it lands the default gets both faster and cheaper without any pacing, since fewer chunks need fewer blocks and less gas.
+
 ## 3. Proposals for a much larger cut (need the user's decision)
 
 ### 3.1 Storage tiers: hot entities, cold calldata
