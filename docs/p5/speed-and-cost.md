@@ -252,6 +252,20 @@ Big uploads (pieces and snapshot chunks) have two pacing modes; the project rule
 - Economy, `CHARTER_PACE=economy`: up to the block gas target (15M, half the limit) unconfirmed, refilled as each block lands, so the base fee never rises.
   MEASURED: a 10 MiB push cost 0.625 tGLM in 134.0 s against v0.4.0's 1.218 tGLM in 96.9 s (-49% fee, +38% time); a 2 MiB push cost 0.127 instead of 0.155 tGLM, its content phase 28.9 s instead of 23.1 s.
 
+Live sanity run of `perf/batch-b` 4e3895d (lanes A, B and C merged, default pacing) against v0.4.0, interleaved on fresh repos in one session (MEASURED 2026-11-11, own wallets, `CHARTER_TRACE=1`, gas and tGLM from receipts):
+
+| Step | v0.4.0 s | batch-b s | v0.4.0 tGLM | batch-b tGLM |
+|---|---|---|---|---|
+| first push (64 KiB) | 34.7 | 24.8 | 0.006659 | 0.006665 |
+| small push (3 runs) | 13.0 / 13.8 / 13.0 | 8.0 / 6.4 / 6.2 | 0.000326 to 0.000328 | 0.000325 to 0.000330 |
+| refs-only push | 14.0 | 7.8 | 0.000260 | 0.000260 |
+| no-op fetch (3 runs) | 5.5 / 4.9 / 5.5 | 2.1 / 2.1 / 1.4 | 0 | 0 |
+| clone | 4.5 | 1.5 | 0 | 0 |
+| 2 MiB push | 37.0 (content 24.6) | 25.4 (content 18.3) | 0.1530 | 0.1513 |
+
+Both clones match the pusher's `HEAD` and pass `git fsck --full`.
+Small-push gas moves by about 2k either way with the random payload; the first push's manifest tx costs about 6k gas more (+0.09% of the push, seen in 2 of 2 runs) when it lands in the block of its chunks, which the 2 MiB push's manifest does not show; the cause is open.
+
 Format v3 (brotli, lane B) cuts the bytes of source repos by 28 to 35%; once it lands the default gets both faster and cheaper without any pacing, since fewer chunks need fewer blocks and less gas.
 
 ## 3. Proposals for a much larger cut (need the user's decision)
