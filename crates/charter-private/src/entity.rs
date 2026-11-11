@@ -342,6 +342,25 @@ fn role_ok(ring: &Keyring, row: &EntityData, epoch: u64, kind: &str) -> bool {
     }
 }
 
+/// A sealed head [`admitted`] refused only because `$updatedAt` passed its epoch's end plus
+/// [`GRACE_BLOCKS`] while it was created in time and is not pinned: an extend, which anyone
+/// may send, moves `$updatedAt` without changing the body, so the body may still have
+/// landed in time. Returns the last block it may have landed in, for the caller to check
+/// the body's landing transaction ([`crate::arkiv::Sealed`]).
+pub fn late_head(ring: &Keyring, row: &EntityData) -> Option<u64> {
+    let epoch = u64::from_str_radix(entry(row, EPOCH)?.strip_prefix("0x")?, 16).ok()?;
+    let readonly = row.creation_flags.is_none_or(|f| f.readonly);
+    if readonly || entry(row, "ag.kind") != Some("head") || !role_ok(ring, row, epoch, "head") {
+        return None;
+    }
+    let bound = ring.cutoff(epoch)?.saturating_add(GRACE_BLOCKS);
+    let pinned = entry(row, "ag.h")
+        .and_then(hex_of)
+        .is_some_and(|h| ring.pinned.contains(&hex::encode(h)));
+    let late = row.created_at? <= bound && row.updated_at? > bound;
+    (late && !pinned).then_some(bound)
+}
+
 /// `make(k)` for every id-key generation, as one predicate.
 fn any_gen(ring: &Keyring, make: impl Fn(&crate::seal::Key) -> Pred) -> Pred {
     let mut terms: Vec<Pred> = vec![];

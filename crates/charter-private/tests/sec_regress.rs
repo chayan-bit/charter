@@ -828,3 +828,128 @@ fn an_ex_admins_forged_welcome_is_refused_even_without_a_genuine_one() {
         assert_eq!(b.current().expect("c"), a.current().expect("c"));
     });
 }
+
+/// Peer `p`'s refs as `viewer` accepts them, by tip.
+async fn accepts(net: &Net, viewer: &Peer, rid: &Rid, p: &Peer, tip: &str) -> bool {
+    let want = charter_sync::Want {
+        extra: [p.keys.nid()].into(),
+        ..Default::default()
+    };
+    let r = ring(net, viewer, rid).await.expect("viewer");
+    let view = charter_sync::sync(&Sealed::new(net, r), &viewer.repo(rid), &want)
+        .await
+        .expect("sync");
+    let tip = hex::decode(tip).expect("hex");
+    view.peers
+        .get(&p.keys.nid())
+        .and_then(|v| v.refs_body())
+        .is_some_and(|r| r.refs.iter().any(|e| e.oid == tip))
+}
+
+/// A device-head push (what the CLI's helper does) through `a`.
+async fn head_push<A: charter_store::Arkiv>(
+    a: &A,
+    p: &Peer,
+    rid: &Rid,
+    work: &std::path::Path,
+) -> charter_sync::Result<()> {
+    let repo = p.repo(rid);
+    let view = Box::pin(charter_sync::sync(a, &repo, &p.want())).await?;
+    let git = charter_sync::git::Git::work(Some(work));
+    let hp = charter_sync::HeadPush::prepare(
+        a,
+        &repo,
+        &p.cfg,
+        &p.keys,
+        view,
+        &git,
+        &[upd("refs/heads/main")],
+    )?;
+    Box::pin(hp.run()).await
+}
+
+/// Extends `p`'s head of the repo from `by`'s wallet, as keepalive or a mirror would.
+async fn extend_head(net: &Net, by: &Peer, p: &Peer) {
+    let f = Pred::And(vec![
+        observe::kind(Kind::Head),
+        observe::b32("ag.nid", &p.keys.nid()),
+    ]);
+    let heads = observe::all(net, f).await.expect("heads");
+    let ops = heads
+        .iter()
+        .map(|o| charter_store::extend_op(o.key.into(), by.cfg.control_lifetime))
+        .collect();
+    charter_sync::write::send(net, &by.keys.wallet(), &by.cfg.pipeline, vec![ops])
+        .await
+        .expect("extend");
+}
+
+/// Residual of F3: a writer's push that lands inside the grace window after a commit, and
+/// is then extended by someone else, stays accepted (its body landed in time); a removed
+/// member's later patch of a head she made in time stays refused even once extended.
+#[test]
+fn an_extended_head_that_landed_in_the_grace_window_is_kept() {
+    run(async {
+        let net = Net::new();
+        let [alice, bob, mallory, dan] = [1, 2, 6, 4].map(|s| Peer::new(&net, s));
+        let rid = charter_private::init(&net, &alice.cfg, &alice.keys, &meta("secret"))
+            .await
+            .expect("init");
+        for (p, role) in [
+            (&bob, Role::Write),
+            (&mallory, Role::Write),
+            (&dan, Role::Read),
+        ] {
+            invite(&net, &alice, p, &rid, role).await;
+        }
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (bw, mw) = (work_repo(tmp.path(), "b"), work_repo(tmp.path(), "m"));
+        commit(&bw, &[("b", b"v1")], "feat: b1");
+        commit(&mw, &[("m", b"v1")], "feat: m1");
+        head_push(
+            &Sealed::new(&net, ring(&net, &bob, &rid).await.expect("ring")),
+            &bob,
+            &rid,
+            &bw,
+        )
+        .await
+        .expect("bob v1");
+        head_push(
+            &Sealed::new(&net, ring(&net, &mallory, &rid).await.expect("ring")),
+            &mallory,
+            &rid,
+            &mw,
+        )
+        .await
+        .expect("mallory v1");
+        let (bob_old, mallory_old) = (
+            ring(&net, &bob, &rid).await.expect("b"),
+            ring(&net, &mallory, &rid).await.expect("m"),
+        );
+        charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &mallory.keys.nid())
+            .await
+            .expect("remove mallory");
+
+        // Bob had not refreshed: his push seals under the old epoch, inside the grace window.
+        commit(&bw, &[("b", b"v2")], "feat: b2");
+        head_push(&Sealed::new(&net, bob_old), &bob, &rid, &bw)
+            .await
+            .expect("bob v2 in the window");
+        net.mine(GRACE_BLOCKS + 1);
+        commit(&mw, &[("m", b"v2")], "feat: m2");
+        head_push(&Sealed::new(&net, mallory_old), &mallory, &rid, &mw)
+            .await
+            .expect("mallory patches late");
+        extend_head(&net, &alice, &bob).await;
+        extend_head(&net, &alice, &mallory).await;
+
+        assert!(
+            accepts(&net, &dan, &rid, &bob, &rev(&bw, "main")).await,
+            "bob's v2 is kept"
+        );
+        assert!(
+            !accepts(&net, &dan, &rid, &mallory, &rev(&mw, "main")).await,
+            "mallory's late patch is not"
+        );
+    });
+}

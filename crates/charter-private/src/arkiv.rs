@@ -8,7 +8,11 @@ use charter_store::{
     TxHash, TxInfo, U256,
 };
 
-use crate::entity::{EPOCH, HIDDEN, PACK, blind_pred, is_stopper, open_row, seal_op};
+use crate::entity::{
+    EPOCH, HIDDEN, PACK, blind_pred, is_stopper, late_head, open_row, open_row_unchecked, seal_op,
+};
+use charter_sync::heads::{LANDING_WINDOW, calldata_rows};
+
 use crate::keyring::Keyring;
 
 /// Opens `rows` of `ring`'s repo as [`Sealed`] does: the migration stopper keeps its place
@@ -26,6 +30,57 @@ pub fn open_all(
             false => open_row(ring, r),
         })
         .collect()
+}
+
+/// Whether the body `head` (an opened head row) carries landed by block `bound`: its
+/// signed `at` starts the search, and a body lands within [`LANDING_WINDOW`] blocks after
+/// it (docs/p5/head-model.md 5.4), so only `at + 1 ..= min(at + window, bound)` is read;
+/// a backdated `at` finds nothing there. Costs those blocks' reads, only for a head an
+/// extend moved past its epoch's end.
+async fn landed_by<A: Arkiv>(
+    a: &A,
+    head: &charter_store::EntityData,
+    bound: u64,
+) -> Result<bool, StoreError> {
+    let attr = |n: &str| head.attributes.iter().flatten().find(|x| x.name == n);
+    let body = attr("ag.body").and_then(|x| x.value.as_str()?.strip_prefix("0x").map(hex::decode));
+    let h = attr("ag.h").and_then(|x| x.value.as_str()?.strip_prefix("0x").map(hex::decode));
+    let (Some(Ok(body)), Some(Ok(h)), Some(key), Some(creator), Some(upd)) =
+        (body, h, head.key, head.creator, head.updated_at)
+    else {
+        return Ok(false);
+    };
+    let Some(at) = head_at(&body) else {
+        return Ok(false);
+    };
+    let (Ok(h), key) = (<[u8; 32]>::try_from(h), key.0) else {
+        return Ok(false);
+    };
+    let last = bound.min(at.saturating_add(LANDING_WINDOW)).min(upd);
+    for b in at.saturating_add(1)..=last {
+        for tx in a.block_txs(b).await? {
+            let carries = |o: &charter_core::Observed| {
+                (o.key == key || o.key == [0; 32])
+                    && o.attr("ag.h") == Some(&charter_core::AttrValue::Bytes32(h))
+            };
+            let ours = tx.from == creator && calldata_rows(a, &tx).iter().any(carries);
+            if ours && a.receipt(tx.hash).await?.is_some_and(|r| r.success) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// The signed `at` of a head envelope, v3 or v2.
+fn head_at(envelope: &[u8]) -> Option<u64> {
+    use charter_core::{Body, HeadBody, HeadBodyV3, Kind};
+    let e = charter_core::Envelope::decode(envelope).ok()?;
+    match e.kind {
+        Kind::HeadV3 => HeadBodyV3::decode(&e.body).ok().map(|b| b.at),
+        Kind::Head => HeadBody::decode(&e.body).ok().map(|b| b.at),
+        _ => None,
+    }
 }
 
 pub struct Sealed<'a, A> {
@@ -81,6 +136,15 @@ impl<A: Arkiv> Arkiv for Sealed<'_, A> {
         }
         let mut page = self.inner.query(&q, &o).await?;
         page.rows = self.open_rows(std::mem::take(&mut page.rows));
+        for row in page.rows.iter_mut() {
+            let Some(bound) = late_head(&self.ring, row) else {
+                continue;
+            };
+            let opened = open_row_unchecked(&self.ring, row.clone());
+            if landed_by(self.inner, &opened, bound).await? {
+                *row = opened;
+            }
+        }
         Ok(page)
     }
     async fn entity_nonce(&self, c: Address) -> Result<u64, StoreError> {
