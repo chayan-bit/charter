@@ -599,3 +599,5 @@ The record names the device's last valid body by seq, hash and landing tx, inste
 
 - In a private repo a device is also an MLS leaf; revoking the device should remove that leaf in the same step, with the mechanism the private-repo work uses to drop every leaf of a removed member (`sec/private-core`).
   Until then, a revoked device of a private repo can no longer write refs, but it can still decrypt new epochs; removing the member removes all of its leaves.
+  As of v0.6.0 this is still open: an MLS leaf is bound to the member's identity key (`auth::leaf_bound`), not to a head-model device key, so nothing yet says which leaf a revoked device holds, and only an admin may commit a removal while any identity may revoke its own device.
+  Closing it needs the device key in the leaf binding (or a device-signed key package) and a remove-by-leaf commit that an admin, or the revoking identity through a proposal, can send.
