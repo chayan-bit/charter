@@ -217,11 +217,8 @@ async fn first_signed<'c, A: Arkiv>(
         if !admins.contains(&att.signer) {
             continue;
         }
-        if !pks.contains_key(&att.signer) {
-            pks.insert(
-                att.signer,
-                charter_sync::cob::peer_key_of(a, &att.signer).await?,
-            );
+        if let std::collections::btree_map::Entry::Vacant(e) = pks.entry(att.signer) {
+            e.insert(charter_sync::cob::peer_key_of(a, &att.signer).await?);
         }
         let (body, bx) = (
             bytes(c, "ag.body").unwrap_or_default(),
