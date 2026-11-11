@@ -266,13 +266,24 @@ fn check_bases(repo: &Repo, view: &mut View, must: &BTreeSet<Nid>) -> Result<()>
         let Some(v2) = view.peers.get(&nid).and_then(|p| p.v2.as_ref()) else {
             continue;
         };
-        let bad = v2.merged.iter().find(|(_, w)| {
-            let e = &w.entry;
-            !e.is_tombstone()
-                && !e.base.is_empty()
-                && e.base != e.oid
-                && crate::program::is_ancestor(repo.git(), &e.base, &e.oid) != Some(true)
-        });
+        let signed: Vec<_> = v2
+            .merged
+            .iter()
+            .filter(|(_, w)| {
+                let e = &w.entry;
+                !e.is_tombstone() && !e.base.is_empty() && e.base != e.oid
+            })
+            .collect();
+        let pairs: Vec<(&[u8], &[u8])> = signed
+            .iter()
+            .map(|(_, w)| (w.entry.base.as_slice(), w.entry.oid.as_slice()))
+            .collect();
+        let answers = crate::program::are_ancestors(repo.git(), &pairs);
+        let bad = signed
+            .into_iter()
+            .zip(answers)
+            .find(|(_, ok)| *ok != Some(true))
+            .map(|(x, _)| x);
         if let Some((name, w)) = bad {
             let e = SyncError::coded(
                 ErrorCode::BadRefs,
@@ -346,6 +357,11 @@ fn commit_v2(state: &mut State, pv: &crate::view::PeerView) -> Result<()> {
 pub fn set_namespace(repo: &Repo, nid: &Nid, refs: &RefsBody) -> Result<()> {
     let ns = namespace(nid);
     let current: BTreeMap<String, String> = repo.git().refs(&ns)?.into_iter().collect();
+    repo.git().update_refs(&namespace_ops(&ns, &current, refs))
+}
+
+/// The ref ops that move namespace `ns` from `current` to `refs`.
+pub fn namespace_ops(ns: &str, current: &BTreeMap<String, String>, refs: &RefsBody) -> Vec<RefOp> {
     let desired: BTreeMap<String, String> = refs
         .refs
         .iter()
@@ -368,7 +384,7 @@ pub fn set_namespace(repo: &Repo, nid: &Nid, refs: &RefsBody) -> Result<()> {
             old: old.clone(),
         });
     }
-    repo.git().update_refs(&ops)
+    ops
 }
 
 fn warn_expiry(view: &View) {

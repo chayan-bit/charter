@@ -1,20 +1,24 @@
-//! Format v2 push, part 2 (docs/p5/head-model.md 7.1): the identity's first write and
-//! device delegation, the snapshot or bulk pieces, the head tx, the re-check after the
-//! receipt (`E_LOST_RACE`) and the local commit. A push returns once its bytes are on chain.
+//! Head push, part 2 (docs/p5/head-model.md 7.1 and 13): the identity's first write and
+//! device delegation, the snapshot or bulk pieces, the format v3 head tx, the re-check
+//! after the receipt (`E_LOST_RACE`) and the local commit. A push returns once its bytes
+//! are on chain.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use charter_core::codec::{self, Codec};
 use charter_core::{
-    Body, DeviceBody, ErrorCode, Hash32, HeadBody, HeadPack, ManifestBody, PieceRef, ZERO,
-    chunk_count, entity_attributes, resolve_stamps,
+    Body, DeviceBody, ErrorCode, Hash32, HeadBodyV3, ManifestBody, Pack, PackPieces, PieceRun,
+    ZERO, chunk_count, entity_attributes, head_patch_attributes, resolve_stamps, runs,
 };
-use charter_store::{Arkiv, Operation, U256, create_op_flags, patch_op, random_salt};
+use charter_store::{Arkiv, Operation, TxHash, U256, create_op_flags, patch_op, random_salt};
+use futures_util::future::try_join_all;
 
-use crate::head_push::{HeadPush, INLINE_MAX, Plan};
+use crate::head_push::{HeadPush, INLINE_MAX, Plan, here_at, migrates};
 use crate::heads::{LANDING_WINDOW, V2};
 use crate::ids::hex32;
-use crate::pieces::{PIECE_SIZE, piece_op};
+use crate::pieces::{PIECE_SIZE, marker_op, piece_op};
 use crate::push_send::{Cost, first_write_ops};
 use crate::repo::staging;
 use crate::state::{LandingJson, State};
@@ -33,6 +37,12 @@ const HEAD_GAS: u64 = 1_200_000;
 const PREFUND_HEADS: u64 = 4;
 /// A head patch with less calldata than this is priced by [`head_gas`], not estimated.
 const UNESTIMATED_HEAD_BYTES: usize = 32 * 1024;
+/// Snapshot manifests up to this many bytes in all are created by `C_d` in the head tx
+/// (head-model 13.2): a block after their chunks, so GolemDB does not charge their index
+/// terms as new twice, and with no marker; larger ones ride with the last chunks.
+const MANIFESTS_IN_HEAD_MAX: usize = 32 * 1024;
+/// Piece txs looked up by hash at once when a v2 head migrates.
+const PARALLEL_LOOKUPS: usize = 8;
 
 /// Gas limit of a head patch of `calldata` bytes sent without an estimate: 128 gas per
 /// byte is twice the most measured on Rabdi (64.6 per byte, a 8.8 KB head listing pieces;
@@ -70,11 +80,22 @@ pub struct Pre {
 /// Pack bytes this push sends, in head form.
 struct Content {
     snapshot: Vec<Hash32>,
-    packs: Vec<HeadPack>,
-    /// Pieces sent in the head tx (at least the marker piece).
+    packs: Vec<Pack>,
+    /// Pieces sent in the head tx.
     inline: Vec<Vec<u8>>,
-    /// Local pack files to index on commit, and their pack ids.
-    files: Vec<(std::path::PathBuf, Hash32)>,
+    /// Signed snapshot manifests `C_d` creates in the head tx.
+    manifests: Vec<Vec<u8>>,
+    /// Local pack files (git packs, not their stored form) to index on commit, and their
+    /// pack ids.
+    files: Vec<(PathBuf, Hash32)>,
+}
+
+/// One snapshot pack ready to send: the git pack, its stored form and its manifest.
+struct Built {
+    raw: PathBuf,
+    stored: PathBuf,
+    m: ManifestBody,
+    signed: crate::write::Signed,
 }
 
 fn sha256(b: &[u8]) -> Hash32 {
@@ -174,7 +195,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
         let plan = self.plan(&state).await?;
         let bytes = match plan.snapshot {
             true => plan.after.len() as u64 * PIECE_SIZE as u64,
-            false => plan.thin.len() as u64,
+            false => plan.stored.len() as u64,
         };
         let piece =
             write::estimate(self.a, bulk, &[piece_op(&rid, &vec![0xa5; PIECE_SIZE])?]).await?;
@@ -328,9 +349,10 @@ impl<A: Arkiv> HeadPush<'_, A> {
         // Boxed: these futures are large, and tests poll them on 2 MiB threads.
         let t = span(|| {
             format!(
-                "push.content snapshot={} thin={}",
+                "push.content snapshot={} thin={} stored={}",
                 plan.snapshot,
-                plan.thin.len()
+                plan.thin.len(),
+                plan.stored.len()
             )
         });
         let content = Box::pin(self.content(&plan)).await?;
@@ -355,13 +377,16 @@ impl<A: Arkiv> HeadPush<'_, A> {
 
     /// `refs` limited to what the cache holds: a ref another device moved to objects this
     /// cache has not fetched keeps its cached value until the next fetch brings them.
-    fn cached_refs(&self, refs: &charter_core::RefsBody) -> Result<charter_core::RefsBody> {
+    /// `cached` is the namespace as the cache holds it.
+    fn cached_refs(
+        &self,
+        refs: &charter_core::RefsBody,
+        cached: &BTreeMap<String, String>,
+    ) -> Result<charter_core::RefsBody> {
         let git = self.repo.git();
         let oids: Vec<String> = refs.refs.iter().map(|e| hex::encode(&e.oid)).collect();
         let have: BTreeSet<String> = git.present(&oids)?.into_iter().collect();
         let ns = crate::repo::namespace(&self.nid());
-        let cached: std::collections::BTreeMap<String, String> =
-            git.refs(&ns)?.into_iter().collect();
         let mut out = refs.clone();
         out.refs = refs
             .refs
@@ -387,70 +412,45 @@ impl<A: Arkiv> HeadPush<'_, A> {
             }
             _ => vec![],
         };
-        if plan.snapshot && kept.is_empty() {
-            let c = self.snapshot(plan).await?;
-            crate::manifest_cache::record_files(self.repo, &c.snapshot, &c.files)?;
-            return Ok(c);
-        }
         if plan.snapshot {
-            // One more layer on the kept ones (speed-and-cost 2.8), not a rewrite.
+            // With kept layers, one more layer on them (speed-and-cost 2.8), not a rewrite.
             let tips: Vec<String> = plan.after.values().map(hex::encode).collect();
             let prefix = self.repo.outgoing().join("snap");
-            let packs = self
-                .repo
-                .git()
-                .layer_packs(&tips, &plan.keep_layers, &prefix)?;
-            let (mut hashes, mut files) = (vec![], vec![]);
-            for f in packs {
-                let (pack_id, size, trailer, chunk_hashes) = packs::describe(&f)?;
-                let m = ManifestBody {
-                    rid: self.rid(),
-                    pack_id,
-                    trailer,
-                    size,
-                    chunk_size: charter_core::CHUNK_SIZE as u64,
-                    chunk_hashes,
-                    requires: vec![],
-                    pack_kind: 1,
-                };
-                let signed = sign(self.dev.sk(), &m)?;
-                self.upload_snapshot_pack(&f, &m, &signed.bytes).await?;
-                hashes.push(signed.h);
-                files.push((f, pack_id));
-            }
-            crate::manifest_cache::record_files(self.repo, &hashes, &files)?;
-            return Ok(Content {
-                snapshot: [kept, hashes].concat(),
-                packs: vec![],
-                inline: vec![],
-                files,
-            });
+            let git = self.repo.git();
+            let files = match (tips.is_empty(), kept.is_empty()) {
+                (true, _) => vec![],
+                (false, true) => git.full_packs_of(&tips, &prefix)?,
+                (false, false) => git.layer_packs(&tips, &plan.keep_layers, &prefix)?,
+            };
+            let mut c = self.snapshot(files).await?;
+            c.snapshot = [kept, c.snapshot].concat();
+            return Ok(c);
         }
-        let mut packs = plan.carried.clone();
+        let mut packs = self.as_runs(plan).await?;
         let mut files = vec![];
         let mut inline = vec![];
         if !plan.thin.is_empty() {
-            let pack_id = sha256(&plan.thin);
+            let pack_id = sha256(&plan.stored);
             let file = self
                 .repo
                 .outgoing()
-                .join(format!("v2-{}.pack", hex32(&pack_id)));
+                .join(format!("v3-{}.pack", hex32(&pack_id)));
             std::fs::write(&file, &plan.thin).map_err(|e| SyncError::io(file.display(), e))?;
             files.push((file, pack_id));
-            let pieces: Vec<&[u8]> = plan.thin.chunks(PIECE_SIZE).collect();
-            let refs = match plan.thin.len() <= INLINE_MAX && inline_fits(plan) {
+            let pieces = match plan.stored.len() <= INLINE_MAX && inline_fits(plan) {
                 true => {
-                    inline.push(plan.thin.clone());
-                    vec![PieceRef {
-                        tx: ZERO,
-                        sha256: sha256(&plan.thin),
-                    }]
+                    inline.push(plan.stored.clone());
+                    vec![PieceRun::HERE]
                 }
-                false => self.bulk_pieces(&pieces).await?,
+                false => {
+                    let pieces: Vec<&[u8]> = plan.stored.chunks(PIECE_SIZE).collect();
+                    runs(&self.bulk_pieces(&pieces).await?)
+                }
             };
-            packs.push(HeadPack {
+            packs.push(Pack {
                 pack_id,
-                pieces: refs,
+                codec: plan.codec,
+                pieces: PackPieces::Runs(pieces),
             });
         }
         Ok(Content {
@@ -461,78 +461,157 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 .unwrap_or_default(),
             packs,
             inline,
+            manifests: vec![],
             files,
         })
     }
 
-    /// Bulk pieces from `B_d`, one tx each, before the head (crash-safe: they just expire).
-    async fn bulk_pieces(&self, pieces: &[&[u8]]) -> Result<Vec<PieceRef>> {
+    /// `plan.carried` with every pack listed by runs: on the push that migrates a v2 head,
+    /// each piece tx's `(block, index)` comes from the landing already known or one
+    /// `eth_getTransactionByHash` (head-model 13.4).
+    async fn as_runs(&self, plan: &Plan) -> Result<Vec<Pack>> {
+        let mut at: BTreeMap<Hash32, (u64, u32)> = BTreeMap::new();
+        if let Some(p) = &plan.prev {
+            at.insert(p.landing.tx, (p.landing.block, p.landing.index));
+        }
+        let lookup: BTreeSet<Hash32> = plan
+            .carried
+            .iter()
+            .flat_map(|p| match &p.pieces {
+                PackPieces::Txs(t) => t.iter().map(|x| x.tx).collect(),
+                PackPieces::Runs(_) => vec![],
+            })
+            .filter(|tx| !at.contains_key(tx))
+            .collect();
+        let lookup: Vec<Hash32> = lookup.into_iter().collect();
+        for window in lookup.chunks(PARALLEL_LOOKUPS) {
+            let reads = window.iter().map(|tx| async move {
+                let m = self.a.mined_tx(TxHash::from(*tx)).await?.ok_or_else(|| {
+                    SyncError::coded(
+                        ErrorCode::NotLive,
+                        format!("piece tx {} of this device's head not found", hex32(tx)),
+                    )
+                })?;
+                Ok::<_, SyncError>((*tx, (m.block, m.index)))
+            });
+            at.extend(try_join_all(reads).await?);
+        }
+        Ok(plan
+            .carried
+            .iter()
+            .map(|p| match &p.pieces {
+                PackPieces::Runs(_) => p.clone(),
+                PackPieces::Txs(t) => {
+                    let mut positions: Vec<(u64, u32)> = t.iter().map(|x| at[&x.tx]).collect();
+                    // A tx holding several pieces of the pack is named once (13.1).
+                    positions.dedup();
+                    Pack {
+                        pieces: PackPieces::Runs(runs(&positions)),
+                        ..p.clone()
+                    }
+                }
+            })
+            .collect())
+    }
+
+    /// Bulk pieces from `B_d`, one tx each, before the head (crash-safe: they just expire);
+    /// where each landed.
+    async fn bulk_pieces(&self, pieces: &[&[u8]]) -> Result<Vec<(u64, u32)>> {
         let rid = self.rid();
         let jobs = pieces
             .iter()
             .map(|p| Ok(vec![piece_op(&rid, p)?]))
             .collect::<Result<Vec<_>>>()?;
         let landed = self.send_from(&self.dev.bulk(&rid), jobs).await?;
-        let mut tx = vec![ZERO; pieces.len()];
+        let mut at = vec![(0, 0); pieces.len()];
         for l in landed {
-            tx[l.job] = l.receipt.tx_hash.0;
+            at[l.job] = (l.receipt.block_number, l.receipt.index);
         }
-        Ok(pieces
-            .iter()
-            .zip(tx)
-            .map(|(p, tx)| PieceRef {
-                tx,
-                sha256: sha256(p),
-            })
-            .collect())
+        Ok(at)
     }
 
-    /// Full packs of the identity's refs after this push, as manifest plus chunks from `B_d`.
-    async fn snapshot(&self, plan: &Plan) -> Result<Content> {
-        let tips: Vec<String> = plan.after.values().map(hex::encode).collect();
-        let files = match tips.is_empty() {
-            true => vec![],
-            false => self
-                .repo
-                .git()
-                .full_packs_of(&tips, &self.repo.outgoing().join("snap"))?,
+    /// The git pack `raw` in its stored form (head-model 13.3) and its unsigned manifest:
+    /// a brotli stream of it (`pack_kind = 3`, written next to it) when that is smaller,
+    /// else the pack itself (`pack_kind = 1`).
+    fn manifest_of(&self, raw: &Path) -> Result<(PathBuf, ManifestBody)> {
+        let bytes = std::fs::read(raw).map_err(|e| SyncError::io(raw.display(), e))?;
+        let (codec, encoded) = codec::encode(&bytes);
+        let (stored, pack_kind) = match codec {
+            Codec::Brotli => {
+                // `<prefix>-<trailer>.br`, so the manifest cache reads the same trailer.
+                let p = raw.with_extension("br");
+                std::fs::write(&p, &encoded).map_err(|e| SyncError::io(p.display(), e))?;
+                (p, packs::BROTLI_PACK)
+            }
+            Codec::Raw => (raw.to_path_buf(), 1),
         };
-        let mut hashes = vec![];
-        let mut out_files = vec![];
-        for f in files {
-            let (pack_id, size, trailer, chunk_hashes) = packs::describe(&f)?;
-            let m = ManifestBody {
-                rid: self.rid(),
-                pack_id,
-                trailer,
-                size,
-                chunk_size: charter_core::CHUNK_SIZE as u64,
-                chunk_hashes,
-                requires: vec![],
-                pack_kind: 1,
-            };
+        let (pack_id, size, _, chunk_hashes) = packs::describe(&stored)?;
+        let m = ManifestBody {
+            rid: self.rid(),
+            pack_id,
+            trailer: bytes[bytes.len().saturating_sub(20)..].to_vec(),
+            size,
+            chunk_size: charter_core::CHUNK_SIZE as u64,
+            chunk_hashes,
+            requires: vec![],
+            pack_kind,
+        };
+        Ok((stored, m))
+    }
+
+    /// Snapshot packs `files` as manifest plus chunks from `B_d`; the manifests go in the
+    /// head tx when they fit [`MANIFESTS_IN_HEAD_MAX`].
+    async fn snapshot(&self, files: Vec<PathBuf>) -> Result<Content> {
+        let mut built = vec![];
+        for raw in files {
+            let (stored, m) = self.manifest_of(&raw)?;
             let signed = sign(self.dev.sk(), &m)?;
-            self.upload_snapshot_pack(&f, &m, &signed.bytes).await?;
-            hashes.push(signed.h);
-            out_files.push((f, pack_id));
+            built.push(Built {
+                raw,
+                stored,
+                m,
+                signed,
+            });
+        }
+        let manifest_bytes: usize = built.iter().map(|b| b.signed.bytes.len()).sum();
+        let in_head = manifest_bytes <= MANIFESTS_IN_HEAD_MAX;
+        for b in &built {
+            self.upload_snapshot_pack(&b.stored, &b.m, &b.signed.bytes, in_head)
+                .await?;
+        }
+        let hashes: Vec<Hash32> = built.iter().map(|b| b.signed.h).collect();
+        let stored: Vec<(PathBuf, Hash32)> = built
+            .iter()
+            .map(|b| (b.stored.clone(), b.m.pack_id))
+            .collect();
+        crate::manifest_cache::record_files(self.repo, &hashes, &stored)?;
+        for b in built.iter().filter(|b| b.stored != b.raw) {
+            let _ = std::fs::remove_file(&b.stored);
         }
         Ok(Content {
             snapshot: hashes,
             packs: vec![],
             inline: vec![],
-            files: out_files,
+            manifests: match in_head {
+                true => built.iter().map(|b| b.signed.bytes.clone()).collect(),
+                false => vec![],
+            },
+            files: built.into_iter().map(|b| (b.raw, b.m.pack_id)).collect(),
         })
     }
 
+    /// Chunks of `f` from `B_d` until all landed, and the manifest with the last ones
+    /// unless it goes in the head tx (`in_head`).
     async fn upload_snapshot_pack(
         &self,
-        f: &std::path::Path,
+        f: &Path,
         m: &ManifestBody,
         manifest: &[u8],
+        in_head: bool,
     ) -> Result<()> {
         let rid = self.rid();
         let bulk = BTreeSet::from([self.dev.bulk_address(&rid).into_array()]);
-        let mut sent_manifest = false;
+        let mut sent_manifest = in_head;
         for _ in 0..=RESEND_ROUNDS {
             let have = packs::landed(self.a, &rid, &m.pack_id, &bulk).await?;
             let missing: Vec<u64> = (0..chunk_count(m.size))
@@ -585,10 +664,23 @@ impl<A: Arkiv> HeadPush<'_, A> {
         ))
     }
 
-    fn head_op(&self, body: &HeadBody, prev_key: Option<Hash32>) -> Result<(Operation, Hash32)> {
+    /// The head create, or a patch: with every attribute when `full` (the migrating patch,
+    /// and every patch of a sealing backend, which seals only ops naming `ag.rid` and
+    /// `ag.kind`), else only `ag.body` and `ag.h` (head-model 13.2).
+    fn head_op(
+        &self,
+        body: &HeadBodyV3,
+        prev_key: Option<Hash32>,
+        full: bool,
+    ) -> Result<(Operation, Hash32)> {
         let s = sign(self.dev.sk(), body)?;
-        let env = charter_core::Envelope::decode(&s.bytes)?;
-        let attrs = entity_attributes(&env, &s.bytes, body);
+        let attrs = match (prev_key, full) {
+            (Some(_), false) => head_patch_attributes(&s.bytes),
+            _ => {
+                let env = charter_core::Envelope::decode(&s.bytes)?;
+                entity_attributes(&env, &s.bytes, body)
+            }
+        };
         let op = match prev_key {
             None => create_op_flags(
                 &wire(&attrs),
@@ -620,13 +712,19 @@ impl<A: Arkiv> HeadPush<'_, A> {
             None => (0, 0, ZERO, None),
         };
         let mut refs = plan.refs.clone();
-        let mut packs = content.packs.clone();
+        let mut packs = content
+            .packs
+            .iter()
+            .map(|p| {
+                p.to_v3()
+                    .ok_or_else(|| SyncError::coded(ErrorCode::Internal, "a v2 pack to send"))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut inline = content.inline.clone();
+        let mut manifests = content.manifests.clone();
+        let mut full = migrates(plan.prev.as_ref()) || self.a.seals();
         let mut out = vec![];
         for _ in 0..3 {
-            if inline.is_empty() {
-                inline.push(vec![]);
-            }
             let c_d = self.dev.control_address(&rid);
             // Only the first head tx starts from what was read before; a follow-up reads.
             let (ready, nonce) = (pre.ready.take(), pre.nonce.take());
@@ -674,8 +772,11 @@ impl<A: Arkiv> HeadPush<'_, A> {
                     ),
                 ));
             }
-            pieces += inline.len() as u64;
-            let body = HeadBody {
+            // Every create of `C_d` in this tx counts (the rollback rule, head-model 6); the
+            // marker only when nothing else raises `entityNonce(C_d)`.
+            let marker = inline.is_empty() && manifests.is_empty();
+            pieces += (inline.len() + manifests.len() + usize::from(marker)) as u64;
+            let body = HeadBodyV3 {
                 rid,
                 nid: self.nid(),
                 seq,
@@ -689,11 +790,17 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 object_hash: 1,
             };
             body.validate()?;
-            let (head, h) = self.head_op(&body, key)?;
+            let (head, h) = self.head_op(&body, key, full)?;
             let mut ops = inline
                 .iter()
                 .map(|p| piece_op(&rid, p))
                 .collect::<Result<Vec<_>>>()?;
+            for m in &manifests {
+                ops.push(entity_op::<ManifestBody>(m, self.cfg.data_lifetime)?);
+            }
+            if marker {
+                ops.push(marker_op()?);
+            }
             ops.push(head);
             // Recorded before sending: a restart waits for this tx instead of forking the
             // body chain (head-model 7.2).
@@ -707,7 +814,8 @@ impl<A: Arkiv> HeadPush<'_, A> {
             let calldata = charter_store::execute_calldata(&ops).len();
             let seed = write::Seed {
                 tip: ready.map(|r| (r.head, r.base_fee, r.at, r.balance)),
-                gas: (key.is_some() && calldata < UNESTIMATED_HEAD_BYTES)
+                // Manifests are stored for the data lifetime: estimate rather than bound.
+                gas: (key.is_some() && manifests.is_empty() && calldata < UNESTIMATED_HEAD_BYTES)
                     .then(|| head_gas(calldata)),
             };
             let landed =
@@ -736,23 +844,15 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 key = Some(self.created_head_key(&rid).await?);
             }
             refs = resolve_stamps(&refs, landing.block);
-            packs = packs
-                .into_iter()
-                .map(|p| HeadPack {
-                    pack_id: p.pack_id,
-                    pieces: p
-                        .pieces
-                        .into_iter()
-                        .map(|x| PieceRef {
-                            tx: if x.tx == ZERO { landing.tx } else { x.tx },
-                            sha256: x.sha256,
-                        })
-                        .collect(),
-                })
-                .collect();
+            for p in &mut packs {
+                p.runs = here_at(&p.runs, &landing);
+            }
             seq += 1;
             prev_tx = landing.tx;
             inline = vec![];
+            manifests = vec![];
+            // The late tx already wrote every attribute if it had to.
+            full = self.a.seals();
         }
         Err(SyncError::coded(
             ErrorCode::Rpc,
@@ -839,14 +939,23 @@ impl<A: Arkiv> HeadPush<'_, A> {
             state.set_device_mark(&self.me(), &mark);
         }
         state.save(&self.repo.state_path())?;
-        crate::fetch::set_namespace(self.repo, &self.nid(), &self.cached_refs(&v2.refs)?)?;
-        let _ = std::fs::remove_file(self.pending_head_path());
-        let staged = self.repo.git().refs(&staging(&self.nid()))?;
-        let deletes: Vec<_> = staged
+        // One listing of the namespace and the staged refs, one ref transaction for both.
+        let (ns, staged) = (crate::repo::namespace(&self.nid()), staging(&self.nid()));
+        let git = self.repo.git();
+        let (current, staged): (BTreeMap<_, _>, BTreeMap<_, _>) = git
+            .refs_under(&[&ns, &staged])?
             .into_iter()
-            .map(|(name, old)| crate::git::RefOp::Delete { name, old })
-            .collect();
-        self.repo.git().update_refs(&deletes)
+            .partition(|(name, _)| name.starts_with(&ns));
+        let refs = self.cached_refs(&v2.refs, &current)?;
+        let mut ops = crate::fetch::namespace_ops(&ns, &current, &refs);
+        ops.extend(
+            staged
+                .into_iter()
+                .map(|(name, old)| crate::git::RefOp::Delete { name, old }),
+        );
+        git.update_refs(&ops)?;
+        let _ = std::fs::remove_file(self.pending_head_path());
+        Ok(())
     }
 }
 
@@ -860,7 +969,14 @@ async fn tokio_sleep(d: Duration) {
 /// (head-model 4.2); otherwise the pack goes as bulk pieces.
 fn inline_fits(plan: &Plan) -> bool {
     let refs: usize = plan.refs.iter().map(|e| e.name.len() + 2 * 32 + 32).sum();
-    let pieces: usize = plan.carried.iter().map(|p| p.pieces.len() * 72 + 40).sum();
+    let pieces: usize = plan
+        .carried
+        .iter()
+        .map(|p| match &p.pieces {
+            PackPieces::Txs(t) => t.len() * 72 + 40,
+            PackPieces::Runs(r) => r.len() * 20 + 40,
+        })
+        .sum();
     let body = 512 + refs + pieces + charter_core::ENVELOPE_OVERHEAD + 3_373;
     // Attribute and ABI framing of the head and the piece ops, generously.
     body + body / 4 + INLINE_MAX + 8_192 <= charter_store::MAX_RAW_TX_BYTES

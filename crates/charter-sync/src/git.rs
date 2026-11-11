@@ -227,10 +227,14 @@ impl Git {
 
     /// `(name, oid)` of every ref under `prefix`.
     pub fn refs(&self, prefix: &str) -> Result<Vec<(String, String)>> {
-        let out = self.run(
-            &["for-each-ref", "--format=%(refname) %(objectname)", prefix],
-            b"",
-        )?;
+        self.refs_under(&[prefix])
+    }
+
+    /// `(name, oid)` of every ref under any of `prefixes`, in one `for-each-ref`.
+    pub fn refs_under(&self, prefixes: &[&str]) -> Result<Vec<(String, String)>> {
+        let mut args = vec!["for-each-ref", "--format=%(refname) %(objectname)"];
+        args.extend_from_slice(prefixes);
+        let out = self.run(&args, b"")?;
         Ok(String::from_utf8_lossy(&out)
             .lines()
             .filter_map(|l| l.split_once(' '))
@@ -276,7 +280,8 @@ impl Git {
     }
 
     /// One thin pack of everything reachable from `tips` and not from `exclude`, in memory
-    /// (format v2 pieces); empty when there is nothing to send.
+    /// and without per-object zlib (format v3 pieces, brotli-encoded by the caller,
+    /// head-model 13.3); empty when there is nothing to send.
     /// Exclusions this cache lacks (another device's tips it has not fetched) are dropped:
     /// the pack may then repeat objects, but never names one git cannot find.
     pub fn thin_pack_bytes(&self, tips: &[String], exclude: &[String]) -> Result<Vec<u8>> {
@@ -290,6 +295,8 @@ impl Git {
                 "--thin",
                 "--stdout",
                 "--delta-base-offset",
+                "--no-reuse-object",
+                "--compression=0",
             ],
             input.as_bytes(),
         )?;
@@ -496,8 +503,10 @@ impl Git {
     }
 }
 
-/// `pack-objects` options of snapshot packs (MEASURED in speed-and-cost 2.8).
-const SNAPSHOT_PACK_ARGS: &[&str] = &["--no-reuse-delta", "--window=50"];
+/// `pack-objects` options of snapshot packs: deltas searched afresh with window 50
+/// (MEASURED in speed-and-cost 2.8) and no per-object zlib, since the writer brotli-encodes
+/// the whole pack (head-model 13.3). `--no-reuse-object` implies `--no-reuse-delta`.
+const SNAPSHOT_PACK_ARGS: &[&str] = &["--no-reuse-object", "--compression=0", "--window=50"];
 
 /// Largest pack one manifest can name (1,600 chunks of 64 KiB).
 const MAX_PACK_BYTES: u64 = 100 * 1024 * 1024;

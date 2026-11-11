@@ -148,6 +148,23 @@ pub fn is_ancestor(git: &Git, a: &[u8], b: &[u8]) -> Option<bool> {
     }
 }
 
+/// [`is_ancestor`] of every `(a, b)` pair, in order: the `git merge-base` calls of pairs not
+/// proven before run at the same time, so a fetch pays one process wait, not one per ref.
+pub fn are_ancestors(git: &Git, pairs: &[(&[u8], &[u8])]) -> Vec<Option<bool>> {
+    const PARALLEL: usize = 8;
+    let mut out = Vec::with_capacity(pairs.len());
+    for group in pairs.chunks(PARALLEL) {
+        std::thread::scope(|s| {
+            let calls: Vec<_> = group
+                .iter()
+                .map(|(a, b)| s.spawn(move || is_ancestor(git, a, b)))
+                .collect();
+            out.extend(calls.into_iter().map(|c| c.join().unwrap_or(None)));
+        });
+    }
+    out
+}
+
 impl Enforced {
     /// Folds again with `updates` appended after everything on chain; the first of them the
     /// program rejects is `E_PROGRAM_REJECTED` with the program's reason.

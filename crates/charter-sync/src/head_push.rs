@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use charter_core::{
-    DeviceHead, ErrorCode, Hash32, HeadPack, HeadRef, Merged, Nid, RefEntry, RefsBody, Winner,
-    ZERO, is_device_row, next_entries, resolve_stamps,
+    DeviceHead, ErrorCode, Hash32, HeadFormat, HeadRef, Merged, Nid, Pack, PackPieces, PieceRef,
+    PieceRun, RefEntry, RefsBody, Winner, ZERO, codec, is_device_row, next_entries, resolve_stamps,
 };
 use charter_store::Arkiv;
 
@@ -58,13 +58,18 @@ pub struct Plan {
     /// Live refs of the identity before and after this push.
     pub before: BTreeMap<String, Vec<u8>>,
     pub after: BTreeMap<String, Vec<u8>>,
-    /// The thin pack of the pushed objects (empty for refs-only pushes).
+    /// The thin pack of the pushed objects, without per-object zlib (empty for refs-only
+    /// pushes); the cache indexes it on commit.
     pub thin: Vec<u8>,
+    /// `thin` as sent (head-model 13.3): brotli when that is smaller, else `thin` itself.
+    pub stored: Vec<u8>,
+    pub codec: codec::Codec,
     pub snapshot: bool,
     /// On a snapshot push: the layers kept, by git pack trailer (empty rewrites them all).
     pub keep_layers: Vec<String>,
-    /// This device's packs since its snapshot, with `tx = 0` made concrete.
-    pub carried: Vec<HeadPack>,
+    /// This device's packs since its snapshot, with `tx = 0` and `PieceRun::HERE` made
+    /// concrete (a v2 head's packs are re-encoded as runs when the push sends them).
+    pub carried: Vec<Pack>,
 }
 
 fn oid_bytes(hex_oid: &str) -> Result<Vec<u8>> {
@@ -346,9 +351,11 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             .iter()
             .map(|(n, o)| Ok((n.clone(), o.as_deref().map(oid_bytes).transpose()?)))
             .collect::<Result<Vec<_>>>()?;
+        let bases = self.bases(&merged, &updates);
         let with_base: Vec<charter_core::EntryUpdate> = updates
             .iter()
-            .map(|(n, o)| (n.clone(), o.clone(), self.base(&merged, n, o.as_deref())))
+            .zip(bases)
+            .map(|((n, o), b)| (n.clone(), o.clone(), b))
             .collect();
         let refs = next_entries(&self.me(), &prev_refs, &merged, &others, &with_base);
         let before = live(&merged);
@@ -368,6 +375,10 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             true => vec![],
             false => self.repo.git().thin_pack_bytes(&tips, &exclude)?,
         };
+        let (codec, stored) = match thin.is_empty() {
+            true => (codec::Codec::Raw, vec![]),
+            false => codec::encode(&thin),
+        };
         let carried = carried(prev.as_ref());
         let has_snapshot = v2
             .iter()
@@ -381,7 +392,7 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             }
             _ => vec![],
         };
-        let snapshot = !has_snapshot || snapshot_due(&layers, &carried, thin.len());
+        let snapshot = !has_snapshot || snapshot_due(&layers, &carried, stored.len());
         let keep_layers = match snapshot {
             true => layers_to_keep(&layers, |t| self.repo.git().has_pack(t)),
             false => vec![],
@@ -392,6 +403,8 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             before,
             after,
             thin,
+            stored,
+            codec,
             snapshot,
             keep_layers,
             carried,
@@ -424,26 +437,52 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
         }
     }
 
-    /// The signed `base` of an update (head-model 8): the pinned program's accepted head
-    /// if `new` fast-forwards it, else the merged oid if `new` fast-forwards that, by git
-    /// ancestry in the cache (which holds both), else empty.
-    fn base(&self, merged: &Merged, name: &str, new: Option<&[u8]>) -> Vec<u8> {
-        let Some(new) = new else { return vec![] };
-        let accepted = self
-            .view
-            .program
-            .as_ref()
-            .and_then(|e| e.outcome.heads.get(name));
-        let winner = merged
-            .get(name)
-            .filter(|w| !w.entry.is_tombstone())
-            .map(|w| &w.entry.oid);
-        [accepted, winner]
+    /// The signed `base` of each update (head-model 8): the pinned program's accepted head
+    /// if the new oid fast-forwards it, else the merged oid if it fast-forwards that, by git
+    /// ancestry in the cache (which holds both), else empty. All ancestry checks of the
+    /// push run at once.
+    fn bases(&self, merged: &Merged, updates: &[(String, Option<Vec<u8>>)]) -> Vec<Vec<u8>> {
+        let candidates: Vec<Vec<&Vec<u8>>> = updates
+            .iter()
+            .map(|(name, new)| {
+                if new.is_none() {
+                    return vec![];
+                }
+                let accepted = self
+                    .view
+                    .program
+                    .as_ref()
+                    .and_then(|e| e.outcome.heads.get(name));
+                let winner = merged
+                    .get(name)
+                    .filter(|w| !w.entry.is_tombstone())
+                    .map(|w| &w.entry.oid);
+                [accepted, winner].into_iter().flatten().collect()
+            })
+            .collect();
+        let pairs: Vec<(&[u8], &[u8])> = updates
+            .iter()
+            .zip(&candidates)
+            .flat_map(|((_, new), olds)| {
+                let new = new.as_deref().unwrap_or_default();
+                olds.iter().map(move |old| (old.as_slice(), new))
+            })
+            .collect();
+        let mut answers = crate::program::are_ancestors(self.repo.git(), &pairs).into_iter();
+        candidates
             .into_iter()
-            .flatten()
-            .find(|old| crate::program::is_ancestor(self.repo.git(), old, new) == Some(true))
-            .cloned()
-            .unwrap_or_default()
+            .map(|olds| {
+                let ok: Vec<bool> = olds
+                    .iter()
+                    .map(|_| answers.next().flatten() == Some(true))
+                    .collect();
+                olds.into_iter()
+                    .zip(ok)
+                    .find(|(_, ok)| *ok)
+                    .map(|(old, _)| old.clone())
+                    .unwrap_or_default()
+            })
+            .collect()
     }
 
     pub(crate) fn own_device(&self, p: &Prev) -> Result<charter_core::Device> {
@@ -464,9 +503,9 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
 
 /// Head-model 4.4: piece bytes over max(1 MiB, 25% of the snapshot's layers), 64 packs,
 /// or more pieces than one head may list.
-fn snapshot_due(layers: &[manifest_cache::Facts], carried: &[HeadPack], new: usize) -> bool {
+fn snapshot_due(layers: &[manifest_cache::Facts], carried: &[Pack], new: usize) -> bool {
     let new_pieces = new.div_ceil(PIECE_SIZE);
-    let pieces: usize = carried.iter().map(|p| p.pieces.len()).sum::<usize>() + new_pieces;
+    let pieces: usize = carried.iter().map(Pack::piece_count).sum::<usize>() + new_pieces;
     if pieces > charter_core::MAX_HEAD_PIECES
         || carried.len() + usize::from(new > 0) > SNAPSHOT_MAX_PUSHES
     {
@@ -497,25 +536,48 @@ pub fn layers_to_keep(
     }
 }
 
-/// The previous body's packs with `tx = 0` replaced by the tx that carried it.
-fn carried(prev: Option<&Prev>) -> Vec<HeadPack> {
+/// The previous body's packs with `tx = 0` (v2) or `PieceRun::HERE` (v3) replaced by the
+/// tx that carried it.
+fn carried(prev: Option<&Prev>) -> Vec<Pack> {
     let Some(p) = prev else { return vec![] };
+    let l = &p.landing;
     p.head
-        .body
         .packs
         .iter()
-        .map(|pk| HeadPack {
-            pack_id: pk.pack_id,
-            pieces: pk
-                .pieces
-                .iter()
-                .map(|x| charter_core::PieceRef {
-                    tx: if x.tx == ZERO { p.landing.tx } else { x.tx },
-                    sha256: x.sha256,
-                })
-                .collect(),
+        .map(|pk| Pack {
+            pieces: match &pk.pieces {
+                PackPieces::Txs(t) => PackPieces::Txs(
+                    t.iter()
+                        .map(|x| PieceRef {
+                            tx: if x.tx == ZERO { l.tx } else { x.tx },
+                            sha256: x.sha256,
+                        })
+                        .collect(),
+                ),
+                PackPieces::Runs(r) => PackPieces::Runs(here_at(r, l)),
+            },
+            ..pk.clone()
         })
         .collect()
+}
+
+/// `runs` with `PieceRun::HERE` replaced by the landing `l` of the body that listed them.
+pub fn here_at(runs: &[PieceRun], l: &LandingJson) -> Vec<PieceRun> {
+    runs.iter()
+        .map(|r| match *r == PieceRun::HERE {
+            true => PieceRun {
+                block: l.block,
+                index: l.index,
+                count: 1,
+            },
+            false => *r,
+        })
+        .collect()
+}
+
+/// Whether the push after `prev` migrates this device's head to format v3 (head-model 13.4).
+pub fn migrates(prev: Option<&Prev>) -> bool {
+    prev.is_some_and(|p| p.head.format == HeadFormat::V2)
 }
 
 #[cfg(test)]

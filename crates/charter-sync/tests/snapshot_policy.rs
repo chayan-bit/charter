@@ -9,17 +9,14 @@ fn futures_block<F: std::future::Future>(f: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
-fn own_head(net: &Net, p: &Peer, rid: &charter_core::Rid) -> charter_core::HeadBody {
+fn own_head(net: &Net, p: &Peer, rid: &charter_core::Rid) -> charter_core::DeviceHead {
     let repo = p.repo(rid);
     let view = futures_block(charter_sync::sync(net, &repo, &p.want())).expect("sync");
     let v2 = view.peers[&p.keys.nid()].v2.clone().expect("v2");
     let me = charter_sync::device::device_keys(p.home.path())
         .expect("dev")
         .nid();
-    v2.device(&me)
-        .and_then(|d| d.head.clone())
-        .expect("head")
-        .body
+    v2.device(&me).and_then(|d| d.head.clone()).expect("head")
 }
 
 fn manifest_reads(queries: &[String]) -> usize {
@@ -58,7 +55,7 @@ async fn a_piece_push_reads_no_snapshot_manifest_it_signed_itself() {
     assert_eq!(own_head(&net, &alice, &rid).packs.len(), 1, "a piece push");
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn a_refresh_adds_a_layer_that_the_v040_reader_clones() {
+async fn a_refresh_adds_a_layer_that_a_fresh_reader_clones() {
     let net = Net::new();
     let alice = Peer::new(&net, 1);
     let rid = init(&net, &alice, "layers").await;
@@ -68,7 +65,7 @@ async fn a_refresh_adds_a_layer_that_the_v040_reader_clones() {
     push2(&net, &alice, &rid, &work, &["refs/heads/main"])
         .await
         .expect("snapshot push");
-    let base = own_head(&net, &alice, &rid).snapshot;
+    let base = own_head(&net, &alice, &rid).body.snapshot;
     assert_eq!(base.len(), 1);
     for i in 0..3u64 {
         commit(&work, &[("n", &noise(i, 400_000))], "feat: noise");
@@ -77,13 +74,13 @@ async fn a_refresh_adds_a_layer_that_the_v040_reader_clones() {
             .expect("push");
     }
     let h = own_head(&net, &alice, &rid);
-    assert_eq!(h.snapshot.len(), 2, "the refresh appended one layer");
+    assert_eq!(h.body.snapshot.len(), 2, "the refresh appended one layer");
     assert_eq!(
-        h.snapshot[0], base[0],
+        h.body.snapshot[0], base[0],
         "the base layer is kept, not rewritten"
     );
     assert!(h.packs.len() < 3, "packs reset at the refresh");
-    // Readers here are the v0.4.0 (bda7571) code: clone after the pieces expired.
+    // Clone after the pieces expired.
     net.mine(30);
     let bob = Peer::new(&net, 2);
     let dest = tmp.path().join("dest");

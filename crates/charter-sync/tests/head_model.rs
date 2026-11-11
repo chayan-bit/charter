@@ -10,16 +10,18 @@ use charter_sync::state::State;
 use common::*;
 
 fn own_head(net: &Net, p: &Peer, rid: &charter_core::Rid) -> charter_core::HeadBody {
+    own_device_head(net, p, rid).body
+}
+
+/// The device head as read: shared fields in `body`, packs of either format in `packs`.
+fn own_device_head(net: &Net, p: &Peer, rid: &charter_core::Rid) -> charter_core::DeviceHead {
     let repo = p.repo(rid);
     let view = futures_block(charter_sync::sync(net, &repo, &p.want())).expect("sync");
     let v2 = view.peers[&p.keys.nid()].v2.clone().expect("v2");
     let me = charter_sync::device::device_keys(p.home.path())
         .expect("dev")
         .nid();
-    v2.device(&me)
-        .and_then(|d| d.head.clone())
-        .expect("head")
-        .body
+    v2.device(&me).and_then(|d| d.head.clone()).expect("head")
 }
 
 fn futures_block<F: std::future::Future>(f: F) -> F::Output {
@@ -37,9 +39,9 @@ async fn v2_push_clone_fetch_round_trip_with_inline_bulk_and_refs_only_pushes() 
     push2(&net, &alice, &rid, &work, &["refs/heads/main"])
         .await
         .expect("first push");
-    let first = own_head(&net, &alice, &rid);
+    let first = own_device_head(&net, &alice, &rid);
     assert_eq!(
-        (first.seq, first.snapshot.len(), first.packs.len()),
+        (first.body.seq, first.body.snapshot.len(), first.packs.len()),
         (0, 1, 0),
         "first push snapshots"
     );
@@ -56,17 +58,16 @@ async fn v2_push_clone_fetch_round_trip_with_inline_bulk_and_refs_only_pushes() 
     push2(&net, &alice, &rid, &work, &["refs/heads/topic"])
         .await
         .expect("refs-only push");
-    let h = own_head(&net, &alice, &rid);
-    assert_eq!(h.seq, 3);
+    let h = own_device_head(&net, &alice, &rid);
+    assert_eq!(h.format, charter_core::HeadFormat::V3);
+    assert_eq!(h.body.seq, 3);
     assert_eq!(h.packs.len(), 2, "inline and bulk packs since the snapshot");
+    assert!(!h.packs[0].has_inline(), "carried pieces name their tx");
     assert!(
-        h.packs[0].pieces.iter().all(|p| p.tx != [0; 32]),
-        "carried pieces name their tx"
+        h.packs[1].piece_count() > 1,
+        "150 KB of noise goes raw as several bulk pieces"
     );
-    assert!(
-        h.packs[1].pieces.len() > 1,
-        "150 KB goes as several bulk pieces"
-    );
+    assert_eq!(h.packs[1].codec, charter_core::codec::Codec::Raw);
 
     // Clone after every piece entity expired: bytes come from calldata.
     net.mine(30);
@@ -122,8 +123,8 @@ async fn snapshot_refreshes_once_piece_bytes_pass_one_mebibyte() {
             .await
             .expect("push");
     }
-    let h = own_head(&net, &alice, &rid);
-    assert_ne!(h.snapshot, first, "a new snapshot");
+    let h = own_device_head(&net, &alice, &rid);
+    assert_ne!(h.body.snapshot, first, "a new snapshot");
     assert!(h.packs.len() < 3, "packs reset at the refresh");
     let bob = Peer::new(&net, 2);
     let dest = tmp.path().join("dest");

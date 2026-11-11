@@ -222,7 +222,7 @@ async fn transfer_blocks(net: &Net, since: u64, from: Address, to: Address) -> V
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_first_push_tops_up_in_one_block_and_sends_its_manifest_with_the_chunks() {
+async fn a_first_push_tops_up_in_one_block_and_creates_its_manifest_in_the_head_tx() {
     let net = Net::new();
     let alice = Peer::new(&net, 1);
     let rid = init(&net, &alice, "first-push").await;
@@ -244,26 +244,37 @@ async fn a_first_push_tops_up_in_one_block_and_sends_its_manifest_with_the_chunk
         "the control top-up shares C_d's block: {control:?} vs {c_d:?}"
     );
 
-    let made = created_by(&net, dev.bulk_address(&rid)).await;
     let kind = |o: &charter_core::Observed, k: &str| {
         o.attr("ag.kind") == Some(&charter_core::AttrValue::Str(k.into()))
     };
-    let last_chunk = made
+    let bulk = created_by(&net, dev.bulk_address(&rid)).await;
+    let last_chunk = bulk
         .iter()
         .filter(|o| kind(o, "chunk"))
         .map(|o| o.block)
-        .max();
-    let manifest = made
-        .iter()
-        .filter(|o| kind(o, "manifest"))
-        .map(|o| o.block)
-        .max();
+        .max()
+        .expect("a snapshot was sent");
     assert!(
-        last_chunk.is_some() && manifest.is_some(),
-        "a snapshot was sent"
+        !bulk.iter().any(|o| kind(o, "manifest")),
+        "no manifest from B_d"
     );
-    assert!(
-        manifest <= last_chunk,
-        "the manifest went with the chunks, not a block after: {manifest:?} vs {last_chunk:?}"
+    // Head-model 13.2: the manifest rides in the head tx, a block after its chunks (so its
+    // index terms are not charged as new twice), and replaces the marker.
+    let control = created_by(&net, dev.control_address(&rid)).await;
+    let blocks = |k: &str| -> Vec<u64> {
+        control
+            .iter()
+            .filter(|o| kind(o, k))
+            .map(|o| o.block)
+            .collect()
+    };
+    let (manifest, head) = (blocks("manifest"), blocks("head"));
+    assert_eq!(manifest.len(), 1, "one manifest from C_d");
+    assert_eq!(manifest, head, "the manifest is in the head tx");
+    assert!(manifest[0] > last_chunk, "a block after the chunks");
+    assert_eq!(
+        control.len(),
+        2,
+        "no marker beside the manifest: {control:?}"
     );
 }

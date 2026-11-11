@@ -35,7 +35,7 @@ async fn clone_fetches_piece_txs_concurrently_and_alongside_the_snapshot() {
         "piece txs in flight at once: {}",
         net.stats.max_mined()
     );
-    let (first_piece, _) = net.stats.span("mined_tx").expect("piece reads");
+    let (first_piece, _) = net.stats.span("tx_at").expect("piece reads");
     let (_, last_chunk) = net.stats.span("ag.pack").expect("chunk reads");
     assert!(
         first_piece < last_chunk,
