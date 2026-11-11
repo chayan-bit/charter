@@ -88,6 +88,8 @@ struct Content {
     /// Local pack files (git packs, not their stored form) to index on commit, and their
     /// pack ids.
     files: Vec<(PathBuf, Hash32)>,
+    /// Pieces or chunks went out before the head tx, so the head read in setup is stale.
+    uploaded: bool,
 }
 
 /// One snapshot pack ready to send: the git pack, its stored form and its manifest.
@@ -453,6 +455,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
             });
         }
         Ok(Content {
+            uploaded: inline.is_empty() && !files.is_empty(),
             snapshot: plan
                 .prev
                 .as_ref()
@@ -595,6 +598,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
             let _ = std::fs::remove_file(&b.stored);
         }
         Ok(Content {
+            uploaded: !built.is_empty(),
             snapshot: hashes,
             packs: vec![],
             inline: vec![],
@@ -742,9 +746,11 @@ impl<A: Arkiv> HeadPush<'_, A> {
             };
             let (at, nonce) = futures_util::future::try_join(
                 async {
+                    // `at` must be recent: readers scan only `at + 1 ..= at + 64` (5.4), and a
+                    // long upload outlasts the head read in setup.
                     match ready {
-                        Some(r) => Ok(r.head),
-                        None => self.a.head().await,
+                        Some(r) if !content.uploaded => Ok(r.head),
+                        _ => self.a.head().await,
                     }
                 },
                 async {

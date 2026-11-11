@@ -264,3 +264,44 @@ async fn later_pushes_patch_only_the_body_and_its_hash_and_send_no_marker_beside
     let names: Vec<&str> = patch.attributes.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["ag.body", "ag.h"], "a minimal patch");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_that_uploads_for_many_blocks_signs_a_fresh_at_and_sends_no_follow_up_head() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "fresh-at").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    commit(&work, &[("a.txt", b"one")], "feat: one");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("first push");
+    commit(&work, &[("big.bin", &noise(5, 150_000))], "feat: bulk");
+    let repo = alice.repo(&rid);
+    let hp = Box::pin(prepare2(
+        &net,
+        &alice,
+        &repo,
+        &work,
+        &[upd("refs/heads/main")],
+    ))
+    .await
+    .expect("prepare");
+    let ready = Box::pin(hp.setup()).await.expect("setup");
+    let state = charter_sync::state::State::load(&repo.state_path()).expect("state");
+    let plan = Box::pin(hp.plan(&state)).await.expect("plan");
+    // The head `setup` read goes stale while the bulk pieces upload (a long upload).
+    net.mine(100);
+    let pre = charter_sync::head_send::Pre {
+        ready: Some(ready),
+        nonce: None,
+    };
+    Box::pin(hp.finish_with(plan, pre)).await.expect("push");
+    drop(repo);
+    let (_, d) = view_of(&net, &alice, &rid).await;
+    assert_eq!(
+        d.head.expect("head").body.seq,
+        1,
+        "one head tx, no follow-up"
+    );
+}
