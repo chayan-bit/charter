@@ -302,3 +302,4 @@ MEASURED on Rabdi on 2026-11-11 with the v0.4.0 release build rebased on `main` 
 - Two devices of one identity: concurrent pushes of different branches both landed (12.6 s and 14.7 s) and the merged refs listed both; a concurrent push of the same branch gave the slower device `E_LOST_RACE`, and a pull, rebase and push from that device then landed.
 - Private repo: first push 31.9 s, next push 12.2 s, clone 4.2 s; no ref name or content in plaintext calldata; a second device with only `keys/` copied gets `E_NOT_MEMBER` (section 9).
 - Migration of a v0.3.0 repo: one automatic push of 8 transactions (1,134,393 gas, 38.4 s); v0.3.0 fetch and clone of the migrated repo stop with `E_UNSUPPORTED_VERSION`.
+- The re-run on the build with the review fixes (concurrent pushes from a copied seed and from a fresh device, migration under a pinned program) is at the end of `docs/p5/speed-and-cost.md` section 3.15.

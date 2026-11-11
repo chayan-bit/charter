@@ -520,6 +520,16 @@ Release build of v0.4.0 rebased on `main` 611da1f, against the v0.3.0 release, b
 - (j) `chart ui` shows the device head (seq, body, block) and the merged refs, and picks up a new push within one sync round.
 - The live probe for the rollback rule and the block-history depth are in `docs/p5/head-model.md` section 12.
 
+Re-run on the build with the review fixes (`aefc0b0`: pinned head nonce, fresh-read race check, signed base check, v1 refs keepalive):
+
+- (b) 3 interleaved rounds: v0.3.0 26.3 to 27.9 s, 6 txs, about 915k gas; v0.4.0 12.4 to 13.5 s, 1 tx, 265k to 271k gas.
+- (d) A v0.3.0 repo with the CI-gated program pinned before migration, a patch, a CI pass and a merge in v1: the migration push took 37.7 s (8 txs, 1.13M gas); a fresh v0.4.0 home folds it in 7.7 s to the same `main`; v0.3.0 stops with `E_UNSUPPORTED_VERSION`.
+  The fold still reads the v1 refs entities from the pin onward, so `chart keepalive` now keeps them: its keep set for that repo is 16 entities, against 14 without them.
+- (e) Different branches from two devices: both land (12.1 s and 11.6 s); same branch: winner 13.3 s, loser `E_LOST_RACE`.
+- (e) A fresh device whose first push started before another device landed `main` gets `E_LOST_RACE` ("moved refs/heads/main after git checked it") and leaves the landed commit in place.
+- (e) Two machines with one copied device seed pushing at once: one lands, the other stops with `E_CONCURRENT_PUSH` before a second head transaction, and its retry lands with both branches listed.
+- (i) Patch 27.2 s, CI 24.3 s, merge 46.3 s, release 8.7 s, attestation 19.6 s, verify from a fresh home valid; an unreviewed push gives `E_PROGRAM_REJECTED` and leaves no staging refs.
+
 ## 4. Rejected
 
 - Creating chunks with a short lifetime and extending them later: the total gas is the same; it only moves the payment and adds a data-loss risk if the extension fails to land.
