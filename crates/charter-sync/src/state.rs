@@ -253,6 +253,7 @@ pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 }
 
 /// Temp file, fsync, rename: a crash leaves the old or the new file, never a torn one.
+/// Owner-only (0600): the view memo and program state hold decrypted private rows.
 pub fn write_json<T: Serialize>(path: &Path, v: &T) -> Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -263,7 +264,11 @@ pub fn write_json<T: Serialize>(path: &Path, v: &T) -> Result<()> {
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
     let bytes = serde_json::to_vec_pretty(v).map_err(|e| SyncError::io(path.display(), e))?;
-    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let written = o.open(&tmp).and_then(|mut f| {
         f.write_all(&bytes)?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)
@@ -278,6 +283,18 @@ pub fn write_json<T: Serialize>(path: &Path, v: &T) -> Result<()> {
 mod tests {
     use super::*;
     use charter_core::Kind;
+
+    #[cfg(unix)]
+    #[test]
+    fn json_files_are_readable_by_their_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().expect("tmp");
+        let p = d.path().join("view-memo.json");
+        write_json(&p, &"decrypted rows").expect("write");
+        write_json(&p, &"again").expect("rewrite");
+        let mode = std::fs::metadata(&p).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     #[test]
     fn concurrent_writes_to_one_file_all_land_whole() {
