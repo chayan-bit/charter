@@ -23,7 +23,7 @@ pub struct BodyAt {
 }
 
 /// Verified bodies by landing tx, cached next to the git cache (calldata never changes).
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BodyCache {
     bodies: BTreeMap<String, (String, LandingJson)>,
     /// Landing of a current head, by head `h`.
@@ -37,6 +37,12 @@ impl BodyCache {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         write_json(path, self)
+    }
+
+    /// Adds what another walk (on a clone of this cache) learned.
+    pub fn absorb(&mut self, other: Self) {
+        self.bodies.extend(other.bodies);
+        self.current.extend(other.current);
     }
 
     fn get(&self, tx: &Hash32) -> Option<(HeadBody, LandingJson)> {
@@ -109,7 +115,7 @@ fn broken(dev: &Device, what: &str) -> SyncError {
     )
 }
 
-/// Every device's walked bodies of one identity.
+/// Every device's walked bodies of one identity; the devices are walked at the same time.
 pub async fn identity_bodies<A: Arkiv>(
     a: &A,
     rid: &Rid,
@@ -117,9 +123,17 @@ pub async fn identity_bodies<A: Arkiv>(
     stop: u64,
     cache: &mut BodyCache,
 ) -> Result<Vec<BodyAt>> {
+    let walks = v2.heads().map(|(dev, head)| {
+        let mut mine = cache.clone();
+        async move {
+            let bodies = walk(a, rid, dev, head, stop, &mut mine).await?;
+            Ok::<_, SyncError>((bodies, mine))
+        }
+    });
     let mut all = vec![];
-    for (dev, head) in v2.heads() {
-        all.extend(walk(a, rid, dev, head, stop, cache).await?);
+    for (bodies, theirs) in futures_util::future::try_join_all(walks).await? {
+        cache.absorb(theirs);
+        all.extend(bodies);
     }
     Ok(all)
 }

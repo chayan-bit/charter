@@ -5,6 +5,7 @@
 use std::fmt::Write as _;
 
 use alloy_primitives::{Address, B256};
+use serde::{Deserialize, Serialize};
 
 use crate::StoreError;
 
@@ -22,7 +23,7 @@ pub const MAX_STR_BYTES: usize = 128;
 pub const MAX_NAME_BYTES: usize = 32;
 
 /// What a predicate tests: a user attribute or a system attribute.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Field {
     Attr(String),
     Owner,
@@ -37,7 +38,7 @@ pub fn attr(name: &str) -> Field {
 }
 
 /// A typed literal. Only the types Charter queries are offered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
     Str(String),
     U64(u64),
@@ -68,7 +69,7 @@ impl From<Address> for Value {
 }
 
 /// The predicate tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pred {
     All,
     Eq(Field, Value),
@@ -92,14 +93,14 @@ impl Pred {
 }
 
 /// The type an `ORDER BY` reads its attribute as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderType {
     U64,
     Str,
 }
 
 /// `ORDER BY field:type [DESC]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderBy {
     pub field: Field,
     pub ty: OrderType,
@@ -107,7 +108,7 @@ pub struct OrderBy {
 }
 
 /// A full query: predicates plus an optional sort.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Query {
     pub filter: Pred,
     pub order: Option<OrderBy>,

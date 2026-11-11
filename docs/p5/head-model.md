@@ -161,6 +161,33 @@ The next body of the same device replaces every `stamp = 0` and every zero piece
 - The connectivity check, the canonical-ref quorum and the program fold run on the merged refs exactly as on P1 refs.
 - A clone therefore costs one snapshot plus at most the piece bytes since it, whatever the history length, and old blocks being pruned loses nothing a user can see once the snapshot exists.
 
+### 5.6 Speculative sync and the head probe
+
+A full sync records every query its view build and program reads sent, with the pages that came back, in `view-memo.json` next to the repo's `state.json`.
+`entityNonce` reads and count-only queries (the completeness counts of design 3.3) are never recorded: they are always sent live, in the build's order, so every nonce is still read after the rows it checks.
+A recorded page is served at most once per sync, so a second read of the same rows (the full bracket of section 6 after the short form failed) always goes to the network.
+
+The next sync of the repo takes one of three paths, falling back to the next on any failure:
+
+1. Replay, when the last full sync is less than 10 minutes old (`CHARTER_PROBE_WINDOW_SECS` overrides, in seconds) and the probe is unchanged.
+   The probe is one paged query for the `(key, $updatedAt)` of every `id`, `idacc`, `bind`, `anchor` and `head` entity of the repo, and, for a repo that pins a program, the count of its ops; both go out in one round with the live nonce reads.
+   Any create, delete, patch, extend or expiry of those entities changes the list, so a new push, a rollback patch, a deleted or hidden head, a new device delegation and an identity revision are all seen at once.
+   Only pages read at or after the probe's block are replayed (anything a page missed then happened after the probe, so it changes the next probe); the rest are sent live.
+2. Speculative: every recorded query is sent at once, and the build is served from those answers; queries it did not record go out as before.
+3. The plain build.
+
+A replayed or speculative sync takes the probe's block as the chain head instead of asking the node for it.
+With `CHARTER_TRACE=1` each sync prints the path it took.
+
+What a replay can miss until the next full sync (at most the window, 10 minutes by default):
+
+- The deletion or expiry of a v1 `refs` entity, a v1 manifest or snapshot chunks: content-addressed entities whose kinds the probe does not list.
+  Chunks are read live by the download anyway; a missed refs or manifest deletion only delays `E_NOT_LIVE` for that peer.
+- The deletion or expiry of a `peer` document (it carries no `ag.rid`).
+  A peer document only binds a key to a nid that hashes it, so no other key can take its place.
+- For a pinned repo, one op deleted and another created in the same window: the op count is unchanged.
+- Anything a lying RPC hides, which is no change from the trust model without the probe.
+
 ## 6. Completeness and the rollback invariant
 
 Rules for the device control address `C_d`:
@@ -169,7 +196,8 @@ Rules for the device control address `C_d`:
 - Every head transaction creates at least one entity from `C_d`.
 - `body.pieces_created = entityNonce(C_d) after the transaction - 1` (the 1 is the head itself).
 
-Check, run on every fetch for every device of every v2 peer: read `n1 = entityNonce(C_d)`, then the heads, then `n2 = entityNonce(C_d)`; retry up to 4 times while `n1 != n2`; then require `head.pieces_created + 1 = n1`, else fail closed with `E_CONTROL_NOT_LIVE`.
+Check, run on every fetch for every device of every v2 peer: read the heads, then `n = entityNonce(C_d)`, and accept the head when `head.pieces_created + 1 = n` (or no head and `n = 0`).
+Anything else falls back to the full bracket: read `n1 = entityNonce(C_d)`, then the heads, then `n2 = entityNonce(C_d)`; retry up to 4 times while `n1 != n2`; then require `head.pieces_created + 1 = n1`, else fail closed with `E_CONTROL_NOT_LIVE`.
 This is the coordinator's invariant `live control-plane entities of C_d + pieces_created = entityNonce(C_d)` with the head as the only control-plane entity of `C_d`, checked at the latest block, because Rabdi cannot answer for older blocks (section 2).
 
 Why a rollback is caught by a fresh client with no checkpoint and no local state:
@@ -180,12 +208,33 @@ Why a rollback is caught by a fresh client with no checkpoint and no local state
 4. So after the rollback `entityNonce(C_d) >= p_old + 2 > p_old + 1`, and the check fails.
 5. The same holds for a body replayed into a second head entity: the extra create raises `entityNonce` past every signed body.
 
+Why one nonce read after the heads is enough:
+
+- Along one device's body chain `pieces_created` strictly increases: a push signs only when `entityNonce(C_d)` equals its previous body's `pieces_created + 1` (section 7.1), and its own transaction adds at least one create; the repair of section 7.4 only raises it further.
+- Once a body lands, `entityNonce(C_d)` is at least its `pieces_created + 1` forever (step 3 above).
+- So a nonce read after the heads that equals the read head's `pieces_created + 1` is below every newer body's `pieces_created + 1`: no newer body had landed when the nonce was read, which is later than the heads were.
+- A push landing between the two reads raises the nonce past the read head's claim, so the short form fails and the full bracket decides, exactly as before.
+- Rabdi answers `entityNonce` only at the latest block, so the read cannot be pinned to the query's block (`arkiv_query` takes `atBlock`, `eth_call` does not); the short form costs two round trips per device instead of three.
+
+The completeness observation of design 3.3 takes the same short form: the live count of the control address, then one `entityNonce` read, accepted when they are equal, else the full (nonce, count, nonce) observation.
+A live count never exceeds what the address created and the nonce never decreases, so a count equal to a later nonce was complete when it was read.
+A peer's completeness observations and its device heads are read at the same time and judged in the old order, so a no-op fetch of a v2 peer costs two sequential round trips after discovery instead of four.
+
+An over-claiming body: a body that records more creates than `C_d` had made when it landed, from a buggy or malicious holder of the device seed.
+
+- While it is current every reader fails closed (`entityNonce(C_d) < pieces_created + 1`), and its own device cannot push past it (section 7.1 needs equality).
+- It can be rolled back to later only from a newer body that records no more than it does, which honest code never signs (first point above): whoever signed that newer body holds the device key and could sign any refs for this device directly, so the rollback adds nothing to that power.
+- The full bracket does not close it either: a holder of `C_d` can create entities until `entityNonce(C_d)` equals the old claim plus 1 and then stop, and `n1 = n2 = pieces_created + 1` holds for the old body.
+  The two reads differ only while creates land between them, which the short form already turns into a fallback.
+- A lying RPC can report any nonce, with either form.
+- Closing it would need the nonce at the old body's landing block, which Rabdi does not serve; readers that saw a newer head reject the old one by seq (section 5.2, rule 5).
+
 Why an honest device never fails it:
 
 - Pieces that must land before the head (big pushes) come from `B_d`, never from `C_d`, so a crash between them and the head leaves `C_d` untouched.
 - The head transaction is one atomic `execute`, so the nonce and the body change together.
 - The writer computes `pieces_created` from `entityNonce(C_d)` read just before signing, so nothing it ever created is miscounted.
-- The `n1, n2` bracket removes the race with a push landing between the reads.
+- A push landing between the reads fails the short form and the `n1, n2` bracket decides.
 
 What it costs an attacker who only holds `C_d`: any create from `C_d` outside a head transaction breaks the check for every reader, which is a denial of service, the same power a stolen P1 control key already has (it can let an anchor expire); it can never produce an older or forged view that passes.
 Deleting the head is caught too: a delegated device with `entityNonce(C_d) > 0` and no head fails closed.

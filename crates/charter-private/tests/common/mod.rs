@@ -26,6 +26,8 @@ pub struct Net {
     drop: Mutex<Option<(Address, u64)>>,
     /// `(from block, wei)`: the base fee is held at `wei` once the head reaches the block.
     fee: Mutex<Option<(u64, u128)>>,
+    /// Rendered text of every query, in order.
+    pub queries: Mutex<Vec<String>>,
 }
 
 impl Net {
@@ -34,6 +36,7 @@ impl Net {
             mem: Arc::new(MemArkiv::new(CHAIN)),
             drop: Mutex::new(None),
             fee: Mutex::new(None),
+            queries: Mutex::new(vec![]),
         }
     }
 
@@ -45,6 +48,11 @@ impl Net {
     /// Hold the base fee at `wei` from block `from` on (a fee spike mid-push).
     pub fn hold_base_fee(&self, from: u64, wei: u128) {
         *self.fee.lock().expect("lock") = Some((from, wei));
+    }
+
+    /// Takes the queries sent so far.
+    pub fn take_queries(&self) -> Vec<String> {
+        std::mem::take(&mut *self.queries.lock().expect("lock"))
     }
 
     pub fn heal(&self) {
@@ -74,6 +82,8 @@ impl Arkiv for Net {
         self.mem.base_fee().await
     }
     async fn query(&self, q: &Query, o: &QueryOpts) -> Result<QueryPage, StoreError> {
+        let text = q.render().unwrap_or_default();
+        self.queries.lock().expect("lock").push(text);
         self.mem.query(q, o).await
     }
     async fn entity_nonce(&self, c: Address) -> Result<u64, StoreError> {

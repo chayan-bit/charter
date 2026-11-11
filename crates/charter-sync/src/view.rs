@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use charter_core::{
     AcceptedHead, AnchorChain, CompletenessObs, Equivocation, HeadInputs, IdentityChain, Kind,
     ManifestBody, Nid, Observed, PeerInfo, RefsBody, Rid, Start, accept_head, anchor_chain,
-    bind_chain, check_control_set, check_requires, identity_chain, is_device_row, peer_key,
+    bind_chain, check_control_set, check_requires, identity_chain, is_device_row,
 };
 use charter_store::{Arkiv, Pred};
 use futures_util::future::{join_all, try_join, try_join_all};
@@ -15,6 +15,8 @@ use futures_util::future::{join_all, try_join, try_join_all};
 use crate::observe::{self, all, b32, by_hashes, by_seq, creators, kind};
 use crate::state::State;
 use crate::{Result, SyncError, warn};
+
+pub mod memo;
 
 /// One synced peer.
 #[derive(Debug, Clone)]
@@ -77,12 +79,9 @@ pub async fn resolve_peer<A: Arkiv>(a: &A, rid: &Rid, nid: &Nid) -> Result<Optio
         b32("ag.nid", nid),
     ]);
     // Independent queries, sent together; the bind chain is only checked once the key is known.
-    let (docs, binds) = try_join(
-        all(a, Pred::And(vec![kind(Kind::Peer), b32("ag.nid", nid)])),
-        by_seq(a, filter, "ag.seq"),
-    )
-    .await?;
-    let Some(pk) = peer_key(nid, &docs) else {
+    let (pk, binds) =
+        try_join(crate::cob::peer_key_of(a, nid), by_seq(a, filter, "ag.seq")).await?;
+    let Some(pk) = pk else {
         return Ok(None);
     };
     let binds = bind_chain(rid, &pk, &binds)?;
@@ -99,14 +98,44 @@ fn signer_nids(observed: &[Observed]) -> BTreeSet<Nid> {
         .collect()
 }
 
+/// The `id` and `idacc` entities of `rid`.
+pub fn identity_filter(rid: &Rid) -> Pred {
+    let kinds = Pred::Or(vec![kind(Kind::Id), kind(Kind::IdAcc)]);
+    Pred::And(vec![b32("ag.rid", rid), kinds])
+}
+
+/// Identity rows another step of this command just read (the private-repo check).
+static PREFETCHED: std::sync::Mutex<Option<(Rid, std::time::Instant, Vec<Observed>)>> =
+    std::sync::Mutex::new(None);
+/// How long prefetched identity rows stand in for a fresh read.
+const PREFETCH_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Hands the rows of [`identity_filter`] to the next [`identity`] of `rid`, which uses them
+/// once (within [`PREFETCH_TTL`]) instead of querying again.
+pub fn prefetched_identity(rid: &Rid, rows: Vec<Observed>) {
+    if let Ok(mut slot) = PREFETCHED.lock() {
+        *slot = Some((*rid, std::time::Instant::now(), rows));
+    }
+}
+
+fn take_prefetched(rid: &Rid) -> Option<Vec<Observed>> {
+    let mut slot = PREFETCHED.lock().ok()?;
+    match slot.take() {
+        Some((r, at, rows)) if r == *rid && at.elapsed() < PREFETCH_TTL => Some(rows),
+        _ => None,
+    }
+}
+
 /// The identity chain of `rid` and every signer the identity entities name.
 pub async fn identity<A: Arkiv>(
     a: &A,
     rid: &Rid,
     state: &State,
 ) -> Result<(IdentityChain, BTreeMap<Nid, PeerInfo>)> {
-    let kinds = Pred::Or(vec![kind(Kind::Id), kind(Kind::IdAcc)]);
-    let observed = all(a, Pred::And(vec![b32("ag.rid", rid), kinds])).await?;
+    let observed = match take_prefetched(rid) {
+        Some(rows) => rows,
+        None => all(a, identity_filter(rid)).await?,
+    };
     let nids: Vec<Nid> = signer_nids(&observed).into_iter().collect();
     let infos = try_join_all(nids.iter().map(|n| resolve_peer(a, rid, n))).await?;
     let peers: BTreeMap<Nid, PeerInfo> = nids
@@ -156,6 +185,28 @@ pub async fn chain_of<A: Arkiv>(
     Ok((chain, observed))
 }
 
+/// The completeness observation of `c` (design 3.3): the live count, then one
+/// `entityNonce` read, taken when they agree; anything else reads the full
+/// (nonce, count, nonce) observation. Sound because the live count never exceeds what `c`
+/// created and the nonce never decreases: a count equal to a later nonce was complete
+/// when it was read.
+async fn observe_completeness<A: Arkiv>(
+    a: &A,
+    c: &charter_core::Address,
+) -> Result<CompletenessObs> {
+    let live = observe::live_count(a, c).await?;
+    let n = a.entity_nonce(charter_store::Address::from(*c)).await?;
+    if live == n {
+        return Ok(CompletenessObs {
+            address: *c,
+            nonce_before: n,
+            live,
+            nonce_after: n,
+        });
+    }
+    observe::completeness(a, c).await
+}
+
 /// Bind chain, completeness, anchor chain and head acceptance for one peer (design 3.6).
 pub async fn verify_peer<A: Arkiv>(
     a: &A,
@@ -165,31 +216,42 @@ pub async fn verify_peer<A: Arkiv>(
     identity: &IdentityChain,
     state: &State,
 ) -> Result<PeerView> {
-    // Each completeness observation stays sequential inside (nonce, count, nonce); the
-    // observations and the anchor query are independent, so they run together.
+    // The completeness observations, and the anchor query then the device heads, are
+    // independent, so they run together; their outcomes are judged in the order below.
     let control: Vec<_> = info.binds.control_set().into_iter().collect();
-    let (completeness, (chain, anchors)) = try_join(
-        try_join_all(control.iter().map(|c| observe::completeness(a, c))),
-        chain_of(a, rid, nid, &info, identity),
+    let anchored = async {
+        let (chain, anchors) = chain_of(a, rid, nid, &info, identity).await?;
+        let device_rows: Vec<Observed> = anchors
+            .iter()
+            .filter(|o| is_device_row(o))
+            .cloned()
+            .collect();
+        let v2 = match device_rows.is_empty() {
+            true => None,
+            false => Some(
+                Box::pin(crate::heads::build(
+                    a,
+                    rid,
+                    nid,
+                    &info,
+                    identity,
+                    &device_rows,
+                    state,
+                ))
+                .await,
+            ),
+        };
+        Ok::<_, SyncError>((chain, anchors, v2))
+    };
+    let (completeness, anchored) = futures_util::future::join(
+        try_join_all(control.iter().map(|c| observe_completeness(a, c))),
+        anchored,
     )
-    .await?;
-    let device_rows: Vec<Observed> = anchors
-        .iter()
-        .filter(|o| is_device_row(o))
-        .cloned()
-        .collect();
-    if !device_rows.is_empty() {
+    .await;
+    let (completeness, (chain, anchors, v2)) = (completeness?, anchored?);
+    if let Some(v2) = v2 {
         check_control_set(nid, &info.binds.control_set(), &completeness)?;
-        let v2 = Box::pin(crate::heads::build(
-            a,
-            rid,
-            nid,
-            &info,
-            identity,
-            &device_rows,
-            state,
-        ))
-        .await?;
+        let v2 = v2?;
         // Before any device head landed (a half-done migration) the v1 chain still holds
         // the refs, so it is verified as before (head-model 5.1).
         if v2.heads().next().is_some() {
