@@ -307,3 +307,90 @@ MEASURED on Rabdi on 2026-11-11 with the v0.4.0 release build rebased on `main` 
 - Private repo: first push 31.9 s, next push 12.2 s, clone 4.2 s; no ref name or content in plaintext calldata; a second device with only `keys/` copied gets `E_NOT_MEMBER` (section 9).
 - Migration of a v0.3.0 repo: one automatic push of 8 transactions (1,134,393 gas, 38.4 s); v0.3.0 fetch and clone of the migrated repo stop with `E_UNSUPPORTED_VERSION`.
 - The re-run on the build with the review fixes (concurrent pushes from a copied seed and from a fresh device, migration under a pinned program) is at the end of `docs/p5/speed-and-cost.md` section 3.15.
+
+## 13. Format v3 (design for v0.5.0, core code on branch `perf/b-lane-b`)
+
+Status: designed 2026-11-11; the `charter-core` encode, decode and policy are implemented and tested, the readers and writers are wired after lanes A and C merge.
+Format v3 changes only the bytes of the device head and of the packs it names; entities, keys, the rollback rule, the merge and the program fold stay as in sections 4 to 8.
+
+### 13.1 Encoding
+
+```cddl
+HeadBodyV3 = {               ; fields 1 to 8, 10 and 11 exactly as HeadBody (4.2)
+  9: [* PackV3],             ; packs since the snapshot, in apply order
+}
+PackV3   = [pack_id: bstr .size 32, codec: uint, runs: [+ PieceRun]]
+PieceRun = [block: uint, index: uint, count: uint]
+```
+
+- Signed by the device key with envelope kind code 13 and context `arkiv-git/head/v3`; the content hash is `H("head3", envelope)`.
+- Stored as `ag.kind = 'head'` with `ag.v = 3`, plus `ag.rid`, `ag.nid`, `ag.dev` and `ag.h` as in v2.
+- `pack_id = SHA-256(stored bytes)`, the concatenation of the pack's pieces in order, so integrity is checked before any decompression.
+- `codec = 0`: the stored bytes are the git pack; `codec = 1`: they are a brotli stream of it (13.3).
+- A run names `count` consecutive transactions of block `block` from index `index`; each contributes the bodies of its piece creates in op order.
+  `[0, 0, 1]` is the transaction carrying this body (inline pieces).
+  Bulk pieces are one create per transaction from `B_d`, so a 2 MiB push of 34 pieces in two blocks is two runs.
+- The per-piece SHA-256 of v2 is gone: the pack check already covers every byte, and a piece is useless alone.
+- The body rules of 4.2 still hold (strictly ascending refs, counters, stamps, oid lengths, `prev_tx`), plus: every pack has at least one run, every run `count >= 1`, block 0 only as `[0, 0, 1]`, a known codec, and at most 256 piece transactions in all.
+- Snapshot manifests of a v3 head use `pack_kind = 3` (a brotli stream of a self-contained pack): `pack_id`, `size` and the chunk hashes describe the stored bytes, `trailer` the git pack inside.
+
+### 13.2 Smaller head transactions
+
+- A head patch sets only `ag.body` and `ag.h`.
+  Arkiv applies a patch as attribute mutations merged into the stored entity (`arkiv-reth-executor`, `Op::Patch` with `apply_mutations`; `MemArkiv` does the same), so the other attributes stay as the create wrote them.
+  Readers that open a body from calldata (the landing search of 5.4 and the body walk of section 8) accept a row with only those two attributes when `ag.h` matches the envelope (`open_head_calldata`).
+- The marker piece of a push with no inline piece is a create with no attributes and an empty payload from `C_d`: it still raises `entityNonce(C_d)`, which is all the rollback rule needs.
+- ABI framing stays: the node requires the canonical ABI encoding of the precompile call, so the zero padding cannot be cut client-side.
+
+### 13.3 Pack codec
+
+- The writer builds every piece pack and snapshot pack with `--compression=0 --no-reuse-object` (deltas recomputed, objects not zlib-compressed), then compresses the whole pack with brotli (window 2^24).
+  Brotli over today's zlib-compressed packs saves under 2%, because git already compresses each object; without the inner zlib it saves 22 to 35% (MEASURED, 13.6).
+- Quality by size: 11 up to 64 KiB, 9 up to 1 MiB, 6 above (MEASURED with the Python binding of the same encoder on a loaded Mac):
+
+  | Pack (no zlib) | q6 | q9 | q11 |
+  |---|---|---|---|
+  | Charter thin, 3 commits, 403 KB | | 125,108 B, 0.05 s | 116,284 B, 1.1 s |
+  | Charter thin, 10 commits, 1.62 MB | 470,500 B, 0.11 s | 462,534 B, 0.26 s | 423,585 B, 4.5 s |
+  | Charter snapshot, 4.04 MB | 1,263,554 B, 0.28 s | 1,225,900 B, 1.1 s | 1,133,492 B, 12.0 s |
+  | focus-dock snapshot (binary), 12.3 MB | 11,322,899 B, 0.33 s | 11,230,582 B, 8.4 s | 11,118,104 B, 55 s |
+
+  Above 1 MiB q9 costs 4 to 25 times the CPU of q6 for 1 to 3% fewer bytes, and q10 and q11 break the budget of 2 s per 10 MiB, so they are used only for small packs.
+- When the brotli stream is not smaller than the pack (random data, one-commit pushes), the pack is stored raw with `codec = 0`.
+- Readers check `pack_id` first, then decompress with a cap of 100 MiB (the largest pack one manifest can name), so a signed decompression bomb fails with `E_BAD_PACK` instead of filling the disk.
+- Brotli is the pure-Rust `brotli` crate already in `Cargo.lock` through `reqwest`; zstd would have added a C binding.
+- Private repos compress before sealing: the sealed bytes are the stored bytes, so nothing new is in plaintext and the ciphertext length leaks no more than the v2 length did.
+- Reader cache: `index-pack` keeps the pack as given, so the objects of a v3 pack sit in the cache without zlib.
+  For text-heavy packs that is about 2.5 times today's size (Charter snapshot: 4,043,666 B in the cache against 1,646,039 B); binary packs barely grow (focus-dock: 12,345,246 B against 12,006,713 B).
+  A local recompress of the pack's objects by path (`pack-objects --revs <tips> --no-reuse-object --window=10`) brings the Charter snapshot back to 1,647,895 B in 0.5 s on a loaded Mac; without paths (`--batch-all-objects`) it reaches only 2,550,809 B, and for the binary pack it costs 2.6 s to save 6% (MEASURED).
+  Rule: after indexing a v3 pack whose stored bytes are under half its decoded size (text that brotli shrank well), the reader repacks the objects reachable from the refs it just verified with that command in the same fetch; other packs stay as indexed.
+  That keeps text repos at today's cache size for about 0.12 s per decoded MiB and leaves binary repos 3% larger, so a clone of a 10 MiB text repo gets about 1.2 s slower (ESTIMATE).
+  A device's own snapshot layers keep their indexed pack (the layer policy finds them by git trailer), so the writer never repacks its own snapshot packs.
+
+### 13.4 Migration and old clients
+
+- The first v0.5.0 push of a device migrates its head in that push, with the mechanism of the v1 to v2 migration: the head entity keeps its key, and the migrating patch sets every attribute (`ag.v = 3` included), so the stored entity reads as a v3 head; later patches set only `ag.body` and `ag.h`.
+- The migrating body lists the device's carried packs re-encoded as runs: each v2 piece tx hash maps to its `(block, index)` through the receipt the writer already holds or one `eth_getTransactionByHash`.
+- v0.5.0 reads v1, v2 and v3 and writes only v3; a repo may mix v2 and v3 devices.
+- v0.4.0 meets `ag.kind = 'head'` with `ag.v = 3` from the tracked `C_d`, treats it as an unknown layout version and stops with `E_UNSUPPORTED_VERSION` (`fail_unsupported` in `charter-core/src/chain/head.rs`); it never drops the head or shows stale refs.
+  The test `the_v040_reader_stops_on_a_v3_head_with_unsupported_version` runs the unchanged v0.4.0 acceptance code on a signed v3 row.
+- A migrating patch that left `ag.v = 1` would make v0.4.0 fail closed with `E_CONTROL_NOT_LIVE` instead (an undecodable head); the writer therefore always sets every attribute on the first v3 patch.
+
+### 13.5 Security impact
+
+- Integrity is unchanged: every stored byte is covered by `pack_id`, which the device signs, and git checks every object after decompression.
+- Losing the per-piece hash costs only diagnosis: a corrupt piece is reported for its pack, not for the piece.
+- Naming a piece by `(block, index)` instead of its tx hash depends on that block being final; Rabdi has a single sequencer and every piece receipt lands before the head tx is sent, so a reorg that moved a piece would also have to move the head, and a mismatch fails closed with `E_BAD_PACK`.
+- The minimal patch changes nothing a reader trusts: every attribute is still compared against the values derived from the body.
+- The new signature context and kind code separate v3 bodies from v2 bodies, so a v2 signature can never be replayed as a v3 head or the reverse.
+- A rollback to a v2 body after migration still fails the rule of section 6, and the local mark rejects a lower seq.
+- The decompression cap bounds memory and disk per pack.
+
+### 13.6 Projected savings (DERIVED from the measurements in `speed-and-cost.md` 3.15)
+
+| Push | v2 | v3 | Saving |
+|---|---|---|---|
+| Small push, head tx gas | 340k | about 318k | minimal patch -13k, attribute-less marker -9k |
+| Head after a 2 MiB push (34 carried pieces) | +2,420 B per push | about +40 B | about -95k gas per push, growing to about -700k at 256 pieces |
+| Thin pack of 2 to 30 commits | 100% | 70 to 72% | -28 to -30% of piece gas |
+| Snapshot refresh (Charter's own repo) | 1.81 MB | 1.17 MB | -35% (-29% on top of the 13.3 pack settings) |
