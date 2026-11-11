@@ -4,6 +4,7 @@
 <h1 class="repo-name"><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1>
 {% if !r.description.is_empty() %}<p class="repo-desc">{{ r.description }}</p>{% endif %}
 <p class="perm"><span>{% if r.private %}{{ m::i(l.v, "lock-simple") }}Private: sealed for its members{% else %}{{ m::i(l.v, "globe-simple") }}Public and permanent on Arkiv{% endif %}</span>{% if let Some((block, nid)) = r.pushed %}<span>{{ m::i(l.v, "git-branch") }}<span>Updated <time title="{{ r.full(block) }}">{{ r.when(block) }}</time> by {{ r.who(nid) }}</span></span>{% endif %}</p>
+{% if r.private && r.revoked_leaves > 0 && l.writes %}<form method="post" action="/r/{{ r.hex }}/write" class="perm"><input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="remove-revoked"><input type="hidden" name="back" value="/r/{{ r.hex }}"><span>{{ m::i(l.v, "lock-simple") }}{% if r.revoked_leaves == 1 %}A revoked device can{% else %}{{ r.revoked_leaves }} revoked devices can{% endif %} still decrypt new writes</span><button class="btn" type="submit">Remove from the group</button></form>{% endif %}
 </div>
 <div class="rh-side">
 {% include "verify.html" %}

@@ -216,6 +216,10 @@ pub struct RepoView {
     pub issues: usize,
     #[serde(default)]
     pub patches: usize,
+    /// A private repo, as this home's admin sees it: leaves of revoked devices still in the
+    /// group, which the repo page offers to remove as a priced write. Zero otherwise.
+    #[serde(default)]
+    pub revoked_leaves: usize,
 }
 
 impl Cobs {
@@ -260,6 +264,7 @@ impl RepoView {
                 .collect(),
             issues: 0,
             patches: 0,
+            revoked_leaves: 0,
         }
     }
 }

@@ -384,3 +384,149 @@ fn a_rotation_between_price_and_send_seals_under_the_new_epoch() {
     }))
     .expect("task");
 }
+
+/// Head-model 15.7 and the no-unasked-spend rule: a background round on a private repo only
+/// counts a revoked device's leaf and sends nothing; the repo page offers the removal as
+/// its own write, priced from the commit it would send, and only the admin's confirm sends
+/// it, after which the revoked device cannot open the new epoch.
+#[test]
+fn a_revoked_leaf_is_removed_only_by_a_priced_write_the_admin_confirms() {
+    let rt = rt();
+    rt.block_on(rt.spawn(async {
+        let net = Arc::new(Net::new());
+        let alice = Peer::new(&net, 1);
+        let laptop = alice.second_device(&net);
+        let rid = charter_private::init(&*net, &alice.cfg, &alice.keys, &meta("secret"))
+            .await
+            .expect("init --private");
+        let kp = charter_private::publish_key_package(&*net, &laptop.cfg, &laptop.keys)
+            .await
+            .expect("laptop kp");
+        charter_private::add_device(&*net, &alice.cfg, &alice.keys, &rid, &kp)
+            .await
+            .expect("add laptop");
+        let ring = |p: &Peer| {
+            let (net, cfg, keys) = (net.clone(), p.cfg.clone(), keys(1));
+            async move {
+                charter_private::ring_for(&*net, &cfg, Some(&keys), &rid)
+                    .await
+                    .expect("ring")
+                    .expect("member")
+            }
+        };
+        ring(&laptop).await;
+        let e0 = ring(&alice).await.current().expect("epoch").0;
+
+        // alice and her laptop each push through their sealed view; she revokes the laptop.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let work = work_repo(tmp.path(), "w");
+        commit(&work, &[("a.txt", b"one")], "c1");
+        push_sealed(&net, &alice, &rid, &work, "refs/heads/main").await;
+        git(&work, &["checkout", "-q", "-b", "topic"]);
+        commit(&work, &[("t.txt", b"t1")], "t1");
+        push_sealed(&net, &laptop, &rid, &work, "refs/heads/topic").await;
+        let sealed = charter_private::Sealed::new(&*net, ring(&alice).await);
+        let repo = alice.repo(&rid);
+        let dev = |p: &Peer| {
+            charter_sync::device::device_keys(p.home.path())
+                .expect("device")
+                .nid()
+        };
+        Box::pin(charter_sync::revoke::revoke_device(
+            &sealed,
+            &alice.cfg,
+            &alice.keys,
+            &repo,
+            &dev(&laptop),
+            &dev(&alice),
+        ))
+        .await
+        .expect("revoke");
+        drop(repo);
+
+        // The round loads the identity from the home, as `chart ui` does.
+        let seed = charter_sync::keys::seed_path(alice.home.path());
+        std::fs::create_dir_all(seed.parent().expect("dir")).expect("keys dir");
+        std::fs::write(&seed, [1u8; 32]).expect("seed");
+        let ctl = alice.keys.control_address(&rid);
+        let sent = net.tx_count(ctl).await.expect("n");
+        charter_ui::sync_loop::round(&*net, &alice.cfg, &rid)
+            .await
+            .expect("round");
+        assert_eq!(
+            net.tx_count(ctl).await.expect("n"),
+            sent,
+            "a round sends nothing"
+        );
+        assert_eq!(ring(&alice).await.current().expect("epoch").0, e0);
+
+        let hex = hex32(&rid);
+        let app = app_with_writer(&net, &alice);
+        let home = send(app.clone(), req(&format!("/r/{hex}"))).await.text();
+        assert!(
+            home.contains("name=\"kind\" value=\"remove-revoked\""),
+            "the repo page offers the removal"
+        );
+        let r = send(
+            app.clone(),
+            form(&format!("/r/{hex}/write"), &[("kind", "remove-revoked")]),
+        )
+        .await;
+        let html = r.text();
+        assert_eq!(r.status, StatusCode::OK, "{html}");
+        assert!(
+            html.contains("Remove the revoked devices from the group?"),
+            "{html}"
+        );
+        assert_eq!(
+            net.tx_count(ctl).await.expect("n"),
+            sent,
+            "pricing sends nothing"
+        );
+        let at = html.find("/write/").expect("confirm form") + 7;
+        let id = html[at..at + 64].to_owned();
+        let r = send(app.clone(), form(&format!("/r/{hex}/write/{id}"), &[])).await;
+        assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.text());
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let part = send(app.clone(), req(&format!("/r/{hex}/write/{id}?part=1")))
+                .await
+                .text();
+            assert!(!part.contains("Write failed"), "{part}");
+            if part.contains("toast t-confirmed") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never confirmed");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let a = ring(&alice).await;
+        assert_eq!(a.current().expect("epoch").0, e0 + 1, "one removal commit");
+        let l = ring(&laptop).await;
+        assert!(
+            !l.epochs.contains_key(&(e0 + 1)),
+            "the laptop holds no new key"
+        );
+    }))
+    .expect("task");
+}
+
+/// A device-head push of `refname` by `p` through its own sealed view.
+async fn push_sealed(net: &Arc<Net>, p: &Peer, rid: &Rid, work: &std::path::Path, refname: &str) {
+    let ring = charter_private::ring_for(&**net, &p.cfg, Some(&p.keys), rid)
+        .await
+        .expect("ring")
+        .expect("member");
+    let sealed = charter_private::Sealed::new(&**net, ring);
+    let repo = p.repo(rid);
+    let view = Box::pin(charter_sync::sync(&sealed, &repo, &p.want()))
+        .await
+        .expect("sync");
+    let to = charter_sync::Update {
+        src: Some(refname.into()),
+        dst: refname.into(),
+    };
+    let git = charter_sync::git::Git::work(Some(work));
+    let hp = charter_sync::HeadPush::prepare(&sealed, &repo, &p.cfg, &p.keys, view, &git, &[to])
+        .expect("prepare");
+    Box::pin(hp.run()).await.expect("push");
+}

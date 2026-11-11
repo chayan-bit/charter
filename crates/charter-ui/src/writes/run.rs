@@ -181,6 +181,12 @@ impl<A: Arkiv> Ctx<A> {
         let mut steps = Vec::with_capacity(d.steps.len());
         for step in d.steps.clone() {
             let step = Self::resolve(step).await?;
+            if step == Step::RemoveRevoked {
+                let gas = self.removal_gas(&d.rid, &mut e).await?;
+                self.control_tx(&mut e, &mut have, gas, base_fee);
+                steps.push(step);
+                continue;
+            }
             let op = match &step {
                 Step::Deposit { amount, purpose } => {
                     let appt = ledger::load(&b, &d.rid).await.map_err(|e| {
@@ -202,6 +208,19 @@ impl<A: Arkiv> Ctx<A> {
         Ok((Draft { steps, ..d }, e))
     }
 
+    /// Gas of the removal commit `charter_private::revoked::remove_revoked` would send now,
+    /// built and dropped without sending (a group refresh and the add and remove path's
+    /// reads: pricing an explicit write, never a background round).
+    async fn removal_gas(&self, rid: &Rid, e: &mut Estimate) -> Result<u64, String> {
+        let ops = charter_private::revoked::removal_ops(&*self.a, &self.cfg, &self.keys, rid)
+            .await
+            .map_err(err)?
+            .ok_or("no revoked device holds a leaf in this repo's group any more")?;
+        e.entities += ops.len();
+        let from = self.keys.control_address(rid);
+        self.a.estimate(from, &ops).await.map_err(err)
+    }
+
     /// One control-address tx of `gas`, preceded by the wallet top-up the send path makes
     /// when `have` cannot cover it (each op is its own one-job `send_funded` run).
     fn control_tx(&self, e: &mut Estimate, have: &mut U256, gas: u64, base_fee: u128) {
@@ -220,7 +239,9 @@ impl<A: Arkiv> Ctx<A> {
         *have = have.saturating_sub(U256::from(gas) * U256::from(base_fee + pc.tip));
     }
 
-    async fn run<B: Arkiv>(&self, tap: &B, d: &Draft) -> Result<Vec<Hash32>, String> {
+    /// Sends `d`'s steps through `tap` (sealed for a private repo); the group commit of a
+    /// removal goes through `raw`, as group operations seal themselves.
+    async fn run<B: Arkiv>(&self, tap: &B, raw: &Tap<A>, d: &Draft) -> Result<Vec<Hash32>, String> {
         let (cfg, keys) = (&self.cfg, &self.keys);
         let (mut prev, mut ids) = (ZERO, vec![]);
         for step in &d.steps {
@@ -240,6 +261,15 @@ impl<A: Arkiv> Ctx<A> {
                         .map_err(err)?
                 }
                 Step::Release(_) => return Err("the release was not prepared".into()),
+                Step::RemoveRevoked => {
+                    let n = charter_private::revoked::remove_revoked(raw, cfg, keys, &d.rid)
+                        .await
+                        .map_err(err)?;
+                    if n == 0 {
+                        return Err("nothing to remove: another admin removed it first".into());
+                    }
+                    continue;
+                }
                 op => {
                     let b = body(&d.rid, op, prev)?;
                     cob::post(tap, cfg, keys, &b).await.map_err(err)?
@@ -257,7 +287,7 @@ impl<A: Arkiv> Ctx<A> {
             status: status.clone(),
         };
         let out = match self.for_repo(&tap, &d.rid).await {
-            Ok(b) => self.run(&b, &d).await,
+            Ok(b) => self.run(&b, &tap, &d).await,
             Err(e) => Err(e),
         };
         let last = status.lock().ok().and_then(|s| s.txs.last().copied());

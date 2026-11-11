@@ -43,6 +43,9 @@ pub enum Step {
     /// A wallet transfer of `amount` wei to the repo's escrow, then the deposit op that
     /// claims it (`chart escrow deposit`'s code).
     Deposit { amount: U256, purpose: String },
+    /// One MLS commit removing every revoked device's leaf from a private repo's group
+    /// (`chart member sync`'s code), priced from the commit it would send.
+    RemoveRevoked,
 }
 
 #[derive(Debug, Clone, PartialEq)]

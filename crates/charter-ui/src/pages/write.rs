@@ -68,6 +68,7 @@ fn ask(label: &str) -> (String, &'static str) {
         "Mark patch merged" => ("Mark this patch merged?", "Mark merged"),
         "Claim bounty" => ("Claim this bounty?", "Open patch"),
         "Fund bounty" => ("Fund this bounty?", "Fund"),
+        "Remove revoked devices" => ("Remove the revoked devices from the group?", "Remove"),
         l if l.starts_with("Publish release") => return (format!("{l}?"), "Publish"),
         l => return (format!("{l}?"), "Send"),
     };
@@ -147,6 +148,10 @@ fn signed_ops(d: &Draft) -> Vec<(String, String)> {
                 ),
             ],
             Step::Release(_) => vec![],
+            Step::RemoveRevoked => vec![(
+                "MLS commit removing every revoked device's leaf (a new epoch key)".into(),
+                String::new(),
+            )],
         })
         .collect()
 }

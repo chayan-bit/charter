@@ -315,6 +315,8 @@ pub struct Head {
     pub patches: usize,
     pub verify: Verify,
     pub private: bool,
+    /// Revoked devices' leaves this admin can remove (a private repo's priced write).
+    pub revoked_leaves: usize,
     /// `z...` address, as `git clone arkiv::` takes it.
     pub addr: String,
     pub clock: Clock,
@@ -349,6 +351,7 @@ impl Head {
             patches: count(fold::PATCH),
             verify: Verify::new(v, &r.round),
             private: v.is_some_and(|v| v.private),
+            revoked_leaves: v.map_or(0, |v| v.revoked_leaves),
             addr: to_text(&r.rid),
             clock: Clock::of(v),
             pushed: last_push(v),

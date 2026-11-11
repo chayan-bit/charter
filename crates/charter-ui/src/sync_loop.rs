@@ -312,15 +312,23 @@ impl Outcome {
 pub async fn round<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<Outcome, UiError> {
     let keys = Keys::load(&cfg.home)?;
     match charter_private::ring_for(a, cfg, keys.as_ref(), rid).await? {
-        None => locked_round(a, cfg, rid).await,
+        None => locked_round(a, cfg, rid, 0).await,
         Some(ring) => {
+            // The refresh only counts revoked leaves; removing them is a write the admin
+            // confirms (`kind=remove-revoked`), never part of a round.
+            let revoked = ring.revoked_leaves;
             let sealed = charter_private::Sealed::new(a, ring).caching(&cfg.home);
-            locked_round(&sealed, cfg, rid).await
+            locked_round(&sealed, cfg, rid, revoked).await
         }
     }
 }
 
-async fn locked_round<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<Outcome, UiError> {
+async fn locked_round<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    rid: &Rid,
+    revoked: usize,
+) -> Result<Outcome, UiError> {
     let Some(repo) = Repo::try_open(&cfg.home, rid)? else {
         return Ok(Outcome::Busy);
     };
@@ -333,6 +341,7 @@ async fn locked_round<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<Outcom
     let view_path = repo.dir.join(cache::VIEW);
     let was: Option<RepoView> = cache::read(&view_path)?;
     let mut now = RepoView::of(&view, now_ms());
+    now.revoked_leaves = revoked;
     (now.issues, now.patches) = (
         cobs.opened(crate::fold::ISSUE),
         cobs.opened(crate::fold::PATCH),
