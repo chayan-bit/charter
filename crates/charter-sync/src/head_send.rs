@@ -473,7 +473,8 @@ impl<A: Arkiv> HeadPush<'_, A> {
     /// `eth_getTransactionByHash` (head-model 13.4).
     async fn as_runs(&self, plan: &Plan) -> Result<Vec<Pack>> {
         let mut at: BTreeMap<Hash32, (u64, u32)> = BTreeMap::new();
-        if let Some(p) = &plan.prev {
+        // v0.4.0 stored `index: u32::MAX` when it could not read the index: look it up.
+        if let Some(p) = plan.prev.as_ref().filter(|p| p.landing.index != u32::MAX) {
             at.insert(p.landing.tx, (p.landing.block, p.landing.index));
         }
         let lookup: BTreeSet<Hash32> = plan

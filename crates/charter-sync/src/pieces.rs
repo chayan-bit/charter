@@ -84,7 +84,9 @@ pub async fn head_landing<A: Arkiv>(
     dev: &Device,
     head: &DeviceHead,
 ) -> Result<LandingJson> {
-    if let Some(l) = v2.landings.get(&head.h).filter(|l| l.block != u64::MAX) {
+    // `u32::MAX`: an index v0.4.0 could not read; v3 runs need it, so scan instead.
+    let known = |l: &&LandingJson| l.block != u64::MAX && l.index != u32::MAX;
+    if let Some(l) = v2.landings.get(&head.h).filter(known) {
         return Ok(*l);
     }
     landing(a, dev, head, crate::heads::LANDING_WINDOW)

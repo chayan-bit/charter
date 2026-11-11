@@ -305,3 +305,49 @@ async fn a_push_that_uploads_for_many_blocks_signs_a_fresh_at_and_sends_no_follo
         "one head tx, no follow-up"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_migration_resolves_a_landing_index_v040_left_unknown_by_tx_hash() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "unknown-index").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    let one = commit(&work, &[("a.txt", b"one")], "feat: one");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("first push");
+    let two = commit(&work, &[("b.txt", &noise(4, 30_000))], "feat: two");
+    v040_push(&net, &alice, &rid, &work, &one, &two).await;
+    // v0.4.0 stored `index: u32::MAX` when `mined_tx` lagged behind the receipt.
+    let (_, d) = view_of(&net, &alice, &rid).await;
+    let head = d.head.clone().expect("head");
+    let real = charter_sync::heads::landing(&net, &d.device, &head, u64::MAX)
+        .await
+        .expect("rpc")
+        .expect("landing");
+    let repo = alice.repo(&rid);
+    let mut state = charter_sync::state::State::load(&repo.state_path()).expect("state");
+    state.landings.insert(
+        h32_hex(&head.h),
+        charter_sync::state::LandingJson {
+            index: u32::MAX,
+            ..real
+        },
+    );
+    state.save(&repo.state_path()).expect("save");
+    drop(repo);
+
+    let three = commit(&work, &[("c.txt", b"three")], "feat: three");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("migrating push");
+    net.mine(30);
+    let bob = Peer::new(&net, 2);
+    let dest = tmp.path().join("dest");
+    let (_, listing) = Box::pin(clone_into(&net, &bob, &rid, &dest))
+        .await
+        .expect("clone");
+    assert_eq!(listing.refs[0].1, three);
+    git(&dest, &["fsck", "--full", "--strict"]);
+}
