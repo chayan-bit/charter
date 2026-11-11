@@ -161,6 +161,30 @@ The next body of the same device replaces every `stamp = 0` and every zero piece
 - The connectivity check, the canonical-ref quorum and the program fold run on the merged refs exactly as on P1 refs.
 - A clone therefore costs one snapshot plus at most the piece bytes since it, whatever the history length, and old blocks being pruned loses nothing a user can see once the snapshot exists.
 
+### 5.6 Speculative sync and the head probe
+
+A full sync records every query its view build and program reads sent, with the pages that came back, in `view-memo.json` next to the repo's `state.json`.
+`entityNonce` reads and count-only queries (the completeness counts of design 3.3) are never recorded: they are always sent live, in the build's order, so every nonce is still read after the rows it checks.
+A recorded page is served at most once per sync, so a second read of the same rows (the full bracket of section 6 after the short form failed) always goes to the network.
+
+The next sync of the repo takes one of three paths, falling back to the next on any failure:
+
+1. Replay, when the last full sync is less than 10 minutes old (`CHARTER_PROBE_WINDOW_SECS` overrides, in seconds) and the probe is unchanged.
+   The probe is one paged query for the `(key, $updatedAt)` of every `id`, `idacc`, `bind`, `anchor` and `head` entity of the repo, and, for a repo that pins a program, the count of its ops; both go out in one round with the live nonce reads.
+   Any create, delete, patch, extend or expiry of those entities changes the list, so a new push, a rollback patch, a deleted or hidden head, a new device delegation and an identity revision are all seen at once.
+   Only pages read at or after the probe's block are replayed (anything a page missed then happened after the probe, so it changes the next probe); the rest are sent live.
+2. Speculative: every recorded query is sent at once, and the build is served from those answers; queries it did not record go out as before.
+3. The plain build.
+
+What a replay can miss until the next full sync (at most the window, 10 minutes by default):
+
+- The deletion or expiry of a v1 `refs` entity, a v1 manifest or snapshot chunks: content-addressed entities whose kinds the probe does not list.
+  Chunks are read live by the download anyway; a missed refs or manifest deletion only delays `E_NOT_LIVE` for that peer.
+- The deletion or expiry of a `peer` document (it carries no `ag.rid`).
+  A peer document only binds a key to a nid that hashes it, so no other key can take its place.
+- For a pinned repo, one op deleted and another created in the same window: the op count is unchanged.
+- Anything a lying RPC hides, which is no change from the trust model without the probe.
+
 ## 6. Completeness and the rollback invariant
 
 Rules for the device control address `C_d`:

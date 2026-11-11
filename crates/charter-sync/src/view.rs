@@ -16,6 +16,8 @@ use crate::observe::{self, all, b32, by_hashes, by_seq, creators, kind};
 use crate::state::State;
 use crate::{Result, SyncError, warn};
 
+pub mod memo;
+
 /// One synced peer.
 #[derive(Debug, Clone)]
 pub struct PeerView {

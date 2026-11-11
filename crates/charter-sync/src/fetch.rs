@@ -20,12 +20,18 @@ pub async fn sync<A: Arkiv>(a: &A, repo: &Repo, want: &Want) -> Result<View> {
     let _t = span(|| "sync".into());
     let mut state = State::load(&repo.state_path())?;
     let t = span(|| "sync.view".into());
-    let mut view = view::build(a, &repo.rid, &state, want).await?;
+    let (mut view, memo) = view::memo::build(a, repo, &state, want).await?;
     drop(t);
     warn_expiry(&view);
     let must: BTreeSet<Nid> = view.delegates().iter().chain(&want.must).copied().collect();
+    // The program's Arkiv reads go out with the downloads; its fold waits for the packs.
     let t = span(|| "sync.download".into());
-    let applied = apply_all(a, repo, &mut view, &state, &must).await?;
+    let snapshot = view.clone();
+    let (applied, gathered) = futures_util::future::try_join(
+        apply_all(a, repo, &mut view, &state, &must),
+        crate::program::gather(&memo.backend, &snapshot, repo.git()),
+    )
+    .await?;
     drop(t);
     let t = span(|| "sync.checks".into());
     check_connected(repo, &mut view, &must)?;
@@ -33,10 +39,13 @@ pub async fn sync<A: Arkiv>(a: &A, repo: &Repo, want: &Want) -> Result<View> {
     drop(t);
     // After the packs are in the cache, so the program sees real git ancestry.
     let t = span(|| "sync.program".into());
-    view.program = crate::program::enforce(a, &view, repo.git()).await?;
+    view.program = crate::program::finish(gathered, repo.git())?;
     drop(t);
     let _c = span(|| "sync.commit".into());
     commit(repo, &view, &mut state, applied)?;
+    if let Err(e) = memo.save(repo, &view) {
+        warn(&format!("sync memo: {e}"));
+    }
     Ok(view)
 }
 

@@ -267,7 +267,12 @@ fn a_public_repo_is_remembered_and_its_identity_rows_feed_the_clone() {
         let rid = charter_sync::identity::init(&net, &alice.cfg, &alice.keys, &meta("open"))
             .await
             .expect("init");
-        let identity = |qs: &[String]| qs.iter().filter(|q| q.contains("idacc")).count();
+        // The view's identity query (the sync probe also lists `idacc`, with `bind`).
+        let identity = |qs: &[String]| {
+            qs.iter()
+                .filter(|q| q.contains("idacc") && !q.contains("'bind'"))
+                .count()
+        };
 
         net.take_queries();
         let r = charter_private::ring_for(&net, &bob.cfg, Some(&bob.keys), &rid).await;
@@ -281,7 +286,11 @@ fn a_public_repo_is_remembered_and_its_identity_rows_feed_the_clone() {
 
         let r = charter_private::ring_for(&net, &bob.cfg, Some(&bob.keys), &rid).await;
         assert!(r.expect("ring_for").is_none(), "still public");
-        assert_eq!(net.take_queries(), Vec::<String>::new(), "answered from disk");
+        assert_eq!(
+            net.take_queries(),
+            Vec::<String>::new(),
+            "answered from disk"
+        );
     });
 }
 
@@ -292,20 +301,32 @@ fn a_forged_public_identity_row_is_not_remembered_and_does_not_hide_a_membership
         let (alice, bob, carol) = (Peer::new(&net, 1), Peer::new(&net, 2), Peer::new(&net, 3));
         let rid = private_repo(&net, &alice, "secret").await;
         let attrs = [
-            ("ag.kind", charter_store::AttributeValue::Str("id".into()), true),
+            (
+                "ag.kind",
+                charter_store::AttributeValue::Str("id".into()),
+                true,
+            ),
             ("ag.rid", charter_store::AttributeValue::Bytes32(rid), true),
         ];
         let op = charter_store::create_op_flags(&attrs, 100, 1, 1).expect("op");
-        charter_sync::write::send(&net, &carol.keys.wallet(), &carol.cfg.pipeline, vec![vec![op]])
-            .await
-            .expect("forge");
+        charter_sync::write::send(
+            &net,
+            &carol.keys.wallet(),
+            &carol.cfg.pipeline,
+            vec![vec![op]],
+        )
+        .await
+        .expect("forge");
         invite(&net, &alice, &bob, &rid, Role::Read).await;
 
         ring(&net, &bob, &rid).await.expect("bob still joins");
         for _ in 0..2 {
             net.take_queries();
             let r = charter_private::ring_for(&net, &carol.cfg, Some(&carol.keys), &rid).await;
-            assert!(r.expect("ring_for").is_none(), "a public row wins for a non-member");
+            assert!(
+                r.expect("ring_for").is_none(),
+                "a public row wins for a non-member"
+            );
             assert!(!net.take_queries().is_empty(), "never answered from disk");
         }
     });
