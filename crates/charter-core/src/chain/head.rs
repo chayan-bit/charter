@@ -9,8 +9,8 @@ use crate::attrs::AttrValue;
 use crate::marks::PeerMark;
 use crate::types::{Address, Hash32, Nid, Observed, Position, Rid};
 use crate::{
-    DEVICE_LAYOUT_VERSION, DeviceBody, Entity, HeadBody, HeadBodyV3, HeadRef, Pack, Plane,
-    RefEntry, RefsBody, VerifyError,
+    DEVICE_LAYOUT_VERSION, DeviceBody, Entity, HeadBody, HeadBodyV3, HeadBodyV4, HeadRef, Pack,
+    Plane, RefEntry, RefTable, RefsBody, VerifyError,
 };
 use charter_crypto::PublicKey;
 
@@ -74,6 +74,8 @@ pub enum HeadFormat {
     V2,
     /// `ag.v = 3`, envelope kind `head3` (head-model 13).
     V3,
+    /// `ag.v = 4`, envelope kind `head4`: a v3 head with a ref table (head-model 14).
+    V4,
 }
 
 /// An accepted device head.
@@ -83,7 +85,11 @@ pub struct DeviceHead {
     pub control: Address,
     pub key: Hash32,
     /// The fields both formats share; `body.packs` is empty for a v3 head, read [`Self::packs`].
+    /// For a v4 head `body.refs` is field 7 only until the reader overlays the table
+    /// (`effective_refs`, head-model 14.4); charter-sync does that before any merge.
     pub body: HeadBody,
+    /// The ref table of a v4 head.
+    pub refs_table: Option<RefTable>,
     pub format: HeadFormat,
     /// The packs since the snapshot, in either format.
     pub packs: Vec<Pack>,
@@ -106,24 +112,53 @@ impl DeviceHead {
 }
 
 /// A head row opened in either format: the shared fields as a v2 body, and its packs.
-struct Opened {
-    e: Entity<HeadBody>,
+pub(super) struct Opened {
+    pub(super) e: Entity<HeadBody>,
     format: HeadFormat,
     packs: Vec<Pack>,
+    refs_table: Option<RefTable>,
 }
 
 impl Opened {
-    fn v2(e: Entity<HeadBody>) -> Self {
+    pub(super) fn v2(e: Entity<HeadBody>) -> Self {
         let packs = e.body.packs.iter().map(Pack::from_v2).collect();
         Self {
             e,
             format: HeadFormat::V2,
             packs,
+            refs_table: None,
         }
     }
 
+    pub(super) fn v4(e: Entity<HeadBodyV4>) -> Option<Self> {
+        let Entity {
+            position,
+            creator,
+            expires_at,
+            envelope,
+            body,
+            h,
+            envelope_bytes,
+        } = e;
+        let v3 = Entity {
+            position,
+            creator,
+            expires_at,
+            envelope,
+            body: body.0,
+            h,
+            envelope_bytes,
+        };
+        let refs_table = v3.body.refs_table.clone();
+        Self::v3(v3).map(|o| Self {
+            format: HeadFormat::V4,
+            refs_table,
+            ..o
+        })
+    }
+
     /// `None` only for a codec a validated body cannot carry.
-    fn v3(e: Entity<HeadBodyV3>) -> Option<Self> {
+    pub(super) fn v3(e: Entity<HeadBodyV3>) -> Option<Self> {
         let packs = e
             .body
             .packs
@@ -144,11 +179,12 @@ impl Opened {
             },
             format: HeadFormat::V3,
             packs,
+            refs_table: None,
         })
     }
 }
 
-fn to_head(o: Opened, dev: &Device, updated_at: u64) -> DeviceHead {
+pub(super) fn to_head(o: Opened, dev: &Device, updated_at: u64) -> DeviceHead {
     let e = o.e;
     DeviceHead {
         device: dev.nid,
@@ -161,6 +197,7 @@ fn to_head(o: Opened, dev: &Device, updated_at: u64) -> DeviceHead {
         body: e.body,
         format: o.format,
         packs: o.packs,
+        refs_table: o.refs_table,
     }
 }
 
@@ -198,12 +235,13 @@ fn valid_head(
 ) -> Result<Option<Opened>, VerifyError> {
     let v2 = open_all::<HeadBody>(observed);
     let v3 = open_all::<HeadBodyV3>(observed);
-    // A head a newer client wrote (neither layout version): say so instead of reporting a
-    // missing head.
+    let v4 = open_all::<HeadBodyV4>(observed);
+    // A head a newer client wrote (no layout version this client reads): say so instead of
+    // reporting a missing head.
     let unknown: Vec<(Address, Hash32)> = v2
         .unsupported
         .iter()
-        .filter(|u| v3.unsupported.contains(u))
+        .filter(|u| v3.unsupported.contains(u) && v4.unsupported.contains(u))
         .copied()
         .collect();
     fail_unsupported(&unknown, &BTreeSet::from([dev.control]))?;
@@ -211,7 +249,8 @@ fn valid_head(
         .ok
         .into_iter()
         .map(Opened::v2)
-        .chain(v3.ok.into_iter().filter_map(Opened::v3));
+        .chain(v3.ok.into_iter().filter_map(Opened::v3))
+        .chain(v4.ok.into_iter().filter_map(Opened::v4));
     let mut valid: Vec<Opened> = opened
         .filter(|Opened { e, .. }| {
             e.envelope.signer == dev.nid

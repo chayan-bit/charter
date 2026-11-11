@@ -21,6 +21,7 @@ macro_rules! for_repo {
 
 pub mod backend;
 pub mod cmd;
+pub mod device_cmd;
 pub mod escrow;
 pub mod helper;
 pub mod member;

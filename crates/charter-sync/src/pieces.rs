@@ -108,7 +108,7 @@ pub async fn head_landing<A: Arkiv>(
 const PARALLEL_TXS: usize = 8;
 
 /// The piece bodies of `rid` in `mined`, in op order, if a device address of `dev` sent it.
-fn bodies<A: Arkiv>(
+pub(crate) fn bodies<A: Arkiv>(
     a: &A,
     rid: &Rid,
     senders: &BTreeSet<Address>,
@@ -195,7 +195,7 @@ pub fn positions(runs: &[PieceRun], here: &LandingJson) -> Vec<(u64, u32)> {
         .collect()
 }
 
-async fn run_bytes<A: Arkiv>(
+pub(crate) async fn run_bytes<A: Arkiv>(
     a: &A,
     rid: &Rid,
     senders: &BTreeSet<Address>,

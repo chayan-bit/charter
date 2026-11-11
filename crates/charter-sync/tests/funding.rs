@@ -173,3 +173,82 @@ async fn a_small_push_is_priced_for_its_real_chunk_sizes_not_full_chunks() {
         cost.bulk_gas
     );
 }
+
+/// Issue #28: the racing top-up and this device's own landed (at least `txs` wallet txs
+/// mined) and the shared wallet's nonce has no gap.
+async fn wallet_settled(net: &Net, p: &Peer, txs: u64) {
+    let w = p.keys.wallet().address();
+    let mined = net.mem.tx_count_mined(w).await.expect("mined");
+    assert_eq!(
+        net.mem.tx_count(w).await.expect("pending"),
+        mined,
+        "no stuck nonce"
+    );
+    assert!(mined >= txs, "{mined} wallet txs mined");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_whose_wallet_top_up_collides_with_another_device_still_pushes() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "two-devices").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "w");
+    commit(&work, &[("a", b"a")], "feat: a");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("first device");
+    let laptop = alice.second_device(&net);
+    let dest = tmp.path().join("laptop");
+    Box::pin(clone_into(&net, &laptop, &rid, &dest))
+        .await
+        .expect("clone");
+    git(&dest, &["checkout", "-q", "-b", "topic"]);
+    commit(&dest, &[("t", b"t")], "feat: topic");
+    let before = net
+        .mem
+        .tx_count(alice.keys.wallet().address())
+        .await
+        .expect("n");
+    // The laptop's first push tops up its new `C_d` from the wallet; alice's other device
+    // takes the nonce it read.
+    net.race_wallet(alice.keys.wallet());
+    push2(&net, &laptop, &rid, &dest, &["refs/heads/topic"])
+        .await
+        .expect("the push lands despite the collision");
+    wallet_settled(&net, &alice, before + 2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_devices_pushing_at_once_from_one_wallet_both_land() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "at-once").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "w");
+    commit(&work, &[("a", b"a")], "feat: a");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("first device");
+    let laptop = alice.second_device(&net);
+    let dest = tmp.path().join("laptop");
+    Box::pin(clone_into(&net, &laptop, &rid, &dest))
+        .await
+        .expect("clone");
+    git(&dest, &["checkout", "-q", "-b", "topic"]);
+    commit(&dest, &[("t", &noise(9, 40 << 10))], "feat: topic");
+    commit(&work, &[("b", &noise(8, 40 << 10))], "feat: b");
+    let (a, b) = tokio::join!(
+        Box::pin(push2(&net, &alice, &rid, &work, &["refs/heads/main"])),
+        Box::pin(push2(&net, &laptop, &rid, &dest, &["refs/heads/topic"])),
+    );
+    a.expect("alice");
+    b.expect("laptop");
+    let w = alice.keys.wallet().address();
+    let mined = net.mem.tx_count_mined(w).await.expect("mined");
+    assert_eq!(
+        net.mem.tx_count(w).await.expect("pending"),
+        mined,
+        "no stuck nonce"
+    );
+}

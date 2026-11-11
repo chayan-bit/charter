@@ -53,6 +53,18 @@ pub struct State {
     /// Format v2: the last head body this machine sent, by device nid (head-model 7.4).
     #[serde(default)]
     pub sent_heads: BTreeMap<String, String>,
+    /// Format v2: listed packs that did not index while the peer's live refs were complete
+    /// without them, by peer nid (head-model 5.5); valid only while its heads are unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skipped_packs: BTreeMap<String, SkippedJson>,
+}
+
+/// Packs a fetch need not download again while the peer's accepted heads are `heads`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedJson {
+    /// `h` of every accepted head of the peer, sorted.
+    pub heads: Vec<String>,
+    pub packs: BTreeSet<String>,
 }
 
 /// The tx that carried a head body.
@@ -92,6 +104,7 @@ impl Default for State {
             devices: BTreeMap::new(),
             landings: BTreeMap::new(),
             sent_heads: BTreeMap::new(),
+            skipped_packs: BTreeMap::new(),
         }
     }
 }

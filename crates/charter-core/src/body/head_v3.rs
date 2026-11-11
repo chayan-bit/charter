@@ -2,6 +2,7 @@
 //! runs of `(block, tx index)` and a codec per pack. Stored as `ag.kind = 'head'` with
 //! `ag.v = 3`, which v0.4.0 meets as an unknown layout version and stops on.
 
+use super::head_v4::{HeadBodyV4, RefTable};
 use super::{Body, cbor_codec, require};
 use crate::attrs::{AttrValue, Attribute, sorted};
 use crate::codec::Codec;
@@ -97,6 +98,10 @@ pub struct HeadBodyV3 {
     pub prev_tx: Hash32,
     #[n(11)]
     pub object_hash: u8,
+    /// Format v4 only (head-model 14): the ref table field 7 is the difference to. Absent
+    /// in a v3 body, and minicbor omits an absent map field, so v3 bytes are unchanged.
+    #[n(12)]
+    pub refs_table: Option<RefTable>,
 }
 
 impl HeadBodyV3 {
@@ -132,6 +137,7 @@ impl HeadBodyV3 {
             packs,
             prev_tx: shared.prev_tx,
             object_hash: shared.object_hash,
+            refs_table: None,
         }
     }
 
@@ -141,13 +147,9 @@ impl HeadBodyV3 {
     }
 }
 
-impl Body for HeadBodyV3 {
-    const KIND: Kind = Kind::HeadV3;
-    const AG_KIND: &'static str = Kind::Head.name();
-    const AG_V: u64 = HEAD_V3_LAYOUT_VERSION;
-    cbor_codec!();
-
-    fn validate(&self) -> Result<(), FormatError> {
+impl HeadBodyV3 {
+    /// Every rule of v3 and v4 but the presence of field 12.
+    pub(crate) fn rules(&self) -> Result<(), FormatError> {
         self.v2_rules()?;
         // An unknown codec is a newer writer: `Unsupported`, so readers say upgrade.
         for p in &self.packs {
@@ -168,6 +170,21 @@ impl Body for HeadBodyV3 {
             field("head", "packs", "too many pieces"),
         )
     }
+}
+
+impl Body for HeadBodyV3 {
+    const KIND: Kind = Kind::HeadV3;
+    const AG_KIND: &'static str = Kind::Head.name();
+    const AG_V: u64 = HEAD_V3_LAYOUT_VERSION;
+    cbor_codec!();
+
+    fn validate(&self) -> Result<(), FormatError> {
+        self.rules()?;
+        require(
+            self.refs_table.is_none(),
+            field("head", "refs_table", "only a v4 body names a ref table"),
+        )
+    }
 
     fn extra_attributes(&self, signer: &Nid, h: &Hash32) -> Vec<Attribute> {
         vec![
@@ -179,35 +196,47 @@ impl Body for HeadBodyV3 {
     }
 }
 
-/// What a v3 head patch sets (head-model 13.2): the body and its hash only. Arkiv merges a
-/// patch into the stored attributes, so `ag.kind`, `ag.v`, `ag.rid`, `ag.nid` and `ag.dev`
-/// stay as the create (or the migrating full patch) wrote them.
-pub fn head_patch_attributes(envelope_bytes: &[u8]) -> Vec<Attribute> {
+/// What a v3 or v4 head patch sets (head-model 13.2): the body and its hash under `kind`
+/// only. Arkiv merges a patch into the stored attributes, so `ag.kind`, `ag.v`, `ag.rid`,
+/// `ag.nid` and `ag.dev` stay as the create (or the last full patch) wrote them.
+pub fn head_patch_attributes(kind: Kind, envelope_bytes: &[u8]) -> Vec<Attribute> {
     sorted(vec![
         Attribute::new("ag.body", AttrValue::Bytes(envelope_bytes.to_vec())),
-        Attribute::b32("ag.h", content_hash(Kind::HeadV3, envelope_bytes)),
+        Attribute::b32("ag.h", content_hash(kind, envelope_bytes)),
     ])
 }
 
-/// A v3 body read from calldata: a full row (create or migrating patch) or a minimal
+/// A v3 or v4 body read from calldata: a full row (create or full patch) or a minimal
 /// patch row with only `ag.body` and `ag.h`. Checks `ag.h`, the envelope kind and the body
-/// rules; the caller verifies the signature under the device key.
+/// rules; the caller verifies the signature under the device key. A v4 body comes back
+/// with `refs_table` set and field 7 inline only (head-model 14).
 pub fn open_head_calldata(obs: &Observed) -> Result<(Envelope, HeadBodyV3, Hash32), FormatError> {
     let bytes = match obs.attr("ag.body") {
         Some(AttrValue::Bytes(b)) => b,
         _ => return Err(field("head", "ag.body", "missing or not bytes")),
     };
     let envelope = Envelope::decode(bytes)?;
-    if envelope.kind != Kind::HeadV3 {
-        return Err(FormatError::KindMismatch {
-            expected: Kind::HeadV3.name(),
-            found: envelope.kind.name().to_owned(),
-        });
-    }
-    let body = HeadBodyV3::decode(&envelope.body)?;
-    let h = content_hash(Kind::HeadV3, bytes);
-    let minimal = sorted(obs.attributes.clone()) == head_patch_attributes(bytes);
-    let full = sorted(obs.attributes.clone()) == crate::entity_attributes(&envelope, bytes, &body);
+    let attrs = sorted(obs.attributes.clone());
+    let (body, full) = match envelope.kind {
+        Kind::HeadV3 => {
+            let body = HeadBodyV3::decode(&envelope.body)?;
+            let full = attrs == crate::entity_attributes(&envelope, bytes, &body);
+            (body, full)
+        }
+        Kind::HeadV4 => {
+            let body = HeadBodyV4::decode(&envelope.body)?;
+            let full = attrs == crate::entity_attributes(&envelope, bytes, &body);
+            (body.0, full)
+        }
+        other => {
+            return Err(FormatError::KindMismatch {
+                expected: Kind::HeadV3.name(),
+                found: other.name().to_owned(),
+            });
+        }
+    };
+    let minimal = attrs == head_patch_attributes(envelope.kind, bytes);
     require(minimal || full, FormatError::AttributeMismatch)?;
+    let h = content_hash(envelope.kind, bytes);
     Ok((envelope, body, h))
 }
