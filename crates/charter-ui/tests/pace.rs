@@ -168,6 +168,11 @@ impl Sim {
     }
 }
 
+/// Backstop rounds in an hour.
+fn backstops() -> u64 {
+    HOUR / charter_ui::pace::BACKSTOP_EVERY.as_secs()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn with_no_page_open_only_the_first_sync_of_an_uncached_repo_runs() {
     let mut s = sim(40, true).await;
@@ -198,9 +203,10 @@ async fn the_repo_on_screen_with_no_changes_is_probed_every_ten_seconds() {
         "on screen, no changes: {q} queries/hour (one round = {})",
         s.round_cost
     );
-    // One round when the page opens (the cache may be stale), then one-query probes.
+    // One round when the page opens (the cache may be stale), then one-query probes, and
+    // the backstop round every BACKSTOP_EVERY (probe-blinding rows, docs in pace.rs).
     let probes = HOUR / 10;
-    assert!(q <= s.round_cost + 2 + probes, "{q}");
+    assert!(q <= s.round_cost * (1 + backstops()) + 2 + probes, "{q}");
     assert!(q >= probes, "{q}");
 }
 
@@ -212,7 +218,7 @@ async fn new_heads_alone_never_trigger_more_than_the_probe() {
     let _v = s.shared.viewer(s.rid);
     let q = s.run(0, HOUR).await;
     eprintln!("on screen with newHeads, no changes: {q} queries/hour");
-    assert!(q <= s.round_cost + 2 + HOUR / 10, "{q}");
+    assert!(q <= s.round_cost * (1 + backstops()) + 2 + HOUR / 10, "{q}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -304,6 +310,55 @@ async fn a_refs_only_push_from_another_device_reaches_the_open_page() {
     assert!(
         view.contains("refs/heads/side"),
         "the round recorded the new branch"
+    );
+}
+
+/// Anyone can blind the probe with rows carrying the repo's rid and a late `ag.dev`, which
+/// fill its tail; a refs-only push then reaches the open page through the backstop round.
+#[tokio::test(flavor = "multi_thread")]
+async fn rows_that_blind_the_probe_delay_a_refs_only_push_only_until_the_backstop() {
+    let mut s = sim(48, false).await;
+    s.shared.focus(s.rid);
+    let _v = s.shared.viewer(s.rid);
+    let dev = s.alice.second_device(&s.c.net);
+    let dir = tempfile::tempdir().expect("work");
+    let work = work_repo(dir.path(), "w");
+    commit(&work, &[("a.txt", b"a\n")], "first");
+    push_until_seen(&mut s, 0, 30, &dev, &work, "refs/heads/main").await;
+    // The highest `ag.dev` sorts after every real head.
+    let junk = || {
+        let attrs = vec![
+            ("ag.rid", charter_private::msg::b32(s.rid), true),
+            ("ag.dev", charter_private::msg::b32([0xff; 32]), true),
+        ];
+        charter_private::msg::op("junk", attrs, vec![], 1_000_000).expect("op")
+    };
+    let jobs: Vec<Vec<Operation>> = (0..6).map(|_| (0..20).map(|_| junk()).collect()).collect();
+    let mallory = Peer::new(&s.c.net, 66);
+    let wallet = mallory.keys.wallet();
+    Box::pin(charter_sync::write::send(
+        &s.c.net,
+        &wallet,
+        &mallory.cfg.pipeline,
+        jobs,
+    ))
+    .await
+    .expect("junk");
+    s.run(30, 60).await; // the junk's own creates are seen and settle into the tail
+    git(&work, &["branch", "side"]);
+    let mut events = s.shared.subscribe();
+    push2(&s.c.net, &dev, &s.rid, &work, &["refs/heads/side"])
+        .await
+        .expect("push");
+    let end = 60 + charter_ui::pace::BACKSTOP_EVERY.as_secs() + 20;
+    s.run(60, end).await;
+    let mut kinds = vec![];
+    while let Ok(e) = events.try_recv() {
+        kinds.push(e.kind);
+    }
+    assert!(
+        kinds.contains(&Kind::Push),
+        "the backstop round caught the push"
     );
 }
 

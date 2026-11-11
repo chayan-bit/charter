@@ -17,6 +17,12 @@
 //! rid; it changes nothing on screen until that peer writes a bind or an anchor, which the
 //! probe sees. Sealed repos tag their entities with a blinded rid, so they skip the probe
 //! and get a full round at the interval of an idle repo, on screen or not.
+//!
+//! Anyone can write rows that carry the repo's `ag.rid` and an `ag.dev`, and about 100 of
+//! them push every real head out of the probe's tail, so a refs-only push (a head patch)
+//! would go unseen; no single query can tell real heads from those (only their creators
+//! do). So a public repo also gets a full round at least every [`BACKSTOP_EVERY`], whatever
+//! the probe says; a repo that changes gets one sooner anyway.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -35,6 +41,9 @@ use crate::sync_loop::{Kind, Outcome, Shared, round};
 
 pub const ON_SCREEN_EVERY: Duration = Duration::from_secs(10);
 pub const IDLE_EVERY: Duration = Duration::from_secs(300);
+/// The longest a public repo goes without a full round while pages are open, so rows that
+/// blind the probe delay a head patch by at most this.
+pub const BACKSTOP_EVERY: Duration = Duration::from_secs(1800);
 /// Background rounds stop at this much of the RPC quota used.
 pub const PAUSE_AT: f64 = 80.0;
 /// A 429 that names no `Retry-After` pauses this long.
@@ -149,6 +158,8 @@ enum Step {
 struct State {
     probe: Option<Probe>,
     checked: Option<Instant>,
+    /// When the last full round ran.
+    full: Option<Instant>,
     /// The repo changed and no round has caught up yet (failed or lock busy).
     dirty: bool,
 }
@@ -209,7 +220,14 @@ impl Pacer {
         if on && no_block && now < t + 3 * every {
             return Step::Wait;
         }
-        if sealed { Step::Full } else { Step::Check }
+        let backstop = st
+            .and_then(|s| s.full)
+            .is_none_or(|f| now >= f + slow * BACKSTOP_EVERY);
+        if sealed || backstop {
+            Step::Full
+        } else {
+            Step::Check
+        }
     }
 
     /// Runs what is due at `now` for every repo the loop knows.
@@ -274,6 +292,7 @@ impl Pacer {
             shared.emit(rid, Kind::Sync);
             return Ok(());
         }
+        st.full = Some(now);
         let r = round(a, cfg, &rid).await;
         if r.as_ref().is_err_and(|e| retry_after(e).is_some()) {
             return r.map(|_| ());
