@@ -360,6 +360,60 @@ All data in the mockup is made up, including the repo address; it uses no real k
 6. Should Activity and Search stay local-cache only, or later query Arkiv (`chart search`) for repos not on this computer?
 7. Is the order slices 0 to 3 first right, or should patches (slice 4) come before the cost dialog?
 
+### 7.1 Question 6 revised: search can also query Arkiv (slice 6 design)
+
+The user, on 2026-11-11: "for 6 one can also using quering arkiv as its free right? its slow for now but free right?"
+So slice 6 search gets a second source, Arkiv, next to the local cache.
+This is a design only; nothing of it is built in slices 0 to 3, and the Settings control for it is added only when slice 6 is built.
+Everything below was read from the code at main 53f7774 (v0.5.0) and from two live read probes on 2026-11-11, one anonymous and one with the access key.
+
+**What `arkiv_query` can filter on.**
+An attribute is indexed unless it is `ag.v` or a `bytes` value (`charter-core/src/attrs.rs` `Attribute::indexed`).
+The query language has `=`, `<`, `<=`, `>`, `>=`, `BETWEEN`, `STARTSWITH`, `EXISTS`, `TYPEOF`, `AND`, `OR` and `NOT`, and nothing else (`arkiv-query` lexer at the pinned rev 2a3526d); `charter-store` `Pred` exposes `Eq`, `Ge`, `Le`, `StartsWith`, `And` and `Or`.
+So matching is equality, range and prefix only: there is no substring, word or case-insensitive match, and "ledger" cannot find "fix-empty-ledger".
+
+| Entity | Indexed attributes (searchable on chain) | Only inside the signed body `ag.body` (download to search) |
+|---|---|---|
+| Repo identity (`id`, `charter-core/src/body/id.rs`) | `ag.kind`, `ag.rid`, `ag.h`, `ag.parent`, `ag.nid` (signer), `ag.seq` (revision), `ag.name`, `ag.lang`, `ag.lic` | description, default branch, maintainers (delegates) and threshold, program pin |
+| Peer key (`peer`) | `ag.kind`, `ag.nid`, `ag.h` | alias, public key |
+| Bind (`bind`) | `ag.kind`, `ag.rid`, `ag.nid`, `ag.seq` | control and bulk addresses |
+| Refs, anchor (`refs`, `anchor`) | `ag.rid`, `ag.nid`, `ag.h`; anchors also `ag.seq` and `ag.at` (head block seen when signing) | branch and tag names, commit ids |
+| Op (`cob`: issue, patch, comment, review, release, program) | `ag.kind`, `ag.rid`, `ag.nid`, `ag.h`, `ag.cob` (object id), `ag.type` (for example `xyz.arkiv.issue`), `ag.action` (for example `create`, `merged`) | issue and patch title, text and comments, labels, release tag and notes, the author's clock `ts_ms` |
+
+Consequences:
+
+- Repo name, language and licence are searchable on chain, by exact value or by prefix (`chart search` already does this: `charter-sync/src/search.rs`).
+- Owner or alias is not: an alias lives only in the peer body.
+  A repo can be found by a maintainer's peer id (`ag.nid` on `bind`), which `chart search --peer` does, but not by a typed alias.
+- Op kind and action are searchable (for example every `xyz.arkiv.issue` `create` on the network, or every `merged` patch of one repo), but titles and text are not.
+  Searching titles needs the op rows downloaded and matched on this computer: one query returns up to 100 ops with their bodies, and there are no cursors, only `offset`.
+- Private repos are sealed: `ag.body`, `ag.rid`, `ag.name`, `ag.lang` and `ag.lic` are hidden, and `ag.rid` and `ag.name` are replaced by blinded values (`charter-private/src/entity.rs` `HIDDEN`).
+  Only a member who holds the repo key can compute the blinded name, so private repos never appear in an Arkiv search; a member finds them in the local cache.
+- Every hit is a hint from permissionless data until it is verified: `search.rs` re-reads the repo's identity chain and drops hits whose head no longer matches.
+  That costs 1 query for the identity plus 2 per signer (peer key and bind chain), so 3 queries for a one-maintainer repo.
+
+**The setting (added with slice 6).**
+"Search scope": "Local only" or "Local + Arkiv".
+
+- Local results render at once from the cache, as the slice 6 acceptance already requires.
+- With "Local + Arkiv", Arkiv results stream in after them over the same page (an htmx fragment), each marked "On Arkiv, not on this computer" with a Fetch button that starts the existing first sync for that repo.
+- Arkiv is queried only when the user submits a search (Enter or the Search button), never while typing and never from the sync loop, so the `pace.rs` bounds and the sync loop's query count do not change.
+- Each search has a query budget: at most 1 candidate query per term plus verification of the first 10 candidates, about 31 queries or 310 cost units for one-maintainer repos, and a "Verify 10 more" button for the rest.
+  A search also stops early, and says so, when the quota the RPC reports reaches 60 percent used, well under `pace.rs` `PAUSE_AT` (80 percent), so a search can never push the shared quota into the sync pause.
+- A title search on Arkiv (issues and patches across the network) downloads op pages and matches them locally; it gets the same budget, so it reads at most a few hundred of the newest ops and says how far it got.
+
+**The default is left open for the user.**
+What each choice costs:
+
+- Arkiv reads cost no gas and no tGLM, so "free" is right in money.
+- They are not free in quota.
+  Measured 2026-11-11: every `arkiv_query` carries `Arkiv-Cost: 10`.
+  The `RateLimit` header counts requests, not cost units: 2,000 requests per 10 s without a key and 5,000 per 10 s with the access key, each call taking 1 off `remaining`.
+  The cost units go to a separate budget: without a key it is 10,000 units, so about 1,000 queries, per window of several minutes, and running it out returns HTTP 429 `ANON_COST_LIMITED` for about 6.5 minutes (`docs/p0/arkiv-limits.md`, measured 2026-11-06); with the key it is the key's monthly quota, reported only as `Arkiv-Quota-Used-Percent` (8 percent on 2026-11-11), whose absolute size the headers do not give.
+- They are slow: a warm query took about 480 to 550 ms from this computer on 2026-11-11 (about 1.1 s with a new TLS connection), and `arkiv-limits.md` measured 250 to 730 ms; a full search with verification is about 1 to 3 s.
+- "Local only" costs nothing and is instant, but finds only repos already on this computer.
+- "Local + Arkiv" finds repos not on this computer, at about 310 cost units and 1 to 3 s per submitted search, and spends the same quota the sync loop uses.
+
 ## 8. Deferred to after mainnet: onboarding
 
 The user decided on 2026-11-11 that onboarding waits until after the mainnet release; Charter stays in its dev phase until then.
