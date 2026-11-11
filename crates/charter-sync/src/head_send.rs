@@ -20,7 +20,7 @@ use crate::heads::{LANDING_WINDOW, V2};
 use crate::ids::hex32;
 use crate::pieces::{PIECE_SIZE, marker_op, piece_op};
 use crate::push_send::{Cost, first_write_ops};
-use crate::repo::staging;
+use crate::repo::{CONTROL_LIFETIME, staging};
 use crate::state::{LandingJson, State};
 use crate::write::{self, chunk_op, entity_op, sign, wire};
 use crate::{Result, SyncError, packs, warn};
@@ -44,12 +44,24 @@ const MANIFESTS_IN_HEAD_MAX: usize = 32 * 1024;
 /// Piece txs looked up by hash at once when a v2 head migrates.
 const PARALLEL_LOOKUPS: usize = 8;
 
-/// Gas limit of a head patch of `calldata` bytes sent without an estimate: 128 gas per
-/// byte is twice the most measured on Rabdi (64.6 per byte, a 8.8 KB head listing pieces;
-/// a 6.9 KB small push used 40), and never below [`HEAD_GAS`]. A limit only reserves
-/// balance; the tx pays for the gas it uses.
-fn head_gas(calldata: usize) -> u64 {
-    HEAD_GAS.max(21_000 + 128 * calldata as u64)
+/// Calldata floor (EIP-7623, 10 per token, 4 tokens per non-zero byte).
+const FLOOR_PER_BYTE: u64 = 40;
+/// Rent of one storage unit for the longest life an entity can have left: 14 gas per
+/// million unit-blocks (Arkiv `FeeSchedule`) times [`CONTROL_LIFETIME`] (Rabdi's maximum).
+const RENT_PER_UNIT: u64 = (14 * CONTROL_LIFETIME).div_ceil(1_000_000);
+/// Compute of each op after the first (measured on Rabdi).
+const OP_GAS: u64 = 21_400;
+
+/// Gas limit of a head tx of `calldata` bytes and `ops` ops sent without an estimate. A
+/// patch pays rent on its net growth until the head expires, and a byte of calldata grows
+/// the head by at most one storage unit (plus a few for an indexed attribute's cells,
+/// which the slack covers); so the floor plus a full byte of rent per byte bounds the
+/// worst case, a head that grows by its whole body. Never below [`HEAD_GAS`]. A limit
+/// only reserves balance; the tx pays for the gas it uses.
+fn head_gas(calldata: usize, ops: usize) -> u64 {
+    const PER_BYTE: u64 = FLOOR_PER_BYTE + RENT_PER_UNIT + 9;
+    let extra_ops = OP_GAS * ops.saturating_sub(1) as u64;
+    HEAD_GAS.max(21_000 + extra_ops + PER_BYTE * calldata as u64)
 }
 
 /// What `setup` read on the way that the head send reuses instead of reading again.
@@ -829,7 +841,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
                 tip: ready.map(|r| (r.head, r.base_fee, r.at, r.balance)),
                 // Manifests are stored for the data lifetime: estimate rather than bound.
                 gas: (key.is_some() && manifests.is_empty() && calldata < UNESTIMATED_HEAD_BYTES)
-                    .then(|| head_gas(calldata)),
+                    .then(|| head_gas(calldata, ops.len())),
             };
             let landed =
                 write::send_funded_at(self.a, &signer, &wallet, &cfg, account, seed, vec![ops])

@@ -351,3 +351,34 @@ async fn a_migration_resolves_a_landing_index_v040_left_unknown_by_tx_hash() {
     assert_eq!(listing.refs[0].1, three);
     git(&dest, &["fsck", "--full", "--strict"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_head_patch_that_grows_by_almost_its_whole_calldata_lands_in_one_tx() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "growth").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    commit(&work, &[("a.txt", b"one")], "feat: one");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("first push");
+    let names: Vec<String> = (0..300).map(|i| format!("refs/heads/b-{i:03}")).collect();
+    for n in &names {
+        git(&work, &["update-ref", n, "HEAD"]);
+    }
+    let c_d = dev_of(&alice).control_address(&rid);
+    let before = net.mem.tx_count_mined(c_d).await.expect("count");
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    push2(&net, &alice, &rid, &work, &refs)
+        .await
+        .expect("a push of 300 branches");
+    let after = net.mem.tx_count_mined(c_d).await.expect("count");
+    // The head entity grows by about its whole body (stored for the control lifetime):
+    // the fixed limit must cover that, or the tx runs out of gas and is sent twice.
+    assert_eq!(
+        after - before,
+        1,
+        "one head tx, never a failed one and a resend"
+    );
+}
