@@ -54,8 +54,8 @@ DeviceBody = {
 - Because `C_N` creates it, deleting it or letting it expire trips N's P1 completeness check (`E_CONTROL_NOT_LIVE`), so a device cannot be hidden.
 - A device delegation is valid if it opens with layout version 2, its signature verifies under N's key, `body.rid = R`, and its creator is one of N's bind control addresses under the P1 creator rule.
 - The device key comes from its own seed (`device/seed`, outside `keys/`), not from the identity seed; the identity key only signs the delegation.
-- A device cannot be revoked on its own: there is no revoke entity, so a leaked device seed can sign heads for this identity until the identity itself is replaced by an identity revision (P1 section 3.5).
-  A machine that also holds `keys/` holds the identity key anyway, so in practice a lost machine means a lost identity key.
+- Until issue #27 a device could not be revoked on its own, so a leaked device seed could sign heads for this identity until the identity itself was replaced by an identity revision (P1 section 3.5); the identity now revokes a device with a revoke record (section 15).
+  A machine that also holds `keys/` holds the identity key anyway, so a lost machine with `keys/` still means a lost identity key.
 
 ### 4.2 Head (`head`)
 
@@ -530,3 +530,72 @@ The writer decides from the planned entries (7.1 step 3) before it builds the pa
 - The new kind code and context separate v4 signatures from v3: a v4 body can never be replayed as a v3 body that silently lacks its table.
 - The rollback rule (section 6) is unchanged: table pieces come from `B_d`, which `entityNonce(C_d)` does not count, exactly like bulk pack pieces.
 - A table whose pieces a node no longer serves makes that device's head unreadable (`E_NOT_LIVE`), as a missing pack piece does (11.3).
+
+## 15. Revoking a device (issue #27)
+
+Status: designed and implemented 2026-11-11 on branch `fix/issues-batch-1`.
+Before it, a leaked device seed could sign heads for its identity until the identity itself was replaced (4.1).
+
+### 15.1 Record
+
+```cddl
+RevokeBody = {
+  1: bstr .size 32,   ; rid
+  2: bstr .size 32,   ; d, the revoked device nid
+  3: uint,            ; seq of the last body of d that stays valid (0 when there is none)
+  4: bstr .size 32,   ; h of that body, zero when d never pushed a body that stays valid
+  5: bstr .size 32,   ; tx that carried that body, zero exactly when field 4 is zero
+}
+```
+
+- Signed by the identity key (envelope `signer = N`, envelope kind code 15, context `arkiv-git/revoke/v1`).
+- Stored as `ag.kind = 'anchor'` with `ag.v = 3`, plus `ag.rid`, `ag.nid = N`, `ag.dev = d`, `ag.h = H("revoke", envelope)` and `ag.seq = 2^64 - 1`, created by the identity's control address `C_N` with the maximum lifetime, exactly like the delegation (4.1).
+- Valid when it opens with layout version 3, its signature verifies under N's key, `body.rid = R`, and its creator is one of N's bind control addresses under the P1 creator rule.
+  A device key can therefore never revoke anything: it cannot sign as N, and its addresses are not N's control addresses.
+- The first valid record per device, in creation order, counts; later ones are ignored.
+
+### 15.2 The cut
+
+The record names the device's last valid body by seq, hash and landing tx, instead of a block.
+
+- Readers take that body from the calldata of field 5 (one `eth_getTransactionByHash` with its receipt, the read of the program fold, section 8), check that the tx came from `C_d` and succeeded, that the body is signed by d, and that its hash and seq match fields 3 and 4; anything else is `E_BAD_REFS`.
+- That body is the device's head for the merge, the listing, the packs and the program fold, whatever the head entity says now; the head entity, its rows and `entityNonce(C_d)` are no longer read for a revoked device.
+- So the device's earlier writes stay valid and every later one is dropped: bodies the device signs after the cut, and also bodies that landed between the cut and the revoke.
+- A block cut ("heads created before the revocation block stay valid") would leave two holes, so the record names the body:
+  1. A compromised device racing the revoke lands its forged body before the revoke's block, and that body would stay valid.
+  2. Readers would have to find the last body before the block by walking calldata back from the head entity, which the key holder can patch to a body whose `prev_tx` leads nowhere.
+- The revoker signs the cut from its own fresh view of the device (`chart device revoke` syncs first), so in the common case, with no race, the cut is exactly the last body before the revocation block.
+
+### 15.3 Edge cases
+
+- Revoke racing a push from the revoked device: whichever lands first, the device's state is the body the identity named; a racing body is dropped even if it landed earlier, and the device's own client cannot repair past the cut (its pushes are refused, 15.4).
+- A compromised device revoking the others: impossible, a revoke needs N's signature and a `C_N` creator (15.1).
+- A holder of `keys/` holds N's key anyway, so a lost machine with `keys/` is a lost identity, as before (4.1); revoke handles a lost device seed.
+- Re-delegating after a revoke: a revoked device nid stays revoked for the repo, also if it is delegated again; the machine gets a new device key by removing its `device/seed`, and its next push delegates the new key.
+- The rollback rule (section 6): the record pins the cut body by hash and the record itself is a `C_N` entity under N's completeness check, so neither hiding newer bodies nor hiding the record passes; the bracket is no longer needed for that device.
+- The over-claim residual (section 6): a revoke also ends it, because an over-claiming body after the cut is never read again, and creates from `C_d` no longer fail anyone's check; before revoke records the only remedy was a new identity.
+- A device that never pushed: fields 3 to 5 are zero and the device contributes nothing.
+- The snapshot of the cut body: its chunks and manifest are entities of the revoked device's addresses, which the key holder can delete, so a clone may lose them; another device of the identity pushing afterwards covers every live object again.
+  Pieces are read from block history and cannot be deleted.
+
+### 15.4 Writing and commands
+
+- `chart device list <repo>`: every delegated device of this machine's identity in the repo: nid, its control and bulk addresses, the seq of its head, and `revoked at seq ...` or `this machine`.
+- `chart device revoke <repo> <device>`: needs `keys/` (the identity key); syncs the repo, takes the device's current head as the cut, signs the record and sends it from `C_N`; it refuses this machine's own device (remove `device/seed` first, or revoke from another machine) and a device that is already revoked.
+  When the sync fails closed with `E_CONTROL_NOT_LIVE` (a stolen `C_d` creating outside head txs, section 6), the cut is the device's head this machine last verified (its local mark), found through the recorded landing or the block of the mark; a machine that never verified a head of that device cannot revoke it this way and says so.
+- A push from a revoked device fails with `E_DEVICE_REVOKED` before it sends anything.
+
+### 15.5 Cost
+
+- No read is added for repos without a revoke: the records ride the anchor query that already returns the delegations, and the gate (`speed-and-cost.md` section 7) is unchanged.
+- A revoked device costs one calldata read per sync (the cut body) instead of its head query and nonce read, in the same parallel step.
+- The revoke itself is one transaction from `C_N` with one anchor create (about the cost of a delegation).
+
+### 15.6 Old clients
+
+- v0.5.0 reads every anchor of a tracked `C_N`; a revoke record is an anchor with layout version 3, which it does not know, so it stops with `E_UNSUPPORTED_VERSION` instead of trusting the revoked device's new heads.
+
+### 15.7 Follow-up: private repos
+
+- In a private repo a device is also an MLS leaf; revoking the device should remove that leaf in the same step, with the mechanism the private-repo work uses to drop every leaf of a removed member (`sec/private-core`).
+  Until then, a revoked device of a private repo can no longer write refs, but it can still decrypt new epochs; removing the member removes all of its leaves.

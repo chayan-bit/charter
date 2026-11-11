@@ -166,6 +166,12 @@ pub async fn identity_bodies<A: Arkiv>(
     stop: u64,
     cache: &mut BodyCache,
 ) -> Result<Vec<BodyAt>> {
+    // A revoked device's cut body landed where its record says: no landing scan.
+    for d in &v2.devices {
+        if let (Some(h), Some(l)) = (&d.head, d.revoked.as_ref().and_then(|r| r.landing)) {
+            cache.current.insert(hex32(&h.h), l);
+        }
+    }
     let walks = v2.heads().map(|(dev, head)| {
         let mut mine = cache.clone();
         async move {

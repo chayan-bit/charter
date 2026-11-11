@@ -31,6 +31,7 @@ pub use body::{
     HEAD_V4_LAYOUT_VERSION, HeadBodyV4, MAX_TABLE_PIECES, MAX_TABLE_SIZE, RefTable, decode_table,
     effective_refs, encode_table,
 };
+pub use body::{REVOKE_LAYOUT_VERSION, RevokeBody};
 pub use canonical::{CanonicalRefs, canonical_refs};
 pub use chain::{
     AcceptedHead, AnchorChain, AnchorLink, BindChain, BindLink, CompletenessObs, Device,
@@ -40,6 +41,7 @@ pub use chain::{
     check_head_nonce, check_requires, devices, find_refs, identity_chain, is_device_row, maj,
     merge, merged_refs, next_entries, peer_key, resolve_stamps, verify_ops, verify_ops_after,
 };
+pub use chain::{Revocation, accept_cut_head, is_revoke_row, revocations};
 pub use chunk::{CHUNK_SIZE, MAX_PACK_SIZE, chunk_count, chunk_hashes, split, verify_chunk};
 pub use entity::{ENTITY_LAYOUT_VERSION, Entity, entity_attributes, open, verify_entity};
 pub use envelope::{AG_BODY_MAX, ENVELOPE_OVERHEAD, Envelope, content_hash, max_body_len, sig_msg};

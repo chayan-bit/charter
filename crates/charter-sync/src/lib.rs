@@ -28,6 +28,7 @@ pub mod push_send;
 pub mod ref_table;
 pub mod release;
 pub mod repo;
+pub mod revoke;
 pub mod search;
 pub mod state;
 pub mod units;

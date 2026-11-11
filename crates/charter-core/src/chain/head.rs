@@ -112,15 +112,15 @@ impl DeviceHead {
 }
 
 /// A head row opened in either format: the shared fields as a v2 body, and its packs.
-struct Opened {
-    e: Entity<HeadBody>,
+pub(super) struct Opened {
+    pub(super) e: Entity<HeadBody>,
     format: HeadFormat,
     packs: Vec<Pack>,
     refs_table: Option<RefTable>,
 }
 
 impl Opened {
-    fn v2(e: Entity<HeadBody>) -> Self {
+    pub(super) fn v2(e: Entity<HeadBody>) -> Self {
         let packs = e.body.packs.iter().map(Pack::from_v2).collect();
         Self {
             e,
@@ -130,7 +130,7 @@ impl Opened {
         }
     }
 
-    fn v4(e: Entity<HeadBodyV4>) -> Option<Self> {
+    pub(super) fn v4(e: Entity<HeadBodyV4>) -> Option<Self> {
         let Entity {
             position,
             creator,
@@ -158,7 +158,7 @@ impl Opened {
     }
 
     /// `None` only for a codec a validated body cannot carry.
-    fn v3(e: Entity<HeadBodyV3>) -> Option<Self> {
+    pub(super) fn v3(e: Entity<HeadBodyV3>) -> Option<Self> {
         let packs = e
             .body
             .packs
@@ -184,7 +184,7 @@ impl Opened {
     }
 }
 
-fn to_head(o: Opened, dev: &Device, updated_at: u64) -> DeviceHead {
+pub(super) fn to_head(o: Opened, dev: &Device, updated_at: u64) -> DeviceHead {
     let e = o.e;
     DeviceHead {
         device: dev.nid,

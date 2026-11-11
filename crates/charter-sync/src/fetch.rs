@@ -384,7 +384,9 @@ fn commit(repo: &Repo, view: &View, state: &mut State, applied: Applied) -> Resu
 /// Device marks and landings of a v2 peer (head-model 6).
 fn commit_v2(state: &mut State, pv: &crate::view::PeerView) -> Result<()> {
     let Some(v2) = &pv.v2 else { return Ok(()) };
-    for (dev, head) in v2.heads() {
+    // A revoked device's head is the cut, below any later body this machine saw (15.2).
+    let live = v2.devices.iter().filter(|d| d.revoked.is_none());
+    for (dev, head) in live.filter_map(|d| d.head.as_ref().map(|h| (&d.device, h))) {
         let mark = match state.device_mark(&dev.nid)? {
             Some(old) => old.advance(&head.mark())?,
             None => head.mark(),

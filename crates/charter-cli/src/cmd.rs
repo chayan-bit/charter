@@ -35,6 +35,9 @@ pub enum Cmd {
     /// Repo identity: show, propose a revision, accept one.
     #[command(subcommand)]
     Id(IdCmd),
+    /// This identity's devices in a repo: list them, revoke one.
+    #[command(subcommand)]
+    Device(crate::device_cmd::DeviceCmd),
     /// Extend everything a repo needs before it expires.
     Keepalive(KeepArgs),
     /// Find repos by annotation, verified against their identity heads.
@@ -498,6 +501,10 @@ pub fn run(cli: &Cli) -> Result<()> {
             Cmd::Init(i) => crate::member::init_cmd(&a, &cfg, i).await,
             Cmd::Member(m) => crate::member::member_cmd(&a, &cfg, m).await,
             Cmd::Id(c) => id_cmd(&a, &cfg, c).await,
+            Cmd::Device(d) => {
+                for_repo!(&a, &cfg, &d.rid()?, |b| crate::device_cmd::run(b, &cfg, d)
+                    .await)
+            }
             Cmd::Keepalive(k) => keepalive_cmd(&a, &cfg, k).await,
             Cmd::Search(s) => search_cmd(&a, s).await,
             Cmd::Status { repo } => status_cmd(&a, &cfg, repo).await,

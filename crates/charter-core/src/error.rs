@@ -38,6 +38,8 @@ pub enum ErrorCode {
     NotMember,
     /// P2: the caller's role in a private repo does not allow the operation.
     RoleDenied,
+    /// The identity revoked this device (head-model 15).
+    DeviceRevoked,
     Internal,
 }
 
@@ -74,6 +76,7 @@ impl ErrorCode {
             ProgramRejected => "E_PROGRAM_REJECTED",
             NotMember => "E_NOT_MEMBER",
             RoleDenied => "E_ROLE_DENIED",
+            DeviceRevoked => "E_DEVICE_REVOKED",
             Internal => "E_INTERNAL",
         }
     }

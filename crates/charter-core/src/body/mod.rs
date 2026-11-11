@@ -9,6 +9,7 @@ mod id;
 mod pack;
 mod peer;
 mod refs;
+mod revoke;
 
 pub use anchor::{AnchorBody, ManifestBody, Require};
 pub use cob::{CREATE, CobOpBody, MAX_ACTION, MAX_PAYLOAD, MAX_TYPE_NAME};
@@ -28,6 +29,7 @@ pub use id::{IdBody, ProgramPin};
 pub use pack::{Pack, PackPieces};
 pub use peer::{BindBody, IdAccBody, PeerBody};
 pub use refs::{RefEntry, RefsBody};
+pub use revoke::{REVOKE_LAYOUT_VERSION, RevokeBody};
 
 use crate::attrs::Attribute;
 use crate::types::{Hash32, Nid};

@@ -6,6 +6,7 @@ mod bind;
 mod cob;
 mod head;
 mod identity;
+mod revoke;
 
 pub use accept::{
     AcceptedHead, CompletenessObs, HeadInputs, accept_head, check_completeness, check_control_set,
@@ -20,6 +21,7 @@ pub use head::{
     next_entries, resolve_stamps,
 };
 pub use identity::{IdentityChain, Revision, identity_chain, maj};
+pub use revoke::{Revocation, accept_cut_head, is_revoke_row, revocations};
 
 use crate::entity::open;
 use crate::types::{Address, Hash32, Nid, Observed};

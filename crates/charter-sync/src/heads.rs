@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use charter_core::{
     AttrValue, Device, DeviceHead, ErrorCode, Hash32, HeadBody, HeadNonce, IdentityChain, Kind,
     Merged, Nid, Observed, PeerInfo, RefTable, RefsBody, Rid, accept_device_head,
-    accept_own_device_head, devices, merge, merged_refs, open_head_calldata, verify_entity,
+    accept_own_device_head, devices, merge, merged_refs, open_head_calldata, revocations,
+    verify_entity,
 };
 use charter_store::{Arkiv, MinedTx, Pred, tx_rows};
 use futures_util::future::try_join_all;
@@ -27,8 +28,11 @@ pub struct DeviceView {
     pub device: Device,
     pub head: Option<DeviceHead>,
     pub nonce: HeadNonce,
-    /// The head entity rows as observed (keepalive reads keys and expiry).
+    /// The head entity rows as observed (keepalive reads keys and expiry); empty for a
+    /// revoked device, whose head entity is no longer read.
     pub rows: Vec<Observed>,
+    /// The identity revoked this device: `head` is the body the record names (15.2).
+    pub revoked: Option<crate::revoke::Revoked>,
 }
 
 /// The v2 state of one identity.
@@ -158,6 +162,7 @@ fn device_view(r: DeviceRead, head: Option<DeviceHead>) -> DeviceView {
         head,
         nonce: r.nonce,
         rows: r.rows,
+        revoked: None,
     }
 }
 
@@ -215,11 +220,17 @@ pub async fn build<A: Arkiv>(
     state: &State,
 ) -> Result<V2> {
     let devs = devices(rid, info, device_rows);
-    // Boxed: these futures are large, and tests poll them on 2 MiB threads.
-    let views = try_join_all(
-        devs.into_iter()
-            .map(|d| Box::pin(read_device(a, rid, nid, d, identity, state))),
-    )
+    let mut revoked = revocations(rid, info, device_rows);
+    let views = try_join_all(devs.into_iter().map(|d| {
+        let r = revoked.remove(&d.nid);
+        async move {
+            // Boxed: these futures are large, and tests poll them on 2 MiB threads.
+            match r {
+                Some(r) => Box::pin(crate::revoke::read_revoked(a, rid, nid, d, identity, r)).await,
+                None => Box::pin(read_device(a, rid, nid, d, identity, state)).await,
+            }
+        }
+    }))
     .await?;
     merged(a, rid, views, state).await
 }
@@ -230,6 +241,12 @@ async fn merged<A: Arkiv>(a: &A, rid: &Rid, views: Vec<DeviceView>, state: &Stat
         .filter_map(|v| v.head.as_ref())
         .filter_map(|h| state.landing(&h.h).map(|l| (h.h, l)))
         .collect();
+    // A revoked device's cut body landed where its record's tx says.
+    for v in &views {
+        if let (Some(h), Some(l)) = (&v.head, v.revoked.as_ref().and_then(|r| r.landing)) {
+            landings.insert(h.h, l);
+        }
+    }
     let merged = loop {
         let blocks: BTreeMap<Nid, u64> = views
             .iter()

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use charter_core::{
     AcceptedHead, AnchorChain, CompletenessObs, Equivocation, HeadInputs, IdentityChain, Kind,
     ManifestBody, Nid, Observed, PeerInfo, RefsBody, Rid, Start, accept_head, anchor_chain,
-    bind_chain, check_control_set, check_requires, identity_chain, is_device_row,
+    bind_chain, check_control_set, check_requires, identity_chain, is_device_row, is_revoke_row,
 };
 use charter_store::{Arkiv, Pred};
 use futures_util::future::{join_all, try_join, try_join_all};
@@ -180,7 +180,7 @@ pub async fn chain_of<A: Arkiv>(
     let observed = anchors(a, rid, nid, info).await?;
     let v1: Vec<Observed> = observed
         .iter()
-        .filter(|o| !is_device_row(o))
+        .filter(|o| !is_device_row(o) && !is_revoke_row(o))
         .cloned()
         .collect();
     let chain = anchor_chain(rid, nid, info, identity, &v1, Start::Genesis)?;
@@ -225,7 +225,7 @@ pub async fn verify_peer<A: Arkiv>(
         let (chain, anchors) = chain_of(a, rid, nid, &info, identity).await?;
         let device_rows: Vec<Observed> = anchors
             .iter()
-            .filter(|o| is_device_row(o))
+            .filter(|o| is_device_row(o) || is_revoke_row(o))
             .cloned()
             .collect();
         let v2 = match device_rows.is_empty() {
