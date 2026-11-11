@@ -20,6 +20,7 @@ pub mod keys;
 pub mod manifest_cache;
 pub mod observe;
 pub mod packs;
+mod piece_reuse;
 pub mod pieces;
 pub mod program;
 pub mod push;

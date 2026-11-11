@@ -530,18 +530,27 @@ impl<A: Arkiv> HeadPush<'_, A> {
     }
 
     /// Bulk pieces from `B_d`, one tx each, before the head (crash-safe: they just expire);
-    /// where each landed.
+    /// where each landed. Pieces a refused attempt of this push landed and that read back
+    /// intact are named again instead of sent (issue #26).
     async fn bulk_pieces(&self, pieces: &[&[u8]]) -> Result<Vec<(u64, u32)>> {
         let rid = self.rid();
-        let jobs = pieces
+        let out = self.repo.outgoing();
+        let bulk = self.dev.bulk_address(&rid);
+        let mut at = crate::piece_reuse::reusable(self.a, &out, &rid, bulk, pieces).await?;
+        let todo: Vec<usize> = (0..pieces.len()).filter(|i| at[*i].is_none()).collect();
+        let jobs = todo
             .iter()
-            .map(|p| Ok(vec![piece_op(&rid, p)?]))
+            .map(|&i| Ok(vec![piece_op(&rid, pieces[i])?]))
             .collect::<Result<Vec<_>>>()?;
         let landed = self.send_from(&self.dev.bulk(&rid), jobs).await?;
-        let mut at = vec![(0, 0); pieces.len()];
         for l in landed {
-            at[l.job] = (l.receipt.block_number, l.receipt.index);
+            at[todo[l.job]] = Some((l.receipt.block_number, l.receipt.index));
         }
+        let at = at
+            .into_iter()
+            .map(|a| a.ok_or_else(|| SyncError::coded(ErrorCode::Internal, "a piece did not land")))
+            .collect::<Result<Vec<_>>>()?;
+        crate::piece_reuse::record(&out, pieces, &at)?;
         Ok(at)
     }
 
@@ -980,6 +989,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
         );
         git.update_refs(&ops)?;
         let _ = std::fs::remove_file(self.pending_head_path());
+        crate::piece_reuse::clear(&self.repo.outgoing());
         Ok(())
     }
 }

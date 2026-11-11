@@ -283,6 +283,11 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
 - A copied `CHARTER_HOME` (two machines sharing one device seed) is the only way to get two writers of one head.
   Both sign from `C_d`, and each signs its head transaction at the confirmed tx count it read just before `entityNonce(C_d)`, so two concurrent head transactions carry the same nonce and only one can land; the other fails with `E_CONCURRENT_PUSH` and is never re-signed at the next nonce.
   A later push reads the landed head first and continues its chain.
+  A push refused this way after its bulk pieces landed has already paid for them, so the writer records where each bulk piece landed (`outgoing/bulk-pieces.json`, by the sha256 of its bytes) and the retry names those txs again instead of uploading (issue #26).
+  The retry reads each recorded tx back first and reuses it only if it was sent by this device's `B_d` and carries exactly that piece's bytes, which is what every reader will check; anything else is uploaded again.
+  Readers take piece bytes from calldata, live or not, so the 20-block lifetime of the piece entity does not bound the reuse; block-history retention does, as for every piece push.
+  Bulk pieces come from `B_d`, never from `C_d`, so reuse does not change `pieces_created` or the rollback rule; inline pieces travel in the refused head tx itself and never landed.
+  The record costs a first attempt one local file write and no round trip; a successful push deletes it.
   Clients before this rule signed at the pending nonce and could land a second head transaction behind a pending one; `C_d` then created more entities than the current body records and every reader fails with `E_CONTROL_NOT_LIVE`.
   The machine that sent the current body (it is the one recorded in its `sent_heads`) accepts that head anyway, with a warning, and its next push signs a body whose `pieces_created` matches the real `entityNonce(C_d)`, which every reader accepts again.
   Any other machine, including another copy of the same seed that sent a different body, keeps failing closed until that repair lands.
@@ -343,7 +348,7 @@ Known limits not handled in v0.4.0:
 
 - A device's head holds at most about 550 to 900 refs (section 4.2); a migration or push past that fails with `E_REFS_TOO_LARGE` instead of moving the ref list into a piece.
 - A pack that cannot be indexed is downloaded once per change of the peer's heads, and by every fresh clone (section 5.5); until v0.5.0 it was downloaded on every fetch.
-- A copied `device/seed` makes two machines one device; they serialise on the confirmed nonce of `C_d`, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4).
+- A copied `device/seed` makes two machines one device; they serialise on the confirmed nonce of `C_d`, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4); the retry reuses the bulk pieces the refused push landed.
 - Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can collide on the wallet nonce and one push fails with an RPC error; running it again succeeds.
 
 ## 12. Measurements
