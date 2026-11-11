@@ -101,6 +101,7 @@ struct RawReceipt {
     status: U64,
     gas_used: U64,
     effective_gas_price: U128,
+    transaction_index: U64,
 }
 
 #[derive(Deserialize)]
@@ -524,6 +525,7 @@ impl Arkiv for RpcArkiv {
             success: u64_of(r.status) == 1,
             gas_used: u64_of(r.gas_used),
             effective_gas_price: r.effective_gas_price.to::<u128>(),
+            index: u32::try_from(u64_of(r.transaction_index)).unwrap_or(u32::MAX),
         }))
     }
 

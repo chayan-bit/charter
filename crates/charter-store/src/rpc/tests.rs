@@ -327,7 +327,7 @@ async fn a_long_or_missing_retry_after_surfaces_e_rate_limited_at_once() {
 async fn reads_parse_the_wire_types() {
     let receipt = json!({
         "transactionHash": B256::repeat_byte(1), "blockNumber": "0x2a", "status": "0x1",
-        "gasUsed": "0x5208", "effectiveGasPrice": "0x3b9aca00"
+        "gasUsed": "0x5208", "effectiveGasPrice": "0x3b9aca00", "transactionIndex": "0x3"
     });
     let (rpc, seen) = client(move |b| match b["method"].as_str().unwrap_or("") {
         "eth_blockNumber" => ok(json!("0x10")),
@@ -368,8 +368,14 @@ async fn reads_parse_the_wire_types() {
         .expect("r")
         .expect("some");
     assert_eq!(
-        (r.block_number, r.success, r.gas_used, r.effective_gas_price),
-        (42, true, 21_000, 1_000_000_000)
+        (
+            r.block_number,
+            r.success,
+            r.gas_used,
+            r.effective_gas_price,
+            r.index
+        ),
+        (42, true, 21_000, 1_000_000_000, 3)
     );
     assert_eq!(rpc.receipt(TxHash::repeat_byte(2)).await, Ok(None));
     let log = seen.lock().expect("log");

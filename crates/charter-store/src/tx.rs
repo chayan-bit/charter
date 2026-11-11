@@ -108,6 +108,8 @@ pub struct Receipt {
     pub success: bool,
     pub gas_used: u64,
     pub effective_gas_price: u128,
+    /// Position in its block (`transactionIndex`).
+    pub index: u32,
 }
 
 /// What a tx moved: sender, recipient and value (`eth_getTransactionByHash`).

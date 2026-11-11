@@ -341,6 +341,63 @@ async fn a_copied_seed_with_a_head_tx_in_flight_cannot_land_a_second_head() {
     );
 }
 
+/// H1 with the confirmed count read once, in `setup`: a tx of `C_d` that lands after it
+/// without creating an entity (so `entityNonce` does not move) takes the head tx's nonce,
+/// and the push stops with `E_CONCURRENT_PUSH` instead of signing at the next nonce.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmed_count_gone_stale_after_setup_fails_with_concurrent_push() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "stale-count").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    pushed(&net, &alice, &rid, tmp.path(), 1).await;
+    let work = tmp.path().join("work");
+    commit(&work, &[("f", b"next")], "feat: next");
+    let repo = alice.repo(&rid);
+    let hp = Box::pin(prepare2(
+        &net,
+        &alice,
+        &repo,
+        &work,
+        &[upd("refs/heads/main")],
+    ))
+    .await
+    .expect("prepare");
+    let ready = Box::pin(hp.setup()).await.expect("setup");
+    let c_d = dev_of(&alice).control_address(&rid);
+    let nonce = net.entity_nonce(c_d).await.expect("entityNonce");
+    let state = charter_sync::state::State::load(&repo.state_path()).expect("state");
+    let plan = Box::pin(hp.plan(&state)).await.expect("plan");
+
+    // Another holder of this device seed spends from `C_d` and it lands.
+    let params = TxParams {
+        nonce: net.mem.tx_count(c_d).await.expect("nonce"),
+        to: c_d,
+        value: U256::ZERO,
+        input: Default::default(),
+        gas_limit: 21_000,
+        max_fee_per_gas: 2_000_000_000,
+        max_priority_fee_per_gas: 0,
+    };
+    let tx = SignedTx::sign(&dev_of(&alice).control(&rid), CHAIN, params).expect("sign");
+    net.mem.send(tx).await.expect("send");
+    net.mine(1);
+    assert_eq!(net.entity_nonce(c_d).await.expect("entityNonce"), nonce);
+
+    let pre = charter_sync::head_send::Pre {
+        ready: Some(ready),
+        nonce: Some(nonce),
+    };
+    let r = Box::pin(hp.finish_with(plan, pre)).await;
+    assert_eq!(code(r), "E_CONCURRENT_PUSH");
+    net.mine(1);
+    assert_eq!(
+        raw_head_seq(&net, &rid).await,
+        0,
+        "no second head body landed"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_device_repairs_its_head_after_a_copied_seed_landed_a_second_head_tx() {
     let net = Net::new();

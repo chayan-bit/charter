@@ -344,6 +344,7 @@ impl Inner {
             success,
             gas_used,
             effective_gas_price: price,
+            index: tx_index,
         };
         self.receipts.insert(p.hash, r);
         self.txs.insert(p.hash, p.info(Some(n)));

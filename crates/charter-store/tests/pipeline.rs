@@ -279,6 +279,8 @@ struct Spy {
     lose_reply: Option<(u64, bool)>,
     /// The first send of a tx with one of these nonces is mined as status 0.
     revert_nonces: std::sync::Mutex<std::collections::HashSet<u64>>,
+    /// Balance reads of any address.
+    balances: std::sync::atomic::AtomicUsize,
 }
 
 impl Spy {
@@ -291,7 +293,11 @@ impl Spy {
             refuse: None,
             lose_reply: None,
             revert_nonces: Default::default(),
+            balances: Default::default(),
         }
+    }
+    fn balances(&self) -> usize {
+        self.balances.load(std::sync::atomic::Ordering::Relaxed)
     }
     fn estimates(&self) -> usize {
         self.estimates.load(std::sync::atomic::Ordering::Relaxed)
@@ -322,6 +328,8 @@ impl Arkiv for Spy {
         self.inner.entity_nonce(c).await
     }
     async fn balance(&self, a: Address) -> Result<U256, StoreError> {
+        self.balances
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner.balance(a).await
     }
     async fn tx_count(&self, a: Address) -> Result<u64, StoreError> {
@@ -389,6 +397,63 @@ impl Arkiv for Spy {
     ) -> Result<Option<charter_store::TxInfo>, StoreError> {
         self.inner.transaction(h).await
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_funded_run_reads_no_balance_after_its_last_receipt() {
+    let (fake, key) = setup();
+    let funder = funded(&fake);
+    let spy = Spy::new(fake.clone(), false);
+    let mut p =
+        TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default()).funded_by(funder);
+    let landed = with_miner(fake.clone(), p.run(vec![vec![small("b", 0, 0)]]))
+        .await
+        .expect("run");
+    assert_eq!(landed.len(), 1);
+    assert_eq!(spy.balances(), 1, "one read before the send, none after");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_seeded_run_at_a_fixed_gas_sends_without_a_balance_read_or_an_estimate() {
+    let (fake, key) = setup();
+    let funder = funded(&fake);
+    let spy = Spy::new(fake.clone(), false);
+    let (head, fee) = fake.head_fee().await.expect("fee");
+    let have = fake.balance(key.address()).await.expect("balance");
+    let mut p = TxPipeline::new(
+        &spy,
+        key.clone(),
+        CHAIN,
+        PipelineConfig::default().ordered(),
+    )
+    .funded_by(funder)
+    .at_nonce(0)
+    .seeded(head, fee, std::time::Instant::now(), have)
+    .with_gas(400_000);
+    let landed = with_miner(fake.clone(), p.run(vec![vec![small("s", 0, 0)]]))
+        .await
+        .expect("run");
+    assert_eq!(landed.len(), 1);
+    assert!(landed[0].receipt.success);
+    assert_eq!((spy.estimates(), spy.balances()), (0, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fixed_gas_too_low_is_estimated_when_the_job_is_retried() {
+    let (fake, key) = setup();
+    let spy = Spy::new(fake.clone(), false);
+    let mut p =
+        TxPipeline::new(&spy, key.clone(), CHAIN, PipelineConfig::default()).with_gas(22_000);
+    let landed = with_miner(fake.clone(), p.run(vec![vec![small("g", 0, 0)]]))
+        .await
+        .expect("run");
+    assert_eq!(landed.len(), 1);
+    assert!(landed[0].receipt.success);
+    assert_eq!(
+        spy.estimates(),
+        2,
+        "the failed tx is re-estimated, then priced afresh"
+    );
 }
 
 #[tokio::test(start_paused = true)]
