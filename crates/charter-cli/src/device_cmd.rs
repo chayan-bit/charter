@@ -16,7 +16,8 @@ pub enum DeviceCmd {
     /// Every device delegated by this machine's identity in the repo.
     List { repo: String },
     /// Revoke a device of this identity: its later heads are ignored (needs `keys/`). In a
-    /// private repo an admin's client also removes the device's MLS leaf on its next sync.
+    /// private repo an admin then removes the device's MLS leaf (`chart member sync`, a
+    /// paid commit); when this identity is an admin, this command does it at once.
     Revoke {
         repo: String,
         /// The device nid, as `chart device list` prints it.
@@ -85,13 +86,21 @@ pub async fn run<A: Arkiv>(a: &A, cfg: &Config, cmd: &DeviceCmd) -> Result<()> {
                     r.seq
                 ),
             }
+            println!("{STOLEN}");
         }
     }
     Ok(())
 }
 
-/// After a revoke in a private repo: refreshes the group (an admin's refresh removes the
-/// leaf right away) and says what the revoked device can still decrypt.
+/// What a device revoke cannot do, said after every revoke, public or private.
+const STOLEN: &str = "if that machine had this identity's `keys/` directory, revoking its \
+     device does not stop it: it still holds your identity, so it can sign as you, revoke your \
+     other devices and read what you can; recovery is removing this identity (`chart member \
+     remove` in a private repo, a new delegate set in a public one) and starting a new \
+     identity on a clean machine (docs/p2/private-repos.md, \"Lost or stolen machine\")";
+
+/// After a revoke in a private repo: an admin removes the device's leaf at once (one paid
+/// commit, its cost printed); then says what the revoked device can still decrypt.
 pub async fn private_note<A: Arkiv>(a: &A, cfg: &Config, cmd: &DeviceCmd) -> Result<()> {
     let DeviceCmd::Revoke { device, .. } = cmd else {
         return Ok(());
@@ -100,6 +109,7 @@ pub async fn private_note<A: Arkiv>(a: &A, cfg: &Config, cmd: &DeviceCmd) -> Res
     let keys = Keys::require(&cfg.home)?;
     let nid =
         parse_id(device).map_err(|_| CliError::Usage(format!("{device}: not a device nid")))?;
+    crate::member::remove_revoked(a, cfg, &keys, &rid).await?;
     let state = charter_private::revoked::leaf_state(a, cfg, &keys, &rid, &nid).await?;
     println!("{}", note(state, &to_text(&keys.nid())));
     Ok(())
@@ -112,9 +122,9 @@ fn note(state: LeafState, me: &str) -> String {
              anything sealed from epoch {epoch} on; what was sealed before stays readable to it"
         ),
         LeafState::Pending => "private repo: its writes after the cut are refused now, but it \
-             can still decrypt new rows until an admin's client next syncs this repo, which \
-             removes its MLS leaf automatically (one commit); what is sealed before that stays \
-             readable to it"
+             can still decrypt new rows until an admin removes its MLS leaf with `chart member \
+             sync` (one paid commit; syncing alone never does); what is sealed before that \
+             stays readable to it"
             .into(),
         LeafState::Legacy => format!(
             "private repo: this identity's MLS leaves predate device binding (charter 0.6.0), \
@@ -133,7 +143,8 @@ mod tests {
     #[test]
     fn each_leaf_state_says_what_the_device_can_still_read() {
         assert!(note(LeafState::Removed { epoch: 7 }, "me").contains("from epoch 7 on"));
-        assert!(note(LeafState::Pending, "me").contains("until an admin's client next syncs"));
+        assert!(note(LeafState::Pending, "me").contains("until an admin removes its MLS leaf"));
+        assert!(STOLEN.contains("still holds your identity"));
         let legacy = note(LeafState::Legacy, "zMe");
         assert!(
             legacy.contains("chart member remove --member zMe"),

@@ -40,6 +40,12 @@ pub enum MemberCmd {
         #[arg(long)]
         repo: String,
     },
+    /// Admin only: remove from the group the MLS leaf of every device a valid revoke record
+    /// names, in one commit (a paid tx; prints its cost). Syncing never does this on its own.
+    Sync {
+        #[arg(long)]
+        repo: String,
+    },
 }
 
 fn rid_of(repo: &str) -> Result<charter_core::Rid> {
@@ -115,8 +121,41 @@ pub async fn member_cmd<A: Arkiv>(a: &A, cfg: &Config, cmd: &MemberCmd) -> Resul
                 );
             }
         }
+        MemberCmd::Sync { repo } => {
+            let rid = rid_of(repo)?;
+            let n = remove_revoked(a, cfg, &keys, &rid).await?;
+            if n == 0 {
+                println!("nothing to remove: no revoked device holds an MLS leaf");
+            }
+        }
     }
     Ok(())
+}
+
+/// Admin only: removes the MLS leaf of every revoked device ([`charter_private::revoked`])
+/// and prints what it removed and what it cost (the drop in the wallet and the repo's
+/// control address). Returns how many leaves it removed.
+pub async fn remove_revoked<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    rid: &charter_core::Rid,
+) -> Result<usize> {
+    let held = || async {
+        let (w, c) = (keys.wallet().address(), keys.control_address(rid));
+        Ok::<_, crate::CliError>(a.balance(w).await? + a.balance(c).await?)
+    };
+    let before = held().await?;
+    let n = charter_private::revoked::remove_revoked(a, cfg, keys, rid).await?;
+    if n > 0 {
+        let spent = before.saturating_sub(held().await?);
+        let (epoch, _) = charter_private::members(a, cfg, keys, rid).await?;
+        println!(
+            "removed {n} revoked device leaf(s) in one commit (epoch {epoch}); cost {}",
+            crate::units::fmt_glm(spent)
+        );
+    }
+    Ok(n)
 }
 
 /// Serves the remote helper over the plain backend, or over [`Sealed`] for a private repo

@@ -59,6 +59,7 @@ fn the_identity_lists_and_revokes_a_device_and_the_device_can_no_longer_push() {
         .to_owned();
     let out = alice.arkiv(&["device", "revoke", &url, &lap_nid]);
     assert!(out.contains("up to seq 0 stay valid"), "{out}");
+    assert!(out.contains("it still holds your identity"), "{out}");
     let list = alice.arkiv(&["device", "list", &url]);
     assert!(list.contains("revoked at seq 0"), "{list}");
 
@@ -84,7 +85,8 @@ fn the_identity_lists_and_revokes_a_device_and_the_device_can_no_longer_push() {
 }
 
 /// Head-model 15.7: in a private repo an admin revoking her own laptop removes its MLS
-/// leaf at once (her remaining device commits it) and the CLI says what that leaves.
+/// leaf at once (her remaining device commits it, and the CLI prints the cost) and says
+/// what that leaves; `chart member sync` then finds nothing left to remove.
 #[test]
 fn revoking_a_private_repo_device_removes_its_mls_leaf_and_says_so() {
     let tmp = tempfile::tempdir().expect("tmp");
@@ -139,6 +141,14 @@ fn revoking_a_private_repo_device_removes_its_mls_leaf_and_says_so() {
         out.contains("no MLS leaf names this device any more"),
         "{out}"
     );
+    assert!(
+        out.contains("removed 1 revoked device leaf(s) in one commit"),
+        "{out}"
+    );
+    assert!(out.contains("; cost "), "{out}");
+    assert!(out.contains("it still holds your identity"), "{out}");
     let members = alice.arkiv(&["member", "list", "--repo", &url]);
     assert!(members.contains("Admin 1 device"), "{members}");
+    let sync = alice.arkiv(&["member", "sync", "--repo", &url]);
+    assert!(sync.contains("nothing to remove"), "{sync}");
 }
