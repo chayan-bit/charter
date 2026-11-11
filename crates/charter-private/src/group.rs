@@ -12,7 +12,7 @@ use charter_sync::write::{self, entity_op, sign};
 use charter_sync::{Config, Keys, Result, SyncError, observe};
 
 use crate::arkiv::Sealed;
-use crate::auth::{self, CTX_COMMIT, CTX_WELCOME, att_msg, bad};
+use crate::auth::{self, CTX_WELCOME, att_msg, bad};
 use crate::join::{refresh, root_rows};
 use crate::keyring::{FORMAT, Keyring, Role, not_member};
 use crate::mls::{Mls, SUITE};
@@ -197,10 +197,6 @@ async fn add<A: Arkiv>(
     let (commit, welcome, _) = mls.add(&mut g, kp)?;
     if let Some(role) = role {
         ring.roles.insert(hex::encode(nid), role);
-        if role == Role::Admin && !pre.roots.contains(&nid) {
-            ring.certs
-                .insert(hex::encode(nid), auth::sign_cert(keys, rid, &nid)?);
-        }
     }
     let (epoch, key) = mls.epoch_key(&g, rid)?;
     ring.epochs.insert(epoch, key);
@@ -233,29 +229,29 @@ pub async fn remove_member<A: Arkiv>(
     let mut g = mls.load(&ring.group)?;
     let commit = mls.remove(&mut g, nid)?;
     ring.roles.remove(&hex::encode(nid));
-    ring.certs.remove(&hex::encode(nid));
     let (epoch, key) = mls.epoch_key(&g, rid)?;
     ring.epochs.insert(epoch, key);
     ring.id_rot.insert(epoch, mls.id_key(&g, rid)?);
     finish(a, cfg, keys, &mls, ring, pre, commit, None).await
 }
 
-/// What a commit needs from before it: the root delegates, whether it migrates a legacy
-/// repo, the heads to pin, and this admin's peer document if it has none yet (readers look
-/// its key up to check the attestation). Three queries, on the add and remove paths only.
+/// What a commit needs from before it: whether it migrates a legacy repo (then the caller
+/// must be a root delegate), the heads to pin, and this admin's peer document if it has none
+/// yet (readers look its key up to check the attestation). Two queries on the add and remove
+/// paths, three on the migrating one.
 struct Pre {
-    roots: Vec<Nid>,
     migrate: bool,
     pinned: BTreeSet<String>,
     peer: Option<charter_store::Operation>,
 }
 
 async fn prepare<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys, ring: &Keyring) -> Result<Pre> {
-    let Some((roots, _)) = root_rows(a, ring).await? else {
-        return Err(bad("cannot open this repo's root identity"));
-    };
     let migrate = ring.format < FORMAT;
-    if migrate && !roots.contains(&keys.nid()) {
+    if migrate
+        && !root_rows(a, ring)
+            .await?
+            .is_some_and(|(roots, _)| roots.contains(&keys.nid()))
+    {
         return Err(SyncError::coded(
             ErrorCode::RoleDenied,
             "this private repo predates charter 0.5.1: a root delegate must make its next \
@@ -280,7 +276,6 @@ async fn prepare<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys, ring: &Keyring) -> 
         None => first_write_ops(keys, &ring.rid, cfg)?.into_iter().next(),
     };
     Ok(Pre {
-        roots,
         migrate,
         pinned,
         peer,
@@ -300,22 +295,17 @@ async fn finish<A: Arkiv>(
 ) -> Result<()> {
     if pre.migrate {
         ring.format = FORMAT;
-        let legacy: Vec<Nid> = ring
-            .roles
-            .iter()
-            .filter(|(n, r)| **r == Role::Admin && !ring.certs.contains_key(*n))
-            .filter_map(|(n, _)| hex::decode(n).ok()?.try_into().ok())
-            .filter(|n| !pre.roots.contains(n))
-            .collect();
-        for n in legacy {
-            ring.certs
-                .insert(hex::encode(n), auth::sign_cert(keys, &ring.rid, &n)?);
-        }
     }
     ring.pinned = pre.pinned;
     let epoch = ring.current()?.0;
     let roles = ring.roles.clone();
     ring.record_roles(epoch, &roles);
+    let admins = roles
+        .iter()
+        .filter(|(_, r)| **r == Role::Admin)
+        .map(|(n, _)| n.clone())
+        .collect();
+    ring.adm_log.insert(epoch, admins);
     let extra = pre.peer.into_iter().collect();
     let landed = publish_commit(a, cfg, keys, &ring, commit, welcome, pre.migrate, extra).await?;
     if let Some(block) = landed {
@@ -351,11 +341,14 @@ async fn publish_commit<A: Arkiv>(
     };
     let prev = epoch.saturating_sub(1);
     let rid_attr = ("ag.rid", b32(blinded_rid_at(ring, prev)), true);
-    let commit_att = att(CTX_COMMIT, &commit, None)?;
+    let admins = ring.adm_log.get(&epoch).cloned().unwrap_or_default();
+    let signed = auth::sign_commit(keys, rid, epoch, key, &commit, &bx, &admins)?;
+    let commit_att = ("ag.att", AttributeValue::Bytes(signed), false);
+    let ct = ("ag.ct", b32(auth::commits_tag(&ring.id_key, rid)), true);
     let mut ops = extra;
     ops.push(msg::op(
         T_COMMIT,
-        vec![rid_attr, ep(), lockbox(), commit_att],
+        vec![rid_attr, ct, ep(), lockbox(), commit_att],
         commit,
         cfg.control_lifetime,
     )?);

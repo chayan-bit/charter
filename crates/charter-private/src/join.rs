@@ -3,13 +3,17 @@
 //! Arkiv order, one epoch at a time. Also decides, for any rid, whether it is public,
 //! private and readable, or private and closed (`E_NOT_MEMBER`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use charter_crypto::PublicKey;
 
 use charter_core::{AttrValue, ErrorCode, IdBody, Nid, Observed, Rid};
 use charter_store::{Arkiv, Pred, Query};
 use charter_sync::{Config, Keys, Result, SyncError, observe, view};
 
-use crate::auth::{self, CTX_COMMIT, CTX_WELCOME, att_msg, bad, open_att, verifies};
+use crate::auth::{
+    self, CTX_WELCOME, CommitAtt, att_msg, bad, open_att, parse_commit_att, verifies,
+};
 use crate::keyring::{FORMAT, Keyring, Role, not_member};
 use crate::mls::Mls;
 use crate::msg::{
@@ -124,13 +128,116 @@ async fn verify_welcome<A: Arkiv>(
             "the welcome's keys do not open the repo's root identity",
         ));
     };
-    let admins = auth::admins(a, &ring, &roots).await?;
-    if !admins.contains(&signer) || ring.role(&signer) != Some(Role::Admin) {
+    if !on_record(a, &mut ring, &roots, epoch, &signer).await? {
         return Err(bad(
-            "welcome attested by someone who is not an admin of this repo",
+            "this welcome does not continue the repo's commit history: it was not made by \
+             an admin of the current group",
         ));
     }
     Ok(Some((ring, ids)))
+}
+
+/// Whether the welcome for epoch `epoch` (attested by `signer`) continues the commits on
+/// record. From the first commit a root delegate attested, each epoch's commit is the
+/// first one in Arkiv order signed by an admin of the epoch before, as `ring`'s admin log
+/// says; and each such commit's admin digest and epoch authenticator, which only that
+/// epoch's key holders can compute, must match `ring`. So `ring`'s whole admin history up
+/// to `epoch` is the one the admins committed to, a removed admin is out of it, and a
+/// welcome she forges with keys she never held fails at the first epoch she was not in,
+/// even before any genuine welcome exists. Sets `rotated` from those commits. One query,
+/// plus one key lookup per admin who committed.
+async fn on_record<A: Arkiv>(
+    a: &A,
+    ring: &mut Keyring,
+    roots: &[Nid],
+    epoch: u64,
+    signer: &Nid,
+) -> Result<bool> {
+    let ct = auth::commits_tag(&ring.id_key, &ring.rid);
+    let rows = find(a, T_COMMIT, vec![observe::b32("ag.ct", &ct)]).await?;
+    let mut by_ep: BTreeMap<u64, Vec<(&Observed, CommitAtt)>> = BTreeMap::new();
+    for c in &rows {
+        if let (Some(ep), Some(att)) = (
+            u64_of(c, "ag.ep"),
+            bytes(c, "ag.att").and_then(parse_commit_att),
+        ) {
+            by_ep.entry(ep).or_default().push((c, att));
+        }
+    }
+    let mut pks: BTreeMap<Nid, Option<PublicKey>> = BTreeMap::new();
+    let roots: BTreeSet<Nid> = roots.iter().copied().collect();
+    let mut base = None;
+    for (ep, cands) in by_ep.range(..=epoch) {
+        if first_signed(a, &mut pks, &ring.rid, *ep, cands, &roots)
+            .await?
+            .is_some()
+        {
+            base = Some(*ep);
+            break;
+        }
+    }
+    let Some(base) = base else { return Ok(false) };
+    for k in base..=epoch {
+        let admins: BTreeSet<Nid> = match k == base {
+            true => roots.clone(),
+            false => nids(ring.adm_log.get(&(k - 1))),
+        };
+        let cands = by_ep.get(&k).map_or(&[][..], Vec::as_slice);
+        let Some((c, att)) = first_signed(a, &mut pks, &ring.rid, k, cands, &admins).await? else {
+            return Ok(false);
+        };
+        let (Some(key), Some(adm)) = (ring.epochs.get(&k), ring.adm_log.get(&k)) else {
+            return Ok(false);
+        };
+        let pinned = att.admins == auth::admins_digest(key, adm)
+            && att.auth == auth::epoch_auth(key, &ring.rid);
+        if !pinned || (k == epoch && att.signer != *signer) {
+            return Ok(false);
+        }
+        ring.rotated.insert(k, c.block);
+    }
+    Ok(true)
+}
+
+/// The first of `cands` (one epoch's commits, in Arkiv order) validly signed by one of
+/// `admins`; looks each signer's key up once.
+async fn first_signed<'c, A: Arkiv>(
+    a: &A,
+    pks: &mut BTreeMap<Nid, Option<PublicKey>>,
+    rid: &Rid,
+    epoch: u64,
+    cands: &'c [(&'c Observed, CommitAtt)],
+    admins: &BTreeSet<Nid>,
+) -> Result<Option<(&'c Observed, &'c CommitAtt)>> {
+    for (c, att) in cands {
+        if !admins.contains(&att.signer) {
+            continue;
+        }
+        if !pks.contains_key(&att.signer) {
+            pks.insert(
+                att.signer,
+                charter_sync::cob::peer_key_of(a, &att.signer).await?,
+            );
+        }
+        let (body, bx) = (
+            bytes(c, "ag.body").unwrap_or_default(),
+            bytes(c, "ag.box").unwrap_or_default(),
+        );
+        if pks[&att.signer]
+            .as_ref()
+            .is_some_and(|pk| auth::commit_signed(pk, att, rid, epoch, body, bx))
+        {
+            return Ok(Some((*c, att)));
+        }
+    }
+    Ok(None)
+}
+
+fn nids(set: Option<&BTreeSet<String>>) -> BTreeSet<Nid> {
+    set.into_iter()
+        .flatten()
+        .filter_map(|n| hex::decode(n).ok()?.try_into().ok())
+        .collect()
 }
 
 /// The root identity's delegates and the identity rows `ring` opens, or `None` when no
@@ -187,17 +294,20 @@ async fn apply_commits<A: Arkiv>(a: &A, mls: &Mls, ring: &mut Keyring) -> Result
                 break;
             }
             let (epoch, key) = mls.epoch_key(&g, &ring.rid)?;
-            let newer = open_box(&ring.rid, epoch, &key, bx);
-            if newer.is_none() || !commit_attested(a, ring, &sender, epoch, &key, c).await? {
+            let attested = match open_box(&ring.rid, epoch, &key, bx) {
+                Some(newer) => commit_attested(a, ring, &newer, &sender, epoch, &key, c)
+                    .await?
+                    .then_some(newer),
+                None => None,
+            };
+            let Some(newer) = attested else {
                 mls.restore(snap)?;
                 g = mls.load(&ring.group)?;
                 continue;
-            }
+            };
             ring.epochs.insert(epoch, key);
             ring.rotated.insert(epoch, c.block);
-            if let Some(newer) = newer {
-                ring.merge(&newer);
-            }
+            ring.merge(&newer);
             let roles = ring.roles.clone();
             ring.record_roles(epoch, &roles);
         }
@@ -208,11 +318,15 @@ async fn apply_commits<A: Arkiv>(a: &A, mls: &Mls, ring: &mut Keyring) -> Result
     }
 }
 
-/// Whether commit row `c` carries `sender`'s attestation of its bytes and lockbox. A commit
-/// without one is accepted only while the repo is still in the legacy format.
+/// Whether commit row `c` carries `sender`'s public attestation of its bytes and lockbox,
+/// `sender` was an admin of the epoch before, and the attested admin digest and epoch
+/// authenticator are those of `newer` (its lockbox) and `key`, so joiners replaying the
+/// record see what members applied. A commit without one is accepted only while the repo
+/// is still in the legacy format.
 async fn commit_attested<A: Arkiv>(
     a: &A,
     ring: &Keyring,
+    newer: &Keyring,
     sender: &Nid,
     epoch: u64,
     key: &Key,
@@ -222,16 +336,24 @@ async fn commit_attested<A: Arkiv>(
         bytes(c, "ag.body").unwrap_or_default(),
         bytes(c, "ag.box").unwrap_or_default(),
     );
-    let Some((signer, sig)) = bytes(c, "ag.att").and_then(|s| open_att(key, &ring.rid, epoch, s))
-    else {
+    let Some(att) = bytes(c, "ag.att").and_then(parse_commit_att) else {
         return Ok(ring.format < FORMAT);
     };
-    if signer != *sender {
+    let prev = epoch.saturating_sub(1);
+    let was_admin = match ring.adm_log.get(&prev) {
+        Some(set) => set.contains(&hex::encode(sender)),
+        None => ring.role_at(prev, sender) == Some(Role::Admin), // the migrating commit
+    };
+    let pinned = newer
+        .adm_log
+        .get(&epoch)
+        .is_some_and(|adm| att.admins == auth::admins_digest(key, adm))
+        && att.auth == auth::epoch_auth(key, &ring.rid);
+    if att.signer != *sender || !was_admin || !pinned {
         return Ok(false);
     }
-    let pk = charter_sync::cob::peer_key_of(a, &signer).await?;
-    let msg = att_msg(&ring.rid, epoch, body, bx, None);
-    Ok(pk.is_some_and(|pk| verifies(&pk, CTX_COMMIT, &msg, &sig)))
+    let pk = charter_sync::cob::peer_key_of(a, sender).await?;
+    Ok(pk.is_some_and(|pk| auth::commit_signed(&pk, &att, &ring.rid, epoch, body, bx)))
 }
 
 /// Where each epoch held started, from commit rows already read: the earliest row naming

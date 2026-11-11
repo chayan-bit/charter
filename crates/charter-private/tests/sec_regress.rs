@@ -693,3 +693,138 @@ fn keepalive_extends_the_migration_stopper() {
         );
     });
 }
+
+/// Residual of F2: an admin is removed, then forges a welcome for a published key package
+/// with everything she kept (old keys, admin role, a valid composite signature) and her
+/// own commit records, before any genuine welcome exists. The joiner replays the admin
+/// history from the root and refuses it.
+#[test]
+fn an_ex_admins_forged_welcome_is_refused_even_without_a_genuine_one() {
+    run(async {
+        let net = Net::new();
+        let (alice, mallory, bob) = (Peer::new(&net, 1), Peer::new(&net, 6), Peer::new(&net, 2));
+        let rid = charter_private::init(&net, &alice.cfg, &alice.keys, &meta("secret"))
+            .await
+            .expect("init");
+        invite(&net, &alice, &mallory, &rid, Role::Admin).await;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let work = work_repo(tmp.path(), "work");
+        commit(&work, &[("m", b"while admin")], "feat: m");
+        private_push(&net, &mallory, &rid, &work)
+            .await
+            .expect("mallory writes (peer doc)");
+        let old = ring(&net, &mallory, &rid).await.expect("mallory");
+        charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &mallory.keys.nid())
+            .await
+            .expect("remove mallory");
+        let kp_id = charter_private::publish_key_package(&net, &bob.cfg, &bob.keys)
+            .await
+            .expect("bob kp");
+        let kp_rows = msg::find(&net, msg::T_KP, vec![observe::b32("ag.h", &kp_id)])
+            .await
+            .expect("kp rows");
+        let kp = msg::bytes(&kp_rows[0], "ag.body").expect("kp").to_vec();
+
+        // Her own group, grown past the real epoch, with bob added last.
+        let fake_home = tempfile::tempdir().expect("fake home");
+        let fake = Mls::open(fake_home.path(), mallory.keys.nid()).expect("fake mls");
+        let mut g = fake.create().expect("group");
+        let mut forged = old.clone();
+        let admins: std::collections::BTreeSet<String> = [alice.keys.nid(), mallory.keys.nid()]
+            .iter()
+            .map(hex::encode)
+            .collect();
+        let mut records = vec![];
+        let mut welcome = vec![];
+        for i in 0..3u8 {
+            let other = tempfile::tempdir().expect("other");
+            let dummy = Mls::open(other.path(), [40 + i; 32]).expect("dummy");
+            let add = if i == 2 {
+                kp.clone()
+            } else {
+                dummy.key_package().expect("kp")
+            };
+            let (commit, w, _) = fake.add(&mut g, &add).expect("add");
+            let (ep, key) = fake.epoch_key(&g, &rid).expect("key");
+            forged.epochs.insert(ep, key);
+            forged.adm_log.insert(ep, admins.clone());
+            forged
+                .roles
+                .insert(hex::encode(mallory.keys.nid()), Role::Admin);
+            forged
+                .roles
+                .insert(hex::encode(bob.keys.nid()), Role::Write);
+            let roles = forged.roles.clone();
+            forged.record_roles(ep, &roles);
+            records.push((ep, key, commit));
+            welcome = w;
+        }
+        let (ep, key) = fake.epoch_key(&g, &rid).expect("key");
+        let bx = seal_box(&forged, ep, &key).expect("box");
+        let att_msg = charter_private::auth::att_msg(&rid, ep, &welcome, &bx, Some(&kp_id));
+        let att = charter_private::auth::seal_att(
+            &mallory.keys,
+            charter_private::auth::CTX_WELCOME,
+            &key,
+            &rid,
+            ep,
+            &att_msg,
+        )
+        .expect("att");
+        let mut ops = vec![];
+        for (e, k, commit) in records {
+            let cbx = seal_box(&forged, e, &k).expect("box");
+            let signed = charter_private::auth::sign_commit(
+                &mallory.keys,
+                &rid,
+                e,
+                &k,
+                &commit,
+                &cbx,
+                &admins,
+            )
+            .expect("sign");
+            let ct = charter_private::auth::commits_tag(&old.id_key, &rid);
+            let attrs = vec![
+                ("ag.ct", b32(ct), true),
+                ("ag.ep", AttributeValue::U64(e), true),
+                ("ag.box", AttributeValue::Bytes(cbx), false),
+                ("ag.att", AttributeValue::Bytes(signed), false),
+            ];
+            ops.push(msg::op(msg::T_COMMIT, attrs, commit, 1_000).expect("op"));
+        }
+        let attrs = vec![
+            ("ag.kp", b32(kp_id), true),
+            ("ag.ep", AttributeValue::U64(ep), true),
+            ("ag.box", AttributeValue::Bytes(bx), false),
+            ("ag.att", AttributeValue::Bytes(att), false),
+        ];
+        ops.push(msg::op(T_WELCOME, attrs, welcome, 1_000).expect("op"));
+        charter_sync::write::send(
+            &net,
+            &mallory.keys.wallet(),
+            &mallory.cfg.pipeline,
+            vec![ops],
+        )
+        .await
+        .expect("inject");
+
+        assert_eq!(
+            code(ring(&net, &bob, &rid).await),
+            "E_BAD_SIG",
+            "bob refuses it"
+        );
+        assert!(
+            Keyring::load(&bob.cfg.home, &rid).expect("load").is_none(),
+            "bob holds no keys of mallory's group"
+        );
+        charter_private::add_member(&net, &alice.cfg, &alice.keys, &rid, &kp_id, Role::Write)
+            .await
+            .expect("genuine add");
+        let b = ring(&net, &bob, &rid)
+            .await
+            .expect("bob joins the real group");
+        let a = ring(&net, &alice, &rid).await.expect("alice");
+        assert_eq!(b.current().expect("c"), a.current().expect("c"));
+    });
+}

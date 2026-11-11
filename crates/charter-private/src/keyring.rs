@@ -68,9 +68,10 @@ pub struct Keyring {
     /// an extend after that does not drop a head its device has not re-sealed since.
     #[serde(default)]
     pub pinned: BTreeSet<String>,
-    /// Hex nid of a non-root-delegate admin to hex `signer nid || composite signature`.
+    /// The admins (hex nids) of each epoch since format 2, as its committer recorded them;
+    /// each commit's public attestation pins its epoch's set ([`crate::auth::admins_digest`]).
     #[serde(default)]
-    pub certs: BTreeMap<String, String>,
+    pub adm_log: BTreeMap<u64, BTreeSet<String>>,
     /// [`FORMAT`] once a root delegate on 0.5.1 or later wrote a commit.
     #[serde(default)]
     pub format: u32,
@@ -98,7 +99,7 @@ impl Keyring {
             role_log: BTreeMap::new(),
             rotated: BTreeMap::new(),
             pinned: BTreeSet::new(),
-            certs: BTreeMap::new(),
+            adm_log: BTreeMap::new(),
             format: 0,
             group,
         }
@@ -213,7 +214,9 @@ impl Keyring {
         }
         self.pinned.clone_from(&newer.pinned);
         self.roles.clone_from(&newer.roles);
-        self.certs.clone_from(&newer.certs);
+        for (e, a) in &newer.adm_log {
+            self.adm_log.entry(*e).or_insert_with(|| a.clone());
+        }
         self.format = self.format.max(newer.format);
     }
 

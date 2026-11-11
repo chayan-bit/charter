@@ -3,24 +3,24 @@
 //! (docs/p2/private-repos.md "Threat model"):
 //!
 //! - leaf binding: a nid signs its MLS signature key; an admin checks it before an add;
-//! - attestation: the admin who made a commit or welcome signs its bytes and lockbox;
-//! - admin certificate: an admin vouches for a new admin, rooted in the root identity;
+//! - welcome attestation: the admin who made a welcome signs it and its lockbox, sealed;
+//! - commit attestation: the admin who made a commit signs it, its lockbox, a digest of the
+//!   new epoch's admin set and an epoch authenticator, in the clear for anyone holding the
+//!   generation-0 id key, so a joiner can replay who was admin when from the root;
 //! - grant: a root delegate signs a published epoch grant.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use charter_core::{ErrorCode, Hash32, Nid, Rid};
 use charter_crypto::{Alg, PublicKey, Sig};
-use charter_store::Arkiv;
 use charter_sync::{Keys, Result, SyncError};
 
-use crate::keyring::{Keyring, Role};
-use crate::seal::{Key, aad, open, seal};
+use crate::keyring::Role;
+use crate::seal::{Key, aad, blind, open, seal};
 
 pub const CTX_LEAF: &[u8] = b"charter-mls-leaf";
 pub const CTX_COMMIT: &[u8] = b"charter-mls-commit";
 pub const CTX_WELCOME: &[u8] = b"charter-mls-welcome";
-pub const CTX_ADMIN: &[u8] = b"charter-mls-admin";
 pub const CTX_GRANT: &[u8] = b"charter-mls-grant";
 /// AAD kind of the sealed attestation; reserved, so no entity can be sealed under it.
 pub const ATT_KIND: &str = "att";
@@ -97,50 +97,91 @@ pub fn open_att(key: &Key, rid: &Rid, epoch: u64, sealed: &[u8]) -> Option<(Nid,
     Some((nid.try_into().ok()?, sig.to_vec()))
 }
 
-fn cert_msg(rid: &Rid, nid: &Nid) -> Vec<u8> {
-    [rid.as_slice(), nid.as_slice()].concat()
+/// What every member and joiner can recompute for epoch `epoch` with its key: a digest of
+/// its admin set, and an authenticator of the key itself.
+pub fn admins_digest(key: &Key, admins: &BTreeSet<String>) -> Hash32 {
+    let set: Vec<u8> = admins.iter().flat_map(|n| n.bytes()).collect();
+    blind(key, "admins", &set)
 }
 
-/// This admin's certificate for `nid` as a new admin: hex `signer nid || signature`.
-pub fn sign_cert(keys: &Keys, rid: &Rid, nid: &Nid) -> Result<String> {
-    let sig = sign(keys, CTX_ADMIN, &cert_msg(rid, nid))?;
-    Ok(hex::encode([keys.nid().as_slice(), &sig].concat()))
+pub fn epoch_auth(key: &Key, rid: &Rid) -> Hash32 {
+    blind(key, "epoch", rid)
 }
 
-/// Admins whose authority chains to `roots` (the root identity's delegates) through the
-/// certificates in `ring`; looks up each signer's key once.
-pub async fn admins<A: Arkiv>(a: &A, ring: &Keyring, roots: &[Nid]) -> Result<BTreeSet<Nid>> {
-    let mut ok: BTreeSet<Nid> = roots.iter().copied().collect();
-    let certs: BTreeMap<Nid, (Nid, Vec<u8>)> = ring
-        .certs
-        .iter()
-        .filter_map(|(n, c)| {
-            let n: Nid = hex::decode(n).ok()?.try_into().ok()?;
-            let c = hex::decode(c).ok()?;
-            let (signer, sig) = c.split_at_checked(32)?;
-            Some((n, (signer.try_into().ok()?, sig.to_vec())))
-        })
-        .collect();
-    let mut keys: BTreeMap<Nid, Option<PublicKey>> = BTreeMap::new();
-    loop {
-        let mut grew = false;
-        for (n, (signer, sig)) in &certs {
-            if ok.contains(n) || !ok.contains(signer) {
-                continue;
-            }
-            if !keys.contains_key(signer) {
-                keys.insert(*signer, charter_sync::cob::peer_key_of(a, signer).await?);
-            }
-            let pk = keys.get(signer).and_then(Option::as_ref);
-            if pk.is_some_and(|pk| verifies(pk, CTX_ADMIN, &cert_msg(&ring.rid, n), sig)) {
-                ok.insert(*n);
-                grew = true;
-            }
-        }
-        if !grew {
-            return Ok(ok);
-        }
-    }
+/// `ag.ct` of every format-2 commit: found by anyone holding the generation-0 id key (every
+/// member and joiner, checked against the root identity), whatever later generations hold.
+pub fn commits_tag(gen0: &Key, rid: &Rid) -> Hash32 {
+    blind(gen0, "commits", rid)
+}
+
+/// A commit's public attestation (`ag.att`): `signer || admins digest || epoch auth || sig`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitAtt {
+    pub signer: Nid,
+    pub admins: Hash32,
+    pub auth: Hash32,
+    pub sig: Vec<u8>,
+}
+
+fn commit_msg(
+    rid: &Rid,
+    epoch: u64,
+    body: &[u8],
+    lockbox: &[u8],
+    adm: &Hash32,
+    eauth: &Hash32,
+) -> Vec<u8> {
+    [
+        att_msg(rid, epoch, body, lockbox, None),
+        adm.to_vec(),
+        eauth.to_vec(),
+    ]
+    .concat()
+}
+
+/// This admin's public attestation of commit `body` with `lockbox`, making epoch `epoch`
+/// (key `key`) with admin set `admins`.
+pub fn sign_commit(
+    keys: &Keys,
+    rid: &Rid,
+    epoch: u64,
+    key: &Key,
+    body: &[u8],
+    lockbox: &[u8],
+    admins: &BTreeSet<String>,
+) -> Result<Vec<u8>> {
+    let (adm, eauth) = (admins_digest(key, admins), epoch_auth(key, rid));
+    let sig = sign(
+        keys,
+        CTX_COMMIT,
+        &commit_msg(rid, epoch, body, lockbox, &adm, &eauth),
+    )?;
+    Ok([keys.nid().as_slice(), &adm, &eauth, &sig].concat())
+}
+
+pub fn parse_commit_att(b: &[u8]) -> Option<CommitAtt> {
+    let (signer, rest) = b.split_at_checked(32)?;
+    let (adm, rest) = rest.split_at_checked(32)?;
+    let (eauth, sig) = rest.split_at_checked(32)?;
+    Some(CommitAtt {
+        signer: signer.try_into().ok()?,
+        admins: adm.try_into().ok()?,
+        auth: eauth.try_into().ok()?,
+        sig: sig.to_vec(),
+    })
+}
+
+/// Whether `att` is a valid signature by its signer (key `pk`) over that commit row.
+pub fn commit_signed(
+    pk: &PublicKey,
+    att: &CommitAtt,
+    rid: &Rid,
+    epoch: u64,
+    body: &[u8],
+    lockbox: &[u8],
+) -> bool {
+    let msg = commit_msg(rid, epoch, body, lockbox, &att.admins, &att.auth);
+    verifies(pk, CTX_COMMIT, &msg, &att.sig)
 }
 
 /// A published epoch grant: `id_key || key`, signed by a root delegate, with the roles of
