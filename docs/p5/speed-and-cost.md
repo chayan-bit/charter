@@ -268,9 +268,38 @@ Live sanity run of `perf/batch-b` 4e3895d (lanes A, B and C merged, default paci
 | 2 MiB push | 37.0 (content 24.6) | 25.4 (content 18.3) | 0.1530 | 0.1513 |
 
 Both clones match the pusher's `HEAD` and pass `git fsck --full`.
-Small-push gas moves by about 2k either way with the random payload; the first push's manifest tx costs about 6k gas more (+0.09% of the push, seen in 2 of 2 runs) when it lands in the block of its chunks, which the 2 MiB push's manifest does not show; the cause is open.
+Small-push gas moves by about 2k either way with the random payload; the first push's manifest tx costs about 6k gas more (+0.09% of the push, seen in 2 of 2 runs) when it lands in the block of its chunks, which the 2 MiB push's manifest does not show.
+Cause (found 2026-11-11, head-model 13.2): GolemDB charges an index-term create for every term it does not find in the commit the block started from, so a manifest in its chunks' block pays again for terms those chunks create there (a 2 MiB push's chunks span several blocks, so the terms exist by its last batch); format v3 creates the manifest in the head tx instead, a block later.
 
 Format v3 (brotli, lane B) cuts the bytes of source repos by 28 to 35%; once it lands the default gets both faster and cheaper without any pacing, since fewer chunks need fewer blocks and less gas.
+
+### 2.10 Format v3 on Rabdi (2026-11-11, MEASURED)
+
+`perf/batch-b` with format v3 wired (head-model 13) against the installed v0.4.0, interleaved on fresh repos in one session, one wallet, `CHARTER_TRACE=1`.
+Gas is the sum of `gasUsed` over every tx the run's addresses sent, read from receipts block by block (v0.4.0 traces name no tx hashes); every price was 1 gwei except the random 2 MiB pushes, which filled blocks and paid about 1.22 gwei on average (0.201161 tGLM for v0.4.0, 0.185485 for v3).
+Clones ran from empty homes and match the pusher's `HEAD` and pass `git fsck --full --strict`.
+
+| Operation | v0.4.0 s | v3 s | v0.4.0 gas | v3 gas |
+|---|---|---|---|---|
+| first push (200 KB source tree) | 31.2 | 24.8 | 5,837,736 | 4,843,037 |
+| small push (3 runs) | 9.8 / 9.3 / 9.3 | 4.6 / 6.2 / 6.4 | 312,894 / 313,784 / 316,835 | 299,297 / 300,724 / 301,829 |
+| refs-only push | 9.2 | 4.6 | 258,746 | 223,444 |
+| 2 MiB source push (pieces) | 18.8 | 14.3 | 25,596,016 | 19,004,664 |
+| 2 MiB random push (snapshot refresh; v3 adds a layer) | 34.8 | 24.5 | 165,282,443 | 152,506,363 |
+| no-op fetch (3 runs) | 4.8 / 3.5 / 3.7 | 1.7 / 1.1 / 1.2 | 0 | 0 |
+| clone right after a push | 7.3 | 4.0 | 0 | 0 |
+| clone after the pieces expired (3 runs) | 6.8 / 8.3 / 7.1 | 5.8 / 5.4 / 3.8 | 0 | 0 |
+| migration push (v2 repo with 2 carried packs, issue, pinned `ci-gated`) | 11.4 | 5.9 | 280,840 | 263,191 |
+| program fold after it (`chart program status`) | 5.7 | 2.9 | 0 | 0 |
+| private first push | 28.1 | 21.4 | 7,031,349 | 6,904,631 |
+| private small push (3 runs) | 10.3 / 9.5 / 9.7 | 6.5 / 6.0 / 5.9 | 283,907 / 285,827 / 283,931 | 283,919 / 283,919 / 283,871 |
+| private clone | 5.7 | 3.5 | 0 | 0 |
+
+- The migration push compares with the same push by v0.4.0 on an identical repo; it is 4.5% of v0.4.0's first push (5,837,556 gas).
+  After it v0.4.0 stops with `E_UNSUPPORTED_VERSION` on `chart program status` and on `git clone`; v3 clones and fsck pass, the issue op lists, and the fold shows the same state and heads as v0.4.0's fold of the twin repo.
+- Private entities are padded to power-of-two buckets, so a smaller head body only helps across a bucket edge; the private small pushes differ by single zero bytes of ciphertext (12 gas each way, two v0.4.0 inits of identical repos differ by 96 gas).
+- The first push's head tx with its manifest used 1,257,712 gas against 1,370,127 for v0.4.0's manifest tx plus head tx.
+- A v3 reader's cache holds text objects without zlib (4.2 MB against 2.9 MB for this repo); repacking them in the fetch would cost the clone time it saves, so it is not done (head-model 13.3).
 
 ## 3. Proposals for a much larger cut (need the user's decision)
 
