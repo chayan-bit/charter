@@ -157,9 +157,14 @@ impl<A: Arkiv> HeadPush<'_, A> {
 
     /// Steps 1 to 6 end to end.
     pub async fn run(self) -> Result<()> {
+        use charter_store::trace::span;
+        let t = span(|| "push.setup".into());
         let current = self.setup().await?;
+        drop(t);
         let state = State::load(&self.repo.state_path())?;
+        let t = span(|| format!("push.plan reuse_view={current}"));
         let plan = Box::pin(self.plan_from(&state, current)).await?;
+        drop(t);
         if !current {
             // The program check ran on the listing; run it again on the fresh heads.
             let rid = self.rid();
@@ -218,14 +223,33 @@ impl<A: Arkiv> HeadPush<'_, A> {
 
     /// Sends what `plan` says, re-checks and commits.
     pub async fn finish(self, plan: Plan) -> Result<()> {
+        use charter_store::trace::span;
         let mut state = State::load(&self.repo.state_path())?;
         // Boxed: these futures are large, and tests poll them on 2 MiB threads.
+        let t = span(|| {
+            format!(
+                "push.content snapshot={} thin={}",
+                plan.snapshot,
+                plan.thin.len()
+            )
+        });
         let content = Box::pin(self.content(&plan)).await?;
+        drop(t);
+        let t = span(|| {
+            format!(
+                "push.send_heads inline={}",
+                content.inline.iter().map(Vec::len).sum::<usize>()
+            )
+        });
         let landed = Box::pin(self.send_heads(&plan, &content, &mut state)).await?;
+        drop(t);
+        let t = span(|| "push.recheck".into());
         let v2 = Box::pin(self.own_v2(&state))
             .await?
             .ok_or_else(|| SyncError::coded(ErrorCode::Internal, "own heads vanished"))?;
         self.recheck(&v2)?;
+        drop(t);
+        let _t = span(|| "push.commit".into());
         self.commit(&v2, &content, landed, &mut state)
     }
 

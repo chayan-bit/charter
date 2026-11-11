@@ -188,7 +188,7 @@ impl RpcArkiv {
             cfg,
             id: AtomicU64::new(1),
             verified_chain: AtomicU64::new(0),
-            trace: std::env::var_os("CHARTER_TRACE").is_some_and(|v| !v.is_empty()),
+            trace: crate::trace::enabled(),
             quota: Arc::default(),
         };
         let got = me.chain_id().await?;
@@ -207,6 +207,7 @@ impl RpcArkiv {
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let mut waited = Duration::ZERO;
         let started = std::time::Instant::now();
+        let start_unix = crate::trace::unix_ms();
         // Sends are not retried here: the tx pipeline owns resends and nonce recovery.
         let mut retries = if method == "eth_sendRawTransaction" {
             0
@@ -265,9 +266,12 @@ impl RpcArkiv {
             }
             if self.trace {
                 eprintln!(
-                    "chart-trace: {method} {} ms {} B {version:?}",
+                    "chart-trace: rpc {method} @{} {} ms {} B {version:?} req {} B{}",
+                    start_unix,
                     started.elapsed().as_millis(),
-                    text.len()
+                    text.len(),
+                    body.to_string().len(),
+                    trace_detail(method, &body["params"], &text),
                 );
             }
             let mut j: Json = serde_json::from_str(&text)
@@ -287,6 +291,18 @@ impl RpcArkiv {
             eprintln!("chart-trace: {method} dropped ({e}), retrying in {wait:?}");
         }
         tokio::time::sleep(wait).await;
+    }
+}
+
+/// Trace suffix: the query text of `arkiv_query`, the hash of a send.
+fn trace_detail(method: &str, params: &Json, text: &str) -> String {
+    match method {
+        "arkiv_query" => {
+            let q = params[0].as_str().unwrap_or_default();
+            format!(" q={:?}", q.chars().take(160).collect::<String>())
+        }
+        "eth_sendRawTransaction" => format!(" res={}", text.chars().take(140).collect::<String>()),
+        _ => String::new(),
     }
 }
 

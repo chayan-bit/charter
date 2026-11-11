@@ -23,6 +23,7 @@ mod query;
 pub mod quota;
 pub mod rpc;
 mod shape;
+pub mod trace;
 mod tx;
 
 pub use error::StoreError;

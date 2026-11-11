@@ -16,15 +16,26 @@ use crate::{Result, SyncError, packs, warn};
 
 /// Runs the fetch sync for `repo`; returns the verified view it committed.
 pub async fn sync<A: Arkiv>(a: &A, repo: &Repo, want: &Want) -> Result<View> {
+    use charter_store::trace::span;
+    let _t = span(|| "sync".into());
     let mut state = State::load(&repo.state_path())?;
+    let t = span(|| "sync.view".into());
     let mut view = view::build(a, &repo.rid, &state, want).await?;
+    drop(t);
     warn_expiry(&view);
     let must: BTreeSet<Nid> = view.delegates().iter().chain(&want.must).copied().collect();
+    let t = span(|| "sync.download".into());
     let applied = apply_all(a, repo, &mut view, &state, &must).await?;
+    drop(t);
+    let t = span(|| "sync.checks".into());
     check_connected(repo, &mut view, &must)?;
     check_bases(repo, &mut view, &must)?;
+    drop(t);
     // After the packs are in the cache, so the program sees real git ancestry.
+    let t = span(|| "sync.program".into());
     view.program = crate::program::enforce(a, &view, repo.git()).await?;
+    drop(t);
+    let _c = span(|| "sync.commit".into());
     commit(repo, &view, &mut state, applied)?;
     Ok(view)
 }

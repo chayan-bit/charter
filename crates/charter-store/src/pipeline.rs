@@ -323,6 +323,13 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         &mut self,
         mut queue: VecDeque<(usize, Job)>,
     ) -> Result<Vec<Landed>, StoreError> {
+        let _t = crate::trace::span(|| {
+            format!(
+                "pipeline.drive from={} jobs={}",
+                self.address(),
+                queue.len()
+            )
+        });
         let (mut inflight, mut done) = (Vec::new(), Vec::new());
         loop {
             if self.abort.is_none() {
@@ -347,6 +354,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
     /// else one poll interval. The socket is opened on the first wait, which returns at
     /// once so a block announced during the handshake is not missed.
     async fn wait(&mut self) {
+        let _t = crate::trace::span(|| format!("pipeline.wait ws={}", self.heads.is_some()));
         if self.cfg.use_heads && self.heads.is_none() && !self.heads_off {
             match self.arkiv.heads_ws() {
                 Some(ws) => match tokio::time::timeout(HEAD_WAIT, heads::subscribe(&ws)).await {

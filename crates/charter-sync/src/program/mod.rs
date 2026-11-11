@@ -566,7 +566,7 @@ pub async fn enforce<A: Arkiv>(a: &A, view: &View, git: &Git) -> Result<Option<E
     };
     let (cached, started) = (load_checkpoint(git), std::time::Instant::now());
     (e.outcome, e.checkpoint) = fold(&e, vec![], git, cached.as_ref())?;
-    if std::env::var_os("CHARTER_TRACE").is_some_and(|v| !v.is_empty()) {
+    if charter_store::trace::enabled() {
         eprintln!(
             "chart-trace: fold {} events (checkpoint had {:?}) {} ms",
             e.events.len(),

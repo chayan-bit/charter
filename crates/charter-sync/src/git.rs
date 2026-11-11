@@ -101,6 +101,12 @@ impl Git {
 
     /// Runs git with `stdin`, returns stdout; a non-zero exit is an error with stderr.
     pub fn run(&self, args: &[&str], stdin: &[u8]) -> Result<Vec<u8>> {
+        let _t = charter_store::trace::span(|| {
+            format!(
+                "git {}",
+                args.join(" ").chars().take(80).collect::<String>()
+            )
+        });
         let mut child = self
             .command(args)
             .stdin(Stdio::piped())
@@ -127,6 +133,12 @@ impl Git {
 
     /// The exit code of `git <args>` (no stdin, output dropped); `None` if killed by a signal.
     pub fn exit_code(&self, args: &[&str]) -> Result<Option<i32>> {
+        let _t = charter_store::trace::span(|| {
+            format!(
+                "git {}",
+                args.join(" ").chars().take(80).collect::<String>()
+            )
+        });
         let status = self
             .command(args)
             .stdin(Stdio::null())
@@ -158,6 +170,12 @@ impl Git {
 
     /// `git <args>` with a file as stdin.
     pub fn run_with_file(&self, args: &[&str], file: &Path) -> Result<Vec<u8>> {
+        let _t = charter_store::trace::span(|| {
+            format!(
+                "git {}",
+                args.join(" ").chars().take(80).collect::<String>()
+            )
+        });
         let f = std::fs::File::open(file).map_err(|e| SyncError::io(file.display(), e))?;
         let out = self
             .command(args)

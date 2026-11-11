@@ -24,6 +24,7 @@ pub struct Signed {
 }
 
 pub fn sign<B: Body>(sk: &SecretKey, body: &B) -> Result<Signed> {
+    let _t = charter_store::trace::span(|| format!("sign {:?}", B::KIND));
     let env = Envelope::sign(sk, B::KIND, body.encode())?;
     let bytes = env.encode();
     Ok(Signed {
