@@ -69,7 +69,7 @@ Members read commits in Arkiv order and apply the one for the next epoch only if
 Roles are `admin | write | read`, kept in the sealed keyring and keyed by nid, with one entry per epoch in which they changed (`Keyring::role_log`).
 Only admins add or remove members, and only root delegates publish epoch keys; write is needed to push.
 The CLI refuses with `E_ROLE_DENIED`, and readers apply the same rules to what they read (see "Threat model").
-The MLS credential is a basic credential naming the nid, and it is bound to the nid's composite key by the leaf binding.
+The MLS credential is a basic credential naming the nid and the device (`nid || device`, the head-model device nid of the machine that made the key package), and it is bound to the nid's composite key by the leaf binding.
 
 ## Threat model
 
@@ -123,9 +123,22 @@ A removal removes every MLS leaf whose credential names the nid, not only the fi
 `chart member list` prints how many devices each member has.
 A second leaf for a nid that already holds a role is added only by `chart member add --device`, never by a plain add.
 
+### Revoked devices (head-model 15.7)
+
+Every leaf names its device, so a device revoke (`chart device revoke`, docs/p5/head-model.md section 15) names exactly one leaf.
+When an admin's client refreshes the group (every private-repo command and every push, fetch and clone does), it reads the repo's revoke records in the same query as the commits.
+For each record signed by a leaf's member, for this repo, that names the leaf's device, it commits the removal of that leaf, which rotates the epoch key and the id-key generation as a member removal does; the member keeps its role and its other devices.
+An admin whose own device is revoked has that removal made by its remaining device, and a client whose own device is revoked removes nothing.
+Two admins may both remove the same leaf: each checks after landing whether its commit is the first for that epoch signed by an admin of the epoch before, and the one that is not undoes its commit and applies the other (first commit wins), so the group makes exactly one removal.
+From the revoke on, the device's later heads are ignored by every reader (head-model 15.2), so what it writes after the cut is refused before the removal lands.
+What it can still do is decrypt: every row sealed before the removal commit lands, which is until an admin's client next syncs the repo plus one commit tx.
+`chart device revoke` removes the leaf at once when the revoking identity is an admin, and otherwise says how long this gap lasts.
+The revoke record lives as long as other control rows (`control_lifetime`), so the removal must happen within that time.
+Leaves made before 0.6.0 name no device: a revoke cannot find them, `chart member list` marks them, and the fix is to remove the member (`chart member remove`) and add its remaining devices again (`chart member keypackage` on each, then `chart member add` and `chart member add --device`).
+
 ### Key package claims (F5)
 
-A key package names a nid, its composite public key and a signature by that key over the MLS signature key, and an admin refuses one whose binding does not verify (`E_BAD_SIG`).
+A key package names a nid, its device, its composite public key and a signature by that key over the MLS signature key, the nid and the device (context `charter-mls-leaf-device`), and an admin refuses one whose binding does not verify (`E_BAD_SIG`), or that names no device (made before 0.6.0).
 A plain add of a key package whose nid already holds a role is refused (`E_BAD_FORMAT`), so an add can never demote an admin or add a hidden device.
 
 ### Published grants (F7, N2)
@@ -177,7 +190,8 @@ A grant reader on a migrated repo needs 0.5.1 as well.
 `init(a, cfg, keys, meta) -> rid` creates the repo with the caller as sole delegate and admin, in format 2.
 `publish_key_package(a, cfg, keys) -> id` publishes a key package with its leaf binding.
 `add_member(a, cfg, keys, rid, kp_id, role) -> nid`, `add_device(a, cfg, keys, rid, kp_id) -> nid` and `remove_member(a, cfg, keys, rid, nid)` issue commits.
-`members(home, rid) -> (epoch, [(nid, role, devices)])` lists the current members.
+`members(home, rid) -> (epoch, [(nid, role, devices, devices made before 0.6.0)])` lists the current members.
+`revoked::leaf_state(a, cfg, keys, rid, device)` refreshes the group and says whether a leaf still names the device.
 `refresh` and `ring_for` bring a member's keyring up to date, joining from a welcome when needed, and return `E_NOT_MEMBER` for a private repo the caller cannot read.
 `publish_epoch_key(a, cfg, keys, rid, epoch) -> grant` publishes one epoch's signed grant in plaintext, so anyone who knows the rid can read what was sealed in that epoch, and nothing else (sponsorware, source escrow).
 `publish_epoch_keys(a, cfg, keys, rid, range) -> [grant]` publishes one grant per epoch of a range, one tx each.
@@ -191,7 +205,7 @@ Repo programs are expected to call these through obligations later.
 `chart member add --repo R --key-package <id> --role write` adds a member.
 `chart member add --repo R --key-package <id> --device` adds another device of an existing member.
 `chart member remove --repo R --member <nid>` removes a member and all its devices.
-`chart member list --repo R` prints nids, roles and device counts.
+`chart member list --repo R` prints nids, roles and device counts, and how many devices of each member predate device binding.
 `git push` and `git clone arkiv::<rid>` on a private repo work for members (a new member joins on first use) and fail with `E_NOT_MEMBER` for anyone else.
 
 ## Unsealed-write guard and local permissions
@@ -227,6 +241,8 @@ Each commit applied costs one peer-key lookup for its signer, and a refresh quer
 A grant reader saves one query (the `group` and `pub` lookups are merged) and spends it on one commit list, attested and legacy rows together, that serves both its history check and admission.
 Its chain check looks up the key of each committing admin that signed no grant (none when, as usual, the root delegate both commits and publishes) and checks one commit signature per epoch on the chain.
 A removed member's refresh also looks for a re-add's welcome, one query per key package it published.
+The refresh's commit query also returns the repo's device records (delegations and revokes), so finding a pending revoke costs no query.
+Only an admin with a revoke naming a leaf still in the group pays more: one peer-key lookup per revoking identity, the add and remove path's queries, one commit tx, and one commit query to see which admin's removal landed first.
 Each attestation and signed grant costs one composite signature to make and one to check, and a join checks one commit signature per epoch it replays.
 Each commit and welcome grows by an attestation (about 3.4 KB), and the welcome's lockbox by a few bytes per role change, admin set, commit and pinned head.
 A commit's lockbox no longer grows with history: with 1 to 9 members it is 1,068 to 2,092 B, against 2,092 to 4,140 B for the full keyring, so each commit row is 1,024 to 2,048 B smaller in the box.
