@@ -140,8 +140,9 @@ async fn a_small_push_sends_its_head_patch_without_an_estimate_or_a_tx_lookup() 
     .expect("prepare");
     counting.reset();
     Box::pin(hp.run()).await.expect("small push");
-    // Setup, plan (with entityNonce), send, the receipt poll, and the re-check.
-    assert!(counting.rounds() <= 9, "{} round trips", counting.rounds());
+    // Setup, plan (with entityNonce), send, the receipt poll, and the 3-round re-check;
+    // The 5-round re-check made it 9.
+    assert!(counting.rounds() <= 6, "{} round trips", counting.rounds());
     assert_eq!(
         counting.count("estimate"),
         0,

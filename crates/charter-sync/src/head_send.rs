@@ -7,19 +7,19 @@ use std::time::Duration;
 
 use charter_core::{
     Body, DeviceBody, ErrorCode, Hash32, HeadBody, HeadPack, ManifestBody, PieceRef, ZERO,
-    chunk_count, entity_attributes, resolve_stamps,
+    chunk_count, entity_attributes, is_device_row, resolve_stamps,
 };
 use charter_store::{Arkiv, Operation, U256, create_op_flags, patch_op, random_salt};
 
 use crate::head_push::{HeadPush, INLINE_MAX, Plan};
-use crate::heads::{LANDING_WINDOW, V2};
+use crate::heads::{self, LANDING_WINDOW, V2};
 use crate::ids::hex32;
 use crate::pieces::{PIECE_SIZE, piece_op};
 use crate::push_send::{Cost, first_write_ops};
 use crate::repo::staging;
 use crate::state::{LandingJson, State};
 use crate::write::{self, chunk_op, entity_op, sign, wire};
-use crate::{Result, SyncError, packs, warn};
+use crate::{Result, SyncError, packs, view, warn};
 
 /// Creation flags of a head: `permissionlessExtension`, not readonly, so `C_d` can patch it.
 const HEAD_FLAGS: u8 = 2;
@@ -305,7 +305,7 @@ impl<A: Arkiv> HeadPush<'_, A> {
         let landed = Box::pin(self.send_heads(&plan, &content, pre, &mut state)).await?;
         drop(t);
         let t = span(|| "push.recheck".into());
-        let v2 = Box::pin(self.own_v2(&state))
+        let v2 = Box::pin(self.fresh_v2(&state))
             .await?
             .ok_or_else(|| SyncError::coded(ErrorCode::Internal, "own heads vanished"))?;
         self.recheck(&v2)?;
@@ -667,6 +667,63 @@ impl<A: Arkiv> HeadPush<'_, A> {
             ErrorCode::Rpc,
             "head txs keep landing late; push again",
         ))
+    }
+
+    /// This identity's v2 view read fresh after the head tx, like `own_v2` but in 3 round
+    /// trips instead of 5: the peer and anchor queries run alongside a `heads::build`
+    /// started from the peer info and device rows the sync verified, whose result is kept
+    /// only if the fresh reads return exactly those inputs (else it is built again).
+    async fn fresh_v2(&self, state: &State) -> Result<Option<V2>> {
+        let (rid, nid) = (self.rid(), self.nid());
+        let Some(pv) = self.view.peers.get(&nid) else {
+            return self.own_v2(state).await;
+        };
+        let rows: Vec<_> = pv
+            .anchors
+            .iter()
+            .filter(|o| is_device_row(o))
+            .cloned()
+            .collect();
+        if rows.is_empty() {
+            return self.own_v2(state).await;
+        }
+        let fresh = async {
+            let Some(info) = view::resolve_peer(self.a, &rid, &nid).await? else {
+                return Ok(None);
+            };
+            let rows = view::anchors(self.a, &rid, &nid, &info).await?;
+            let rows: Vec<_> = rows.into_iter().filter(is_device_row).collect();
+            Ok::<_, SyncError>(Some((info, rows)))
+        };
+        let early = heads::build(
+            self.a,
+            &rid,
+            &nid,
+            &pv.info,
+            &self.view.identity,
+            &rows,
+            state,
+        );
+        let (fresh, early) = futures_util::future::join(fresh, Box::pin(early)).await;
+        let Some((info, fresh_rows)) = fresh? else {
+            return Ok(None);
+        };
+        if fresh_rows.is_empty() {
+            return Ok(None);
+        }
+        if info.binds == pv.info.binds && fresh_rows == rows {
+            return early.map(Some);
+        }
+        let v2 = heads::build(
+            self.a,
+            &rid,
+            &nid,
+            &info,
+            &self.view.identity,
+            &fresh_rows,
+            state,
+        );
+        Ok(Some(Box::pin(v2).await?))
     }
 
     /// Whether this device's head, read inside one `entityNonce` bracket at `nonce`, is
