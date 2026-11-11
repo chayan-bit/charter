@@ -11,6 +11,8 @@
 #                        or ~/.cache/arkiv-ci if only that pre-rename cache exists)
 #      CHARTER_CI_INTERVAL  seconds between rounds without --once (default: 60)
 set -euo pipefail
+# The cache holds clones of possibly private repos and their test logs: owner only.
+umask 077
 # shellcheck source=scripts/chart-lib.sh
 . "$(dirname "$0")/chart-lib.sh"
 

@@ -146,7 +146,7 @@ pub async fn download_pieces<A: Arkiv>(
     }
     let bytes = charter_core::codec::decode(pack.codec, &stored, MAX_PACK_SIZE)
         .map_err(|e| bad_pack(&pack.pack_id, &e.to_string()))?;
-    std::fs::write(out, &bytes).map_err(|e| SyncError::io(out.display(), e))
+    crate::repo::write_owner_only(out, &bytes)
 }
 
 async fn v2_bytes<A: Arkiv>(

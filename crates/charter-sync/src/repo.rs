@@ -146,11 +146,43 @@ impl Repo {
     }
 }
 
-/// Creates the layout of `rid` under `home` and opens (without locking) its lock file.
+/// Creates `d` and makes it owner-only: `$CHARTER_HOME` and a repo's cache hold the
+/// decrypted objects and packs of private repos.
+fn owner_only_dir(d: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(d).map_err(|e| SyncError::io(d.display(), e))?;
+    std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| SyncError::io(d.display(), e))
+}
+
+/// Creates (or truncates) `p` with mode 0600: packs of a private repo are plaintext here.
+pub fn create_owner_only(p: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(p)
+        .map_err(|e| SyncError::io(p.display(), e))
+}
+
+/// [`std::fs::write`] through [`create_owner_only`].
+pub fn write_owner_only(p: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    create_owner_only(p)?
+        .write_all(bytes)
+        .map_err(|e| SyncError::io(p.display(), e))
+}
+
+/// Creates the layout of `rid` under `home` (owner-only, tightening an existing home) and
+/// opens (without locking) its lock file.
 fn lock_file(home: &Path, rid: &Rid) -> Result<(PathBuf, std::fs::File)> {
-    let dir = home.join("repos").join(hex32(rid));
-    for d in [dir.join("outgoing"), dir.join("tmp")] {
-        std::fs::create_dir_all(&d).map_err(|e| SyncError::io(d.display(), e))?;
+    let repos = home.join("repos");
+    let dir = repos.join(hex32(rid));
+    let (outgoing, tmp) = (dir.join("outgoing"), dir.join("tmp"));
+    for d in [home, &repos, &dir, &outgoing, &tmp] {
+        owner_only_dir(d)?;
     }
     let lock_path = dir.join("lock");
     let lock = std::fs::OpenOptions::new()
