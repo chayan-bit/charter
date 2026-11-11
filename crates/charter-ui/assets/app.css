@@ -63,6 +63,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .muted, .dim { color: var(--ink-3); }
 .small { font-size: var(--t-sm); }
 .num { font-variant-numeric: tabular-nums; }
+/* An amount in a column: fixed decimals per unit, aligned on a unit slot as wide as "tGLM". */
+.amtc { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.amtc .u { display: inline-block; width: 4ch; text-align: left; }
 .nw { white-space: nowrap; }
 .grow { flex: 1; }
 .js { display: none !important; } html.has-js .js { display: inline-flex !important; }
@@ -400,8 +403,8 @@ x-f { color: var(--sx-f); } x-t { color: var(--sx-t); } x-o { color: var(--ink-2
 .cd details > summary { cursor: pointer; font-size: 14px; font-weight: 600; color: var(--ink-2); width: fit-content; }
 .receipt { margin-top: 10px; font: 12.5px/1.7 var(--f-mono); color: var(--ink-2); }
 .receipt li { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px dashed var(--rule); }
-.receipt li span:first-child { flex: none; }
-.receipt li span:last-child { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.receipt li > span:first-child { flex: none; }
+.receipt li > span:last-child { min-width: 0; text-align: right; overflow-wrap: anywhere; }
 .receipt li.tot { font-weight: 500; color: var(--ink); border-bottom: 0; }
 .cd details pre { margin-top: 8px; padding: 10px 12px; max-height: 220px; overflow: auto; background: var(--tone); border-radius: var(--r-ctl); font-size: 12px; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .cd-actions { display: flex; gap: 10px; justify-content: flex-end; }

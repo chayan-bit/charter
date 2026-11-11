@@ -46,8 +46,8 @@ pub struct Confirm {
     pub takes: String,
     /// `about 6 months`.
     pub kept: String,
-    /// Breakdown lines: `(label, value, exact value or empty)`; the last is the total.
-    pub receipt: Vec<(&'static str, String, String)>,
+    /// Breakdown lines: `(label, text, or an amount for the column)`; the last is the total.
+    pub receipt: Vec<(&'static str, String, Option<Amount>)>,
     /// The balance cannot cover it: Send is disabled.
     pub short_of: Option<String>,
     /// The RPC refused or nearly ran out of quota: Send is disabled until it resets.
@@ -166,26 +166,29 @@ fn top_up(e: &Estimate) -> String {
     )
 }
 
-/// A receipt line of one amount, with its exact value for the tooltip.
-fn money(label: &'static str, a: Amount) -> (&'static str, String, String) {
-    (label, a.to_string(), a.exact)
-}
-
 /// The dialog of a priced draft.
 fn dialog(app: &App, l: Layout, head: Head, id: String, d: &Draft, e: &Estimate) -> Confirm {
     let need = e.cost + e.value;
     let most = amount(need, true);
     let (q, verb) = ask(&d.label);
     let mut receipt = vec![
-        ("Transactions", e.txs.to_string(), String::new()),
-        ("Records", e.entities.to_string(), String::new()),
-        ("Wallet top-up", top_up(e), String::new()),
-        money("Network fees, at most", amount(e.cost, true)),
+        ("Transactions", e.txs.to_string(), None),
+        ("Records", e.entities.to_string(), None),
+        ("Wallet top-up", top_up(e), None),
+        (
+            "Network fees, at most",
+            String::new(),
+            Some(amount(e.cost, true)),
+        ),
     ];
     if e.value > U256::ZERO {
-        receipt.push(money("Paid into escrow", amount(e.value, true)));
+        receipt.push((
+            "Paid into escrow",
+            String::new(),
+            Some(amount(e.value, true)),
+        ));
     }
-    receipt.push(money("Total, at most", amount(need, true)));
+    receipt.push(("Total, at most", String::new(), Some(amount(need, true))));
     let short_of = (e.balance < need).then(|| {
         format!(
             "Your wallet holds {} and this may cost up to {most}. Nothing was spent. \

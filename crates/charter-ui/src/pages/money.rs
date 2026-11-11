@@ -30,6 +30,19 @@ const GWEI: u64 = 1_000_000_000;
 /// 0.0001 tGLM.
 const SMALL: u64 = 100_000_000_000_000;
 
+impl Amount {
+    /// The number padded for a column: four decimals for tGLM and gwei, none for wei.
+    pub fn fixed(&self) -> String {
+        match self.unit {
+            "tGLM" | "gwei" => {
+                let (int, frac) = self.num.split_once('.').unwrap_or((&self.num, ""));
+                format!("{int}.{frac:0<4}")
+            }
+            _ => self.num.clone(),
+        }
+    }
+}
+
 /// `wei` in `scale`-wei units, at most four decimals with trailing zeros dropped, rounded up
 /// (a most-you-pay or a cost) or down (a balance).
 fn decimals(wei: U256, scale: U256, up: bool) -> String {
@@ -104,5 +117,16 @@ mod tests {
         );
         assert_eq!(glm("\"5\"").to_string(), "5 wei");
         assert_eq!(glm("fixed").to_string(), "fixed");
+    }
+
+    #[test]
+    fn columns_pad_tglm_and_gwei_to_four_decimals() {
+        let col = |wei: u128| amount(U256::from(wei), true).fixed();
+        assert_eq!(col(3_000_000_000_000_000), "0.0030");
+        assert_eq!(col(13_900_000_000_000_000), "0.0139");
+        assert_eq!(col(5_000_000_000_000_000_000), "5.0000");
+        assert_eq!(col(0), "0.0000");
+        assert_eq!(col(1_500_000_000), "1.5000");
+        assert_eq!(col(5), "5");
     }
 }

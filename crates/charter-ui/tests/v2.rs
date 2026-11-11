@@ -433,6 +433,13 @@ async fn the_dialog_shows_wallet_now_and_after_and_a_confirmed_write_is_in_the_l
         t.contains("Spent from this computer") && t.contains(">bobs<"),
         "{t}"
     );
+    // The ledger's cost column pads to four decimals; the sentence above it keeps the short form.
+    let cell = t.split("<span class=\"amtc\"").nth(1).expect("a cost cell");
+    let num = cell
+        .split_once("\">")
+        .and_then(|(_, r)| r.split_once(" <span class=\"u\">tGLM"));
+    let num = num.map(|(n, _)| n).expect("cost and unit");
+    assert_eq!(num.split_once('.').map(|(_, f)| f.len()), Some(4), "{num}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

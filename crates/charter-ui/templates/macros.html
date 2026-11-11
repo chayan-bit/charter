@@ -1,4 +1,5 @@
 {% macro bytes(n) %}{% if n < 1024 %}{{ n }} B{% else if n < 1048576 %}{{ n / 1024 }}.{{ n % 1024 * 10 / 1024 }} KB{% else %}{{ n / 1048576 }}.{{ n % 1048576 * 10 / 1048576 }} MB{% endif %}{% endmacro %}
 {% macro refname(n) %}{% for s in n.trim_start_matches("refs/heads/").trim_start_matches("refs/tags/").split("/") %}{% if !loop.first %}/<wbr>{% endif %}{{ s }}{% endfor %}{% endmacro %}
 {% macro amt(a) %}<span title="{{ a.exact }}">{{ a }}</span>{% endmacro %}
+{% macro amtcol(a) %}<span class="amtc" title="{{ a.exact }}">{{ a.fixed() }} <span class="u">{{ a.unit }}</span></span>{% endmacro %}
 {% macro i(v, name) %}<svg class="i" aria-hidden="true"><use href="/assets/icons.svg?v={{ v }}#i-{{ name }}"/></svg>{% endmacro %}

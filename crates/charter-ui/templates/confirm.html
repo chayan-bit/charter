@@ -21,7 +21,7 @@
 <div><dt>Kept for</dt><dd class="tx">{{ kept }}, then it needs a renewal</dd></div>
 </dl>
 <details><summary>Breakdown and what will be signed</summary>
-<ul class="receipt">{% for (k, v, x) in receipt %}<li{% if loop.last %} class="tot"{% endif %}><span>{{ k }}</span><span{% if !x.is_empty() %} title="{{ x }}"{% endif %}>{{ v }}</span></li>{% endfor %}</ul>
+<ul class="receipt">{% for (k, v, x) in receipt %}<li{% if loop.last %} class="tot"{% endif %}><span>{{ k }}</span><span>{% if let Some(a) = x %}{{ m::amtcol(a) }}{% else %}{{ v }}{% endif %}</span></li>{% endfor %}</ul>
 {% for (h, p) in ops %}<p class="small sec"><code>{{ h }}</code></p>{% if !p.is_empty() %}<pre>{{ p }}</pre>{% endif %}{% endfor %}
 </details>
 <form method="post" action="/r/{{ r.hex }}/write/{{ id }}" class="cd-actions" data-confirm>

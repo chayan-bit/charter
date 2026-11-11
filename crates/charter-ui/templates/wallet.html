@@ -24,7 +24,7 @@
 <div class="tblwrap"><table class="tbl">
 <thead><tr><th>When</th><th>What</th><th>Repo</th><th class="r">Cost</th></tr></thead>
 <tbody>
-{% for x in rows %}<tr><td class="nw"><time title="{{ x.stamp }}">{{ x.when }}</time></td><td>{{ x.action }}{% if x.skipped %} <span class="tag">no dialog</span>{% endif %}</td><td><a href="/r/{{ x.hex }}">{{ x.repo }}</a></td><td class="r nw mono">{% if x.estimated %}up to {% endif %}{{ m::amt(x.cost) }}{% if let Some(v) = x.value %}<br><span class="muted">+ {{ m::amt(v) }} to escrow</span>{% endif %}</td></tr>
+{% for x in rows %}<tr><td class="nw"><time title="{{ x.stamp }}">{{ x.when }}</time></td><td>{{ x.action }}{% if x.skipped %} <span class="tag">no dialog</span>{% endif %}</td><td><a href="/r/{{ x.hex }}">{{ x.repo }}</a></td><td class="r nw mono">{% if x.estimated %}up to {% endif %}{{ m::amtcol(x.cost) }}{% if let Some(v) = x.value %}<br><span class="muted">+ {{ m::amt(v) }} to escrow</span>{% endif %}</td></tr>
 {% endfor %}
 </tbody></table></div>
 {% endif %}
