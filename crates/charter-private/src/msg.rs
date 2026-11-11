@@ -27,7 +27,7 @@ pub const T_PUB: &str = "pub";
 pub const BOX_KIND: &str = "box";
 /// `ag.t` of the migration stopper.
 pub const T_STOP: &str = "stop";
-/// `ag.v` of the stopper: no client supports it, so a pre-0.5.1 client fails closed.
+/// `ag.v` of the stopper: no client supports it, so a pre-0.6.0 client fails closed.
 pub const STOP_V: u64 = 0x5354_4f50;
 
 /// Public handle of a private repo for anyone who knows its rid.
@@ -58,8 +58,8 @@ pub fn rid_pred(ring: &Keyring) -> Pred {
 
 /// The migration stopper: an identity row under the generation-0 blinded rid with an
 /// `ag.v` no client supports. Sent from a root delegate's control address, it makes a
-/// pre-0.5.1 member fail with `E_UNSUPPORTED_VERSION` instead of reading a repo whose
-/// commits it can no longer verify; 0.5.1 drops it before core sees it.
+/// pre-0.6.0 member fail with `E_UNSUPPORTED_VERSION` instead of reading a repo whose
+/// commits it can no longer verify; 0.6.0 drops it before core sees it.
 pub fn stop_op(ring: &Keyring, lifetime: u64) -> Result<Operation> {
     let attrs = [
         ("ag.kind", AttributeValue::Str(Kind::Id.name().into()), true),

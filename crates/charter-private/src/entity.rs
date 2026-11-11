@@ -256,7 +256,7 @@ pub fn open_row_unchecked(ring: &Keyring, row: EntityData) -> EntityData {
     try_open(ring, &row, false).unwrap_or(row)
 }
 
-/// The migration stopper ([`crate::msg::stop_op`]): only pre-0.5.1 clients must see it.
+/// The migration stopper ([`crate::msg::stop_op`]): only pre-0.6.0 clients must see it.
 pub fn is_stopper(row: &EntityData) -> bool {
     entry(row, "ag.t") == Some(T_STOP)
         && entry(row, "ag.kind") == Some("id")

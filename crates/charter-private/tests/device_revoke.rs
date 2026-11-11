@@ -1,7 +1,9 @@
-//! A revoked device of a private repo (docs/p5/head-model.md 15.7): an admin's client
-//! removes its MLS leaf on its next sync, so it cannot open the next epoch while the
-//! member's other devices can; two admins racing make one removal; and the device's writes
-//! after the cut are refused before the removal lands.
+//! A revoked device of a private repo (docs/p5/head-model.md 15.7): a sync only counts its
+//! leaf and never sends; an admin's explicit removal ([`charter_private::revoked`]) takes
+//! the leaf out, so the device cannot open the next epoch while the member's other devices
+//! can; two admins racing make one removal, and two removals or refreshes at once from one
+//! admin home leave it in the group; the device's writes after the cut are refused before
+//! the removal lands; and a revoke a stolen device makes removes nothing on its own.
 
 mod common;
 
@@ -108,16 +110,33 @@ fn current(r: &charter_private::Keyring) -> u64 {
     r.current().expect("current").0
 }
 
+async fn remove_revoked(net: &Net, p: &Peer, rid: &Rid) -> usize {
+    charter_private::revoked::remove_revoked(net, &p.cfg, &p.keys, rid)
+        .await
+        .expect("remove revoked")
+}
+
 #[test]
-fn an_admins_sync_removes_the_revoked_leaf_and_the_device_cannot_open_the_next_epoch() {
+fn a_sync_only_counts_the_revoked_leaf_and_an_admins_removal_shuts_the_device_out() {
     run(async {
         let w = world().await;
         let (net, rid) = (&w.net, &w.rid);
         let e0 = current(&ring(net, &w.alice, rid).await.expect("alice"));
         revoke_laptop(net, &w.bob, &w.laptop, rid).await;
 
+        let ctl = w.alice.keys.control_address(rid);
+        let sent = net.tx_count(ctl).await.expect("n");
         let a = ring(net, &w.alice, rid).await.expect("alice syncs");
-        assert_eq!(current(&a), e0 + 1, "the admin's sync removed the leaf");
+        assert_eq!(current(&a), e0, "a sync sends nothing");
+        assert_eq!(a.revoked_leaves, 1, "the admin's keyring counts the leaf");
+        assert_eq!(net.tx_count(ctl).await.expect("n"), sent);
+        let d = ring(net, &w.dan, rid).await.expect("dan");
+        assert_eq!(d.revoked_leaves, 0, "only an admin's keyring counts it");
+
+        assert_eq!(remove_revoked(net, &w.alice, rid).await, 1);
+        let a = ring(net, &w.alice, rid).await.expect("alice syncs");
+        assert_eq!(current(&a), e0 + 1, "the admin's removal made one epoch");
+        assert_eq!(a.revoked_leaves, 0);
         let (_, list) = charter_private::members(net, &w.alice.cfg, &w.alice.keys, rid)
             .await
             .expect("members");
@@ -148,7 +167,12 @@ fn an_admins_sync_removes_the_revoked_leaf_and_the_device_cannot_open_the_next_e
             "rows sealed in the new epoch stay shut to the laptop ({by_laptop} of {by_bob})"
         );
         let again = ring(net, &w.carol, rid).await.expect("carol syncs");
-        assert_eq!(current(&again), e0 + 1, "no second removal");
+        assert_eq!(current(&again), e0 + 1);
+        assert_eq!(
+            remove_revoked(net, &w.carol, rid).await,
+            0,
+            "no second removal"
+        );
     });
 }
 
@@ -181,9 +205,12 @@ fn two_admins_racing_make_exactly_one_removal() {
             }
             net.hold_mining(false);
         };
-        let (a, c, ()) = tokio::join!(ring(net, &w.alice, rid), ring(net, &w.carol, rid), release);
-        a.expect("alice");
-        c.expect("carol");
+        let (a, c, ()) = tokio::join!(
+            remove_revoked(net, &w.alice, rid),
+            remove_revoked(net, &w.carol, rid),
+            release
+        );
+        assert_eq!((a, c), (1, 1), "both admins saw the leaf");
         let (a, c) = (
             ring(net, &w.alice, rid).await.expect("alice again"),
             ring(net, &w.carol, rid).await.expect("carol again"),
@@ -238,7 +265,7 @@ fn the_revoked_devices_writes_after_the_cut_are_refused_before_the_removal_lands
         .await
         .expect("revoke at T1");
 
-        // No admin has synced: the laptop's leaf is still in the group.
+        // No admin has removed it: the laptop's leaf is still in the group.
         let d = ring(net, &w.dan, rid).await.expect("dan");
         assert_eq!(current(&d), e0, "the removal has not landed");
         assert!(
@@ -249,5 +276,57 @@ fn the_revoked_devices_writes_after_the_cut_are_refused_before_the_removal_lands
             !accepts(net, &w.dan, rid, &w.bob, &t2).await,
             "a write after the cut is refused"
         );
+    });
+}
+
+/// Two removals and a refresh at once from one admin home (the UI's round, a CLI command):
+/// the home lock runs them one after another, the second sees nothing left to remove, and
+/// the admin still follows the next change another admin makes.
+#[test]
+fn one_admin_home_removing_and_refreshing_at_once_stays_in_the_group() {
+    run(async {
+        let w = world().await;
+        let (net, rid) = (&w.net, &w.rid);
+        let e0 = current(&ring(net, &w.alice, rid).await.expect("alice"));
+        revoke_laptop(net, &w.bob, &w.laptop, rid).await;
+        let (x, y, z) = tokio::join!(
+            remove_revoked(net, &w.alice, rid),
+            remove_revoked(net, &w.alice, rid),
+            ring(net, &w.alice, rid)
+        );
+        z.expect("refresh");
+        assert_eq!(x + y, 1, "one removal from the home");
+        let at = |o: &charter_core::Observed| charter_private::msg::u64_of(o, "ag.ep");
+        let commits = charter_private::msg::find(net, charter_private::msg::T_COMMIT, vec![])
+            .await
+            .expect("commits");
+        assert_eq!(commits.iter().filter(|o| at(o) == Some(e0 + 1)).count(), 1);
+
+        let eve = Peer::new(net, 5);
+        invite(net, &w.carol, &eve, rid, Role::Read).await;
+        let c = current(&ring(net, &w.carol, rid).await.expect("carol"));
+        let a = current(&ring(net, &w.alice, rid).await.expect("alice"));
+        assert_eq!((c, a), (e0 + 2, e0 + 2), "alice follows carol's add");
+    });
+}
+
+/// Every device holds the identity seed, so a stolen laptop can sign a revoke of its
+/// owner's main device (docs/p2/private-repos.md "Lost or stolen machine"). No sync acts on
+/// it: the main device keeps its leaf and reads the next epoch unless an admin chooses to
+/// remove it.
+#[test]
+fn a_revoke_from_a_stolen_device_removes_nothing_until_an_admin_acts() {
+    run(async {
+        let w = world().await;
+        let (net, rid) = (&w.net, &w.rid);
+        let e0 = current(&ring(net, &w.alice, rid).await.expect("alice"));
+        revoke_laptop(net, &w.laptop, &w.bob, rid).await;
+        for p in [&w.alice, &w.carol, &w.dan] {
+            assert_eq!(current(&ring(net, p, rid).await.expect("sync")), e0);
+        }
+        let eve = Peer::new(net, 5);
+        invite(net, &w.alice, &eve, rid, Role::Read).await;
+        let b = ring(net, &w.bob, rid).await.expect("bob");
+        assert!(b.epochs.contains_key(&(e0 + 1)), "the main device reads on");
     });
 }

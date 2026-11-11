@@ -15,7 +15,7 @@ use zeroize::Zeroize;
 
 use crate::seal::Key;
 
-/// Format of a repo whose lockboxes carry the 0.5.1 security fields (attested welcomes and
+/// Format of a repo whose lockboxes carry the 0.6.0 security fields (attested welcomes and
 /// commits, id-key generations, role history, rotation positions); see
 /// docs/p2/private-repos.md "Migration". Lower values are legacy repos.
 pub const FORMAT: u32 = 2;
@@ -72,11 +72,15 @@ pub struct Keyring {
     /// each commit's public attestation pins its epoch's set ([`crate::auth::sign_commit`]).
     #[serde(default)]
     pub adm_log: BTreeMap<u64, BTreeSet<String>>,
-    /// [`FORMAT`] once a root delegate on 0.5.1 or later wrote a commit.
+    /// [`FORMAT`] once a root delegate on 0.6.0 or later wrote a commit.
     #[serde(default)]
     pub format: u32,
     /// Local MLS group id (also visible in MLS message headers, so not secret).
     pub group: Vec<u8>,
+    /// An admin's refresh only: leaves whose device a revoke record names, before checking
+    /// the records, so a write can offer [`crate::revoked::remove_revoked`]. Never saved.
+    #[serde(skip)]
+    pub revoked_leaves: usize,
 }
 
 impl Drop for Keyring {
@@ -102,6 +106,7 @@ impl Keyring {
             adm_log: BTreeMap::new(),
             format: 0,
             group,
+            revoked_leaves: 0,
         }
     }
 

@@ -154,3 +154,49 @@ fn members_still_read_everything() {
         }
     });
 }
+
+/// A grant's admins must be the admin set its epoch's commit attests: a root delegate's
+/// grant that names an outsider admin for an epoch it really holds does not count.
+#[test]
+fn a_grant_naming_other_admins_than_the_commit_attests_does_not_count() {
+    run(async {
+        let (net, [alice, .., eve], rid, _tmp) = four_epochs().await;
+        let full = ring(&net, &alice, &rid).await.expect("alice");
+        charter_private::publish_epoch_keys(&net, &alice.cfg, &alice.keys, &rid, 0..=2)
+            .await
+            .expect("grants");
+        let mut roles: Vec<(charter_core::Nid, Role)> = full.roles_at(3).into_iter().collect();
+        roles.push((eve.keys.nid(), Role::Admin));
+        let body = charter_private::auth::encode_grant(
+            &alice.keys,
+            &rid,
+            3,
+            full.id_key_at(3),
+            &full.epochs[&3],
+            &roles,
+        )
+        .expect("forged grant");
+        let attrs = vec![
+            ("ag.tag", msg::b32(msg::tag(&rid)), true),
+            ("ag.ep", charter_store::AttributeValue::U64(3), true),
+        ];
+        let op = msg::op(msg::T_PUB, attrs, body, 1_000_000).expect("op");
+        charter_sync::write::send(
+            &net,
+            &alice.keys.wallet(),
+            &alice.cfg.pipeline,
+            vec![vec![op]],
+        )
+        .await
+        .expect("publish");
+        let eve_ring = charter_private::ring_for(&net, &eve.cfg, None, &rid)
+            .await
+            .expect("grant reader")
+            .expect("private");
+        assert_eq!(
+            epochs(&eve_ring),
+            vec![0, 1, 2],
+            "epoch 3's grant names a false admin"
+        );
+    });
+}

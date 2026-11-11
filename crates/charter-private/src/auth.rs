@@ -5,13 +5,14 @@
 //! - leaf binding: a nid signs its MLS signature key; an admin checks it before an add;
 //! - welcome attestation: the admin who made a welcome signs it and its lockbox, sealed;
 //! - commit attestation: the admin who made a commit signs it, its lockbox, the new epoch's
-//!   admin set and an epoch authenticator, readable by anyone holding the generation-0 id
-//!   key, so joiners and grant readers can replay who was admin when from the root;
+//!   admin set, an epoch authenticator and the control address that sends it, readable by
+//!   anyone holding the generation-0 id key, so joiners and grant readers can replay who was
+//!   admin when from the root, and a byte copy from any other address places nothing;
 //! - grant: a root delegate signs a published epoch grant.
 
 use std::collections::BTreeSet;
 
-use charter_core::{ErrorCode, Hash32, Nid, Rid};
+use charter_core::{Address, ErrorCode, Hash32, Nid, Rid};
 use charter_crypto::{Alg, PublicKey, Sig};
 use charter_sync::{Keys, Result, SyncError};
 
@@ -136,6 +137,7 @@ fn admin_bytes(admins: &BTreeSet<String>) -> Vec<u8> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_msg(
     rid: &Rid,
     epoch: u64,
@@ -143,17 +145,20 @@ fn commit_msg(
     lockbox: &[u8],
     eauth: &Hash32,
     admins: &BTreeSet<String>,
+    creator: &Address,
 ) -> Vec<u8> {
     [
         att_msg(rid, epoch, body, lockbox, None),
         eauth.to_vec(),
+        creator.to_vec(),
         admin_bytes(admins),
     ]
     .concat()
 }
 
 /// This admin's public attestation of commit `body` with `lockbox`, making epoch `epoch`
-/// (key `key`) with admin set `admins`; `gen0` is the repo's generation-0 id key.
+/// (key `key`) with admin set `admins`, sent from this admin's control address for `rid`;
+/// `gen0` is the repo's generation-0 id key.
 #[allow(clippy::too_many_arguments)]
 pub fn sign_commit(
     keys: &Keys,
@@ -166,7 +171,8 @@ pub fn sign_commit(
     admins: &BTreeSet<String>,
 ) -> Result<Vec<u8>> {
     let eauth = epoch_auth(key, rid);
-    let msg = commit_msg(rid, epoch, body, lockbox, &eauth, admins);
+    let creator = keys.control_address(rid).into_array();
+    let msg = commit_msg(rid, epoch, body, lockbox, &eauth, admins, &creator);
     let sig = sign(keys, CTX_COMMIT, &msg)?;
     let sealed = seal(
         &admins_key(gen0, rid),
@@ -205,7 +211,8 @@ pub fn parse_commit_att(b: &[u8], gen0: &Key, rid: &Rid, epoch: u64) -> Option<C
     })
 }
 
-/// Whether `att` is a valid signature by its signer (key `pk`) over that commit row.
+/// Whether `att` is a valid signature by its signer (key `pk`) over that commit row, which
+/// `creator` created: a copy of the row from another address does not verify.
 pub fn commit_signed(
     pk: &PublicKey,
     att: &CommitAtt,
@@ -213,8 +220,9 @@ pub fn commit_signed(
     epoch: u64,
     body: &[u8],
     lockbox: &[u8],
+    creator: &Address,
 ) -> bool {
-    let msg = commit_msg(rid, epoch, body, lockbox, &att.auth, &att.admins);
+    let msg = commit_msg(rid, epoch, body, lockbox, &att.auth, &att.admins, creator);
     verifies(pk, CTX_COMMIT, &msg, &att.sig)
 }
 

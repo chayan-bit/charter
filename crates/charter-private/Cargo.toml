@@ -34,6 +34,8 @@ serde_json = "1"
 thiserror = "2"
 # Already in the tree through charter-crypto: wipes key material on drop.
 zeroize = "1.9"
+# Already in the tree through charter-sync: waits for the home lock without blocking a worker.
+tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 charter-store = { path = "../charter-store", features = ["fake"] }

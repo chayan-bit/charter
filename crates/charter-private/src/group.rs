@@ -13,11 +13,13 @@ use charter_sync::{Config, Keys, Result, SyncError, observe};
 
 use crate::arkiv::Sealed;
 use crate::auth::{self, CTX_WELCOME, att_msg, bad};
-use crate::join::{refresh, root_rows};
+use crate::join::{refresh_in, root_rows};
 use crate::keyring::{FORMAT, Keyring, Role, not_member};
+use crate::lock::lock;
 use crate::mls::{Mls, SUITE};
 use crate::msg::{self, T_COMMIT, T_GROUP, T_KP, T_PUB, T_WELCOME, b32, blinded_rid_at, tag};
 use crate::seal::blind;
+use openmls::prelude::MlsGroup;
 
 /// `id_key || content key`: everything needed to find and open one epoch's entities.
 pub type Grant = zeroize::Zeroizing<Vec<u8>>;
@@ -26,12 +28,14 @@ pub type Grant = zeroize::Zeroizing<Vec<u8>>;
 /// identity's signature over the MLS signature key and the device it carries (`ag.pk`,
 /// `ag.sig`); returns its id for `member add`.
 pub async fn publish_key_package<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys) -> Result<Hash32> {
+    let held = lock(&cfg.home).await?;
     let mut mls = Mls::open(&cfg.home, keys.nid())?;
     let kp = mls.key_package()?;
     let id = charter_crypto::sha256(&kp);
     let binding = auth::sign_leaf(keys, &mls.signature_key(), &mls.device()?)?;
     mls.kps.push(id);
     mls.save()?;
+    drop(held);
     let attrs = vec![
         ("ag.h", b32(id), true),
         (
@@ -66,6 +70,7 @@ pub async fn init<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys, meta: &RepoMeta) -
     root.validate()?;
     let s = sign(keys.sk(), &root)?;
     let rid = s.h;
+    let _held = lock(&cfg.home).await?;
     let mls = Mls::open(&cfg.home, keys.nid())?;
     let g = mls.create()?;
     let (epoch, key) = mls.epoch_key(&g, &rid)?;
@@ -103,10 +108,49 @@ pub async fn member_ring<A: Arkiv>(
     keys: &Keys,
     rid: &Rid,
 ) -> Result<(Mls, Keyring)> {
-    match refresh(a, cfg, keys, rid).await? {
-        (mls, Some(ring)) => Ok((mls, ring)),
+    let _held = lock(&cfg.home).await?;
+    member_ring_in(a, cfg, keys, rid).await
+}
+
+/// [`member_ring`] under a home lock the caller holds.
+pub(crate) async fn member_ring_in<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    rid: &Rid,
+) -> Result<(Mls, Keyring)> {
+    match refresh_in(a, cfg, keys, rid).await? {
+        (mls, Some(ring), _) => Ok((mls, ring)),
         _ => Err(not_member(rid)),
     }
+}
+
+/// Blocks a commit of this member stays pending, its row unseen, before a new change may
+/// drop it: by then it was never sent, or it expired before this machine saw it.
+pub const PENDING_BLOCKS: u64 = 64;
+
+/// `ring`'s group, ready for a new commit. A pending commit of this member that the refresh
+/// before did not settle (its row is not on chain) waits [`PENDING_BLOCKS`] from the block
+/// it landed in or failed to send at, as it may still land first; then it is dropped.
+/// Costs a head read only while one is pending.
+pub(crate) async fn ready<A: Arkiv>(a: &A, mls: &Mls, ring: &Keyring) -> Result<MlsGroup> {
+    let mut g = mls.load(&ring.group)?;
+    let Some((epoch, ..)) = mls.pending_keys(&g, &ring.rid)? else {
+        return Ok(g);
+    };
+    let since = mls.pending.get(&hex::encode(&ring.group)).copied();
+    let until = since.unwrap_or(0).saturating_add(PENDING_BLOCKS);
+    if a.head().await? <= until {
+        return Err(SyncError::coded(
+            ErrorCode::ConcurrentPush,
+            format!(
+                "this machine's earlier membership change (epoch {epoch}) is not on chain \
+                 yet; it may still land, so try again after block {until}"
+            ),
+        ));
+    }
+    mls.clear_pending(&mut g)?;
+    Ok(g)
 }
 
 /// The current epoch and every member with its role, number of MLS leaves (devices), and
@@ -164,7 +208,8 @@ async fn add<A: Arkiv>(
     kp_id: &Hash32,
     role: Option<Role>,
 ) -> Result<Nid> {
-    let (mls, mut ring) = member_ring(a, cfg, keys, rid).await?;
+    let _held = lock(&cfg.home).await?;
+    let (mut mls, mut ring) = member_ring_in(a, cfg, keys, rid).await?;
     ring.require(&keys.nid(), Role::Admin)?;
     let found = msg::find(a, T_KP, vec![observe::b32("ag.h", kp_id)]).await?;
     let row = found
@@ -197,16 +242,16 @@ async fn add<A: Arkiv>(
         (None, None) => return Err(not_member(rid)),
         _ => {}
     }
+    let mut g = ready(a, &mls, &ring).await?;
     let pre = prepare(a, cfg, keys, &ring).await?;
-    let mut g = mls.load(&ring.group)?;
     let (commit, welcome, _) = mls.add(&mut g, kp)?;
     if let Some(role) = role {
         ring.roles.insert(hex::encode(nid), role);
     }
-    let (epoch, key) = mls.epoch_key(&g, rid)?;
+    let (epoch, key, _, history) = next_keys(&mls, &g, rid)?;
     ring.epochs.insert(epoch, key);
-    let welcome = Some((*kp_id, welcome, mls.history_key(&g, rid)?));
-    finish(a, cfg, keys, &mls, ring, pre, commit, welcome).await?;
+    let welcome = Some((*kp_id, welcome, history));
+    finish(a, cfg, keys, &mut mls, ring, pre, commit, welcome).await?;
     Ok(nid)
 }
 
@@ -219,17 +264,28 @@ pub async fn remove_member<A: Arkiv>(
     rid: &Rid,
     nid: &Nid,
 ) -> Result<()> {
-    let (mls, mut ring) = member_ring(a, cfg, keys, rid).await?;
+    let _held = lock(&cfg.home).await?;
+    let (mut mls, mut ring) = member_ring_in(a, cfg, keys, rid).await?;
     ring.require(&keys.nid(), Role::Admin)?;
+    let mut g = ready(a, &mls, &ring).await?;
     let pre = prepare(a, cfg, keys, &ring).await?;
-    let mut g = mls.load(&ring.group)?;
     let commit = mls.remove(&mut g, nid)?;
     ring.roles.remove(&hex::encode(nid));
-    let (epoch, key) = mls.epoch_key(&g, rid)?;
+    let (epoch, key, id, _) = next_keys(&mls, &g, rid)?;
     ring.epochs.insert(epoch, key);
-    ring.id_rot.insert(epoch, mls.id_key(&g, rid)?);
-    finish(a, cfg, keys, &mls, ring, pre, commit, None).await?;
+    ring.id_rot.insert(epoch, id);
+    finish(a, cfg, keys, &mut mls, ring, pre, commit, None).await?;
     Ok(())
+}
+
+/// The keys of the epoch the commit just made in `g` starts (it is still pending).
+pub(crate) fn next_keys(
+    mls: &Mls,
+    g: &MlsGroup,
+    rid: &Rid,
+) -> Result<(u64, crate::seal::Key, crate::seal::Key, crate::seal::Key)> {
+    mls.pending_keys(g, rid)?
+        .ok_or_else(|| SyncError::coded(ErrorCode::Internal, "the commit left nothing pending"))
 }
 
 /// What a commit needs from before it: whether it migrates a legacy repo (then the caller
@@ -256,8 +312,8 @@ pub(crate) async fn prepare<A: Arkiv>(
     {
         return Err(SyncError::coded(
             ErrorCode::RoleDenied,
-            "this private repo predates charter 0.5.1: a root delegate must make its next \
-             membership change, on 0.5.1 or later, to upgrade it",
+            "this private repo predates charter 0.6.0: a root delegate must make its next \
+             membership change, on 0.6.0 or later, to upgrade it",
         ));
     }
     let heads = Pred::And(vec![
@@ -284,18 +340,50 @@ pub(crate) async fn prepare<A: Arkiv>(
     })
 }
 
-/// Sends the commit (and welcome) and saves the MLS state and the keyring it returns.
+/// Sends the commit (and welcome) for `ring`, the keyring after it. The commit stays pending
+/// in the MLS state saved before the send, and neither it nor `ring` is applied here: the
+/// next refresh merges it if its row is the first valid commit of its epoch on chain (the
+/// lockbox opens under its pending key), and drops it once another one is. So a lost race,
+/// a crash or a failed send never leaves this home on an epoch the group did not take.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finish<A: Arkiv>(
     a: &A,
     cfg: &Config,
     keys: &Keys,
-    mls: &Mls,
+    mls: &mut Mls,
+    ring: Keyring,
+    pre: Pre,
+    commit: Vec<u8>,
+    welcome: Option<Welcome>,
+) -> Result<()> {
+    let (ring, ops) = commit_ops(cfg, keys, ring, pre, commit, welcome)?;
+    let gid = hex::encode(&ring.group);
+    mls.pending.remove(&gid);
+    mls.save()?;
+    let control = keys.control(&ring.rid);
+    let landed = write::send_funded(a, &control, &keys.wallet(), &cfg.pipeline, vec![ops]).await;
+    let since = match landed
+        .as_ref()
+        .map(|l| l.last().map(|l| l.receipt.block_number))
+    {
+        Ok(Some(block)) => block,
+        _ => a.head().await.unwrap_or(0),
+    };
+    mls.pending.insert(gid, since);
+    mls.save()?;
+    landed.map(|_| ())
+}
+
+/// The keyring after the commit (`ring` with this epoch's roles, admin set and pins) and
+/// the one tx that publishes it ([`publish_ops`]).
+pub(crate) fn commit_ops(
+    cfg: &Config,
+    keys: &Keys,
     mut ring: Keyring,
     pre: Pre,
     commit: Vec<u8>,
     welcome: Option<Welcome>,
-) -> Result<Keyring> {
+) -> Result<(Keyring, Vec<charter_store::Operation>)> {
     if pre.migrate {
         ring.format = FORMAT;
     }
@@ -310,13 +398,8 @@ pub(crate) async fn finish<A: Arkiv>(
         .collect();
     ring.adm_log.insert(epoch, admins);
     let extra = pre.peer.into_iter().collect();
-    let landed = publish_commit(a, cfg, keys, &ring, commit, welcome, pre.migrate, extra).await?;
-    if let Some(block) = landed {
-        ring.rotated.insert(epoch, block);
-    }
-    mls.save()?;
-    ring.save(&cfg.home)?;
-    Ok(ring)
+    let ops = publish_ops(cfg, keys, &ring, commit, welcome, pre.migrate, extra)?;
+    Ok((ring, ops))
 }
 
 /// A Welcome for key package `.0` and the epoch's history key (`.2`).
@@ -326,10 +409,8 @@ type Welcome = (Hash32, Vec<u8>, crate::seal::Key);
 /// with only the new epoch's part of the keyring ([`Keyring::delta`]) sealed under the new
 /// epoch key and this admin's public attestation, the Welcome if any with the whole keyring
 /// sealed under the epoch's history key (which a published content key does not give) and
-/// its sealed attestation; and on a migration, the stopper. Returns the block it landed in.
-#[allow(clippy::too_many_arguments)]
-async fn publish_commit<A: Arkiv>(
-    a: &A,
+/// its sealed attestation; and on a migration, the stopper.
+fn publish_ops(
     cfg: &Config,
     keys: &Keys,
     ring: &Keyring,
@@ -337,7 +418,7 @@ async fn publish_commit<A: Arkiv>(
     welcome: Option<Welcome>,
     stop: bool,
     extra: Vec<charter_store::Operation>,
-) -> Result<Option<u64>> {
+) -> Result<Vec<charter_store::Operation>> {
     let (epoch, key) = ring.current()?;
     let rid = &ring.rid;
     let bx = msg::seal_box(&ring.delta(epoch), epoch, key)?;
@@ -371,9 +452,7 @@ async fn publish_commit<A: Arkiv>(
     if stop {
         ops.push(msg::stop_op(ring, cfg.control_lifetime)?);
     }
-    let control = keys.control(rid);
-    let landed = write::send_funded(a, &control, &keys.wallet(), &cfg.pipeline, vec![ops]).await?;
-    Ok(landed.last().map(|l| l.receipt.block_number))
+    Ok(ops)
 }
 
 /// Root delegate only: publishes epoch `epoch`'s grant, signed, with that epoch's roles, so

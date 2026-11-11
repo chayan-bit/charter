@@ -49,6 +49,7 @@ fn a_removed_members_forged_welcome_does_not_hijack_the_join() {
         let fake = Mls::open(fake_home.path(), alice.keys.nid()).expect("fake mls");
         let mut g = fake.create().expect("group");
         let (_commit, welcome, _) = fake.add(&mut g, &kp_bytes).expect("add bob");
+        fake.merge_pending(&mut g).expect("merge");
         let (ep, key) = fake.epoch_key(&g, &rid).expect("epoch key");
         let history = fake.history_key(&g, &rid).expect("history key");
         let mut forged = mallory_old.clone();
@@ -520,7 +521,7 @@ fn removal_drops_every_device_of_the_member() {
 }
 
 /// Migration: a legacy (format 1) repo upgrades on a root delegate's next membership change
-/// and gains the stopper a pre-0.5.1 client fails on; any other admin is refused until then.
+/// and gains the stopper a pre-0.6.0 client fails on; any other admin is refused until then.
 #[test]
 fn a_root_delegate_upgrades_a_legacy_repo_and_leaves_a_stopper_for_old_clients() {
     run(async {
@@ -531,6 +532,9 @@ fn a_root_delegate_upgrades_a_legacy_repo_and_leaves_a_stopper_for_old_clients()
             .expect("init");
         invite(&net, &alice, &bob, &rid, Role::Admin).await;
         ring(&net, &bob, &rid).await.expect("bob joins");
+        ring(&net, &alice, &rid)
+            .await
+            .expect("alice applies her add");
         for p in [&alice, &bob] {
             let mut r = Keyring::load(&p.cfg.home, &rid)
                 .expect("load")
@@ -598,7 +602,7 @@ fn a_root_delegate_upgrades_a_legacy_repo_and_leaves_a_stopper_for_old_clients()
     });
 }
 
-/// The migration stopper, read as a pre-0.5.1 client finds it: under the generation-0
+/// The migration stopper, read as a pre-0.6.0 client finds it: under the generation-0
 /// blinded rid.
 async fn stopper(
     net: &Net,
@@ -617,7 +621,7 @@ async fn stopper(
         .expect("stopper")
 }
 
-/// Keepalive extends the stopper with the rest of the control plane, so pre-0.5.1 clients
+/// Keepalive extends the stopper with the rest of the control plane, so pre-0.6.0 clients
 /// keep failing closed for as long as the repo is kept alive.
 #[test]
 fn keepalive_extends_the_migration_stopper() {
@@ -713,6 +717,7 @@ fn an_ex_admins_forged_welcome_is_refused_even_without_a_genuine_one() {
                 dummy.key_package().expect("kp")
             };
             let (commit, w, _) = fake.add(&mut g, &add).expect("add");
+            fake.merge_pending(&mut g).expect("merge");
             let (ep, key) = fake.epoch_key(&g, &rid).expect("key");
             forged.epochs.insert(ep, key);
             forged.adm_log.insert(ep, admins.clone());

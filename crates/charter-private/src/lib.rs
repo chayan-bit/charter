@@ -12,6 +12,7 @@ pub mod entity;
 pub mod group;
 pub mod join;
 pub mod keyring;
+mod lock;
 pub mod mls;
 pub mod msg;
 pub mod revoked;

@@ -251,6 +251,9 @@ fn a_non_root_admin_cannot_migrate_a_legacy_repo() {
             .expect("init");
         invite(&net, &alice, &bob, &rid, Role::Admin).await;
         ring(&net, &bob, &rid).await.expect("bob joins");
+        ring(&net, &alice, &rid)
+            .await
+            .expect("alice applies her add");
         let mut legacy = Keyring::load(&alice.cfg.home, &rid)
             .expect("load")
             .expect("ring");

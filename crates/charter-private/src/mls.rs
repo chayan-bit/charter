@@ -38,6 +38,7 @@ struct SavedRef<'a> {
     signer: &'a SignatureKeyPair,
     storage: Vec<(String, String)>,
     kps: &'a [Hash32],
+    pending: &'a BTreeMap<String, u64>,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +48,8 @@ struct Saved {
     storage: Vec<(String, String)>,
     /// Ids (`sha256` of the bytes) of key packages this member published.
     kps: Vec<Hash32>,
+    #[serde(default)]
+    pending: BTreeMap<String, u64>,
 }
 
 /// OpenMLS storage contents, from [`Mls::snapshot`].
@@ -58,6 +61,10 @@ pub struct Mls {
     nid: Nid,
     path: PathBuf,
     pub kps: Vec<Hash32>,
+    /// Hex group id to the block this member's pending commit there landed in (or the head
+    /// when its send failed): [`crate::group`] discards a pending commit that never showed
+    /// up on chain only well after it.
+    pub pending: BTreeMap<String, u64>,
 }
 
 fn create_config() -> MlsGroupCreateConfig {
@@ -74,7 +81,7 @@ impl Mls {
     pub fn open(home: &Path, nid: Nid) -> Result<Self> {
         let path = home.join("private").join("mls.json");
         let provider = Provider::default();
-        let (signer, kps) = match std::fs::read(&path) {
+        let (signer, kps, pending) = match std::fs::read(&path) {
             Ok(mut b) => {
                 let s = serde_json::from_slice::<Saved>(&b);
                 b.zeroize();
@@ -90,12 +97,13 @@ impl Mls {
                     v.zeroize();
                     values.insert(k, decoded?);
                 }
-                (s.signer, s.kps)
+                (s.signer, s.kps, s.pending)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
                 SignatureKeyPair::new(SUITE.signature_algorithm())
                     .map_err(|e| mls_err("keygen", e))?,
                 vec![],
+                BTreeMap::new(),
             ),
             Err(e) => return Err(SyncError::io("read mls state", e)),
         };
@@ -105,6 +113,7 @@ impl Mls {
             nid,
             path,
             kps,
+            pending,
         })
     }
 
@@ -122,6 +131,7 @@ impl Mls {
                 .map(|(k, v)| (hex::encode(k), hex::encode(v)))
                 .collect(),
             kps: &self.kps,
+            pending: &self.pending,
         };
         let mut bytes = serde_json::to_vec(&saved).map_err(|e| mls_err("state file", e))?;
         let r = write_private(&self.path, &bytes);
@@ -178,7 +188,13 @@ impl Mls {
             .ok_or_else(|| mls_err("load group", "unknown group id"))
     }
 
-    /// Adds the owner of `kp` (TLS bytes); returns `(commit, welcome, new member nid)`.
+    /// This member's nid.
+    pub fn nid(&self) -> Nid {
+        self.nid
+    }
+
+    /// Adds the owner of `kp` (TLS bytes); returns `(commit, welcome, new member nid)`. The
+    /// commit stays pending (see [`Self::pending_keys`]) until it is seen first on chain.
     pub fn add(&self, g: &mut MlsGroup, kp: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Nid)> {
         let kp = KeyPackageIn::tls_deserialize_exact(kp)
             .map_err(|e| mls_err("key package", e))?
@@ -188,8 +204,6 @@ impl Mls {
         let (commit, welcome, _) = g
             .add_members(&self.provider, &self.signer, &[kp])
             .map_err(|e| mls_err("add", e))?;
-        g.merge_pending_commit(&self.provider)
-            .map_err(|e| mls_err("merge", e))?;
         Ok((ser(&commit)?, ser(&welcome)?, nid))
     }
 
@@ -203,7 +217,7 @@ impl Mls {
         self.remove_leaves(g, &leaves)
     }
 
-    /// Removes `leaves` (and nothing else); returns the commit.
+    /// Removes `leaves` (and nothing else); returns the commit, left pending.
     pub fn remove_leaves(&self, g: &mut MlsGroup, leaves: &[LeafNodeIndex]) -> Result<Vec<u8>> {
         if leaves.is_empty() {
             return Err(SyncError::coded(
@@ -214,8 +228,6 @@ impl Mls {
         let (commit, _, _) = g
             .remove_members(&self.provider, &self.signer, leaves)
             .map_err(|e| mls_err("remove", e))?;
-        g.merge_pending_commit(&self.provider)
-            .map_err(|e| mls_err("merge", e))?;
         ser(&commit)
     }
 
@@ -353,6 +365,38 @@ impl Mls {
             .export_secret(self.provider.crypto(), label, rid, 32)
             .map_err(|e| mls_err("export", e))?;
         s.as_slice().try_into().map_err(|e| mls_err("export", e))
+    }
+
+    /// `(epoch, content key, id key, history key)` of the epoch this member's pending commit
+    /// in `g` makes, before it is merged; `None` without one.
+    pub fn pending_keys(&self, g: &MlsGroup, rid: &Rid) -> Result<Option<(u64, Key, Key, Key)>> {
+        let Some(s) = g.pending_commit() else {
+            return Ok(None);
+        };
+        let export = |label| -> Result<Key> {
+            let k = s
+                .export_secret(self.provider.crypto(), label, rid, 32)
+                .map_err(|e| mls_err("export", e))?;
+            k.as_slice().try_into().map_err(|e| mls_err("export", e))
+        };
+        Ok(Some((
+            s.group_context().epoch().as_u64(),
+            export(CONTENT_LABEL)?,
+            export(ID_LABEL)?,
+            export(HISTORY_LABEL)?,
+        )))
+    }
+
+    /// Merges this member's pending commit: it was seen first on chain.
+    pub fn merge_pending(&self, g: &mut MlsGroup) -> Result<()> {
+        g.merge_pending_commit(&self.provider)
+            .map_err(|e| mls_err("merge", e))
+    }
+
+    /// Drops this member's pending commit: it can no longer land first.
+    pub fn clear_pending(&self, g: &mut MlsGroup) -> Result<()> {
+        g.clear_pending_commit(self.provider.storage())
+            .map_err(|e| mls_err("clear", e))
     }
 
     /// `(epoch, export_secret("arkiv-git content", rid, 32))` of the group's current epoch.

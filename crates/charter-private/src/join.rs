@@ -22,38 +22,52 @@ use crate::msg::{
 use crate::seal::{Key, blind};
 use crate::{Sealed, entity, revoked};
 
-/// This member's MLS state and up-to-date keyring for `rid` (`None`: not a member).
+/// This member's MLS state and up-to-date keyring for `rid` (`None`: not a member). Reads
+/// only: it never sends (a revoked device's leaf is removed by an explicit write,
+/// [`revoked::remove_revoked`]; an admin's keyring counts such leaves in `revoked_leaves`).
 pub async fn refresh<A: Arkiv>(
     a: &A,
     cfg: &Config,
     keys: &Keys,
     rid: &Rid,
 ) -> Result<(Mls, Option<Keyring>)> {
+    let _held = crate::lock::lock(&cfg.home).await?;
+    let (mls, ring, _) = refresh_in(a, cfg, keys, rid).await?;
+    Ok((mls, ring))
+}
+
+/// [`refresh`] under a home lock the caller holds, with the repo's device records read in
+/// the same query ([`revoked::device_records`]).
+pub(crate) async fn refresh_in<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    rid: &Rid,
+) -> Result<(Mls, Option<Keyring>, Vec<EntityData>)> {
     let mls = Mls::open(&cfg.home, keys.nid())?;
     let mut ring = Keyring::load(&cfg.home, rid)?;
     if ring.is_none() {
         ring = join(a, &mls, rid).await?;
     }
+    let mut revokes = vec![];
     if let Some(r) = ring.as_mut() {
-        let (mut member, revokes) = apply_commits(a, &mls, r).await?;
+        let mut member;
+        (member, revokes) = apply_commits(a, &mls, r).await?;
         if !member {
             member = rejoin(a, &mls, keys, r).await?;
         }
-        // Boxed: a rare path whose commit future would otherwise grow every refresh's stack.
-        if member
-            && let Some(next) = Box::pin(revoked::remove(a, cfg, keys, &mls, r, &revokes)).await?
-        {
-            *r = next;
+        if member && r.role(&keys.nid()) == Some(Role::Admin) && !revokes.is_empty() {
+            r.revoked_leaves = revoked::candidates(&mls.load(&r.group)?, &revokes).len();
         }
         // An epoch end past the next epoch, or past the current one while still a member,
-        // came from a commit nobody applied (a keyring saved before 0.5.1 kept any).
+        // came from a commit nobody applied (a keyring saved before 0.6.0 kept any).
         let open = r.current()?.0 + u64::from(!member);
         r.rotated.retain(|e, _| *e <= open);
         check_history(r)?;
         r.save(&cfg.home)?;
         mls.save()?;
     }
-    Ok((mls, ring))
+    Ok((mls, ring, revokes))
 }
 
 /// After this member was removed: a welcome from a later re-add replaces `ring` (and the
@@ -143,8 +157,8 @@ async fn verify_welcome<A: Arkiv>(
     let Some((signer, sig)) = bytes(w, "ag.att").and_then(|s| open_att(&key, rid, epoch, s)) else {
         return Err(SyncError::coded(
             ErrorCode::UnsupportedVersion,
-            "this welcome carries no admin attestation (it was made by charter before 0.5.1 \
-             or by someone else); ask an admin on 0.5.1 or later to add you again",
+            "this welcome carries no admin attestation (it was made by charter before 0.6.0 \
+             or by someone else); ask an admin on 0.6.0 or later to add you again",
         ));
     };
     let pk = charter_sync::cob::peer_key_of(a, &signer).await?;
@@ -291,7 +305,7 @@ pub(crate) async fn first_signed<'c, A: Arkiv>(
         );
         if pks[&att.signer]
             .as_ref()
-            .is_some_and(|pk| auth::commit_signed(pk, att, rid, epoch, body, bx))
+            .is_some_and(|pk| auth::commit_signed(pk, att, rid, epoch, body, bx, &c.creator))
         {
             return Ok(Some((*c, att)));
         }
@@ -330,8 +344,11 @@ fn root_of(rid: &Rid, rows: &[Observed]) -> Option<Vec<Nid>> {
 }
 
 /// Applies attested admin commits for the next epochs; any other commit is skipped and
-/// undone. Stops once this member is removed: it then holds no key for later epochs, and
-/// the commit that removed it (an admin's, as MLS authenticates) ends its last epoch.
+/// undone. This member's own pending commit ([`crate::group::finish`]) is recognised by its
+/// lockbox opening under the pending epoch key, and merged only if it comes first; one from
+/// another admin coming first drops it. Stops once this member is removed: it then holds no
+/// key for later epochs, and the commit that removed it (an admin's, as MLS authenticates)
+/// ends its last epoch.
 /// Returns whether it is still a member, and the repo's device records (revokes and
 /// delegations, [`revoked::device_records`]), read in the same query as the commits.
 pub(crate) async fn apply_commits<A: Arkiv>(
@@ -364,9 +381,15 @@ pub(crate) async fn apply_commits<A: Arkiv>(
                 continue;
             }
             let snap = mls.snapshot()?;
-            let admins = ring.clone();
-            let is_admin = |n: &Nid| admins.role(n) == Some(Role::Admin);
-            let Ok(Some(sender)) = mls.process(&mut g, body, is_admin) else {
+            let sender = match ours(mls, &g, &ring.rid, next, bx)? {
+                true => mls.merge_pending(&mut g).map(|()| Some(mls.nid())),
+                false => {
+                    let admins = ring.clone();
+                    let is_admin = |n: &Nid| admins.role(n) == Some(Role::Admin);
+                    mls.process(&mut g, body, is_admin)
+                }
+            };
+            let Ok(Some(sender)) = sender else {
                 mls.restore(snap)?;
                 g = mls.load(&ring.group)?;
                 continue;
@@ -398,6 +421,20 @@ pub(crate) async fn apply_commits<A: Arkiv>(
             return Ok((g.is_active(), devices));
         }
     }
+}
+
+/// Whether lockbox `bx` of a commit for epoch `next` is this member's pending commit's: it
+/// opens under the key only that pending commit derives.
+fn ours(
+    mls: &Mls,
+    g: &openmls::prelude::MlsGroup,
+    rid: &Rid,
+    next: u64,
+    bx: &[u8],
+) -> Result<bool> {
+    Ok(mls
+        .pending_keys(g, rid)?
+        .is_some_and(|(ep, key, ..)| ep == next && open_box(rid, ep, &key, bx).is_some()))
 }
 
 /// Whether commit row `c` carries `sender`'s public attestation of its bytes and lockbox,
@@ -443,13 +480,13 @@ async fn commit_attested<A: Arkiv>(
         return Ok(false);
     }
     let pk = charter_sync::cob::peer_key_of(a, sender).await?;
-    Ok(pk.is_some_and(|pk| auth::commit_signed(&pk, &att, &ring.rid, epoch, body, bx)))
+    Ok(pk.is_some_and(|pk| auth::commit_signed(&pk, &att, &ring.rid, epoch, body, bx, &c.creator)))
 }
 
 /// Where each epoch held started, from commit rows already read: the earliest row naming
 /// that epoch whose lockbox opens under its key (nobody holds that key before the commit
 /// lands). A row naming an epoch not held places nothing: anyone can write one. Also fills
-/// the role history of a keyring written before 0.5.1 from those lockboxes. Costs no query.
+/// the role history of a keyring written before 0.6.0 from those lockboxes. Costs no query.
 fn derive_history(ring: &mut Keyring, rows: &[Observed]) {
     for c in rows {
         let Some(ep) = u64_of(c, "ag.ep") else {
@@ -678,8 +715,9 @@ fn legacy_grants(mut ring: Keyring, signed: &[&(u64, auth::SignedGrant)]) -> Key
 }
 
 /// `ring` (the root grant's) with each grant of `signed` whose key the [`canonical`]
-/// commit of its epoch authenticates and whose signer was an admin of the epoch before,
-/// and with the start of every epoch on record. A grant for an epoch before the first
+/// commit of its epoch authenticates, whose admins are the admin set that commit attests
+/// (the roles below admin rest on the signer's word: no commit attests them), and whose
+/// signer was an admin of the epoch before, and with the start of every epoch on record. A grant for an epoch before the first
 /// attested commit (a legacy one) needs only the root delegate's signature. Costs a key
 /// lookup per committing admin that signed no grant.
 async fn attested_grants<A: Arkiv>(
@@ -714,6 +752,7 @@ async fn attested_grants<A: Arkiv>(
             Some(b) if *ep >= b => chain.iter().any(|(k, _, att)| {
                 k == ep
                     && att.auth == auth::epoch_auth(&g.key, rid)
+                    && admins_of(g) == att.admins
                     && signer(g).is_some_and(|pk| admins_before(*ep).contains(&pk.nid()))
             }),
             Some(_) => true,
@@ -727,6 +766,15 @@ async fn attested_grants<A: Arkiv>(
         ring.rotated.insert(*k, c.block);
     }
     Ok(ring)
+}
+
+/// The admins (hex nids) a grant's roles name.
+fn admins_of(g: &auth::SignedGrant) -> BTreeSet<String> {
+    g.roles
+        .iter()
+        .filter(|(_, r)| *r == Role::Admin)
+        .map(|(n, _)| hex::encode(n))
+        .collect()
 }
 
 /// The keyring of the grant whose keys open the root identity (one a root delegate also
