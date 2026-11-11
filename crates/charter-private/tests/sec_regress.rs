@@ -629,3 +629,67 @@ fn a_root_delegate_upgrades_a_legacy_repo_and_leaves_a_stopper_for_old_clients()
         assert_eq!(listing.refs[0].1, rev(&work, "main"));
     });
 }
+
+/// The migration stopper, read as a pre-0.5.1 client finds it: under the generation-0
+/// blinded rid.
+async fn stopper(
+    net: &Net,
+    gen0: &charter_private::seal::Key,
+    rid: &Rid,
+) -> charter_core::Observed {
+    let old_query = Pred::And(vec![
+        observe::kind(Kind::Id),
+        observe::b32("ag.rid", &charter_private::seal::blind(gen0, "rid", rid)),
+    ]);
+    observe::all(net, old_query)
+        .await
+        .expect("identity rows")
+        .into_iter()
+        .find(|o| o.attr("ag.v") == Some(&charter_core::AttrValue::U64(msg::STOP_V)))
+        .expect("stopper")
+}
+
+/// Keepalive extends the stopper with the rest of the control plane, so pre-0.5.1 clients
+/// keep failing closed for as long as the repo is kept alive.
+#[test]
+fn keepalive_extends_the_migration_stopper() {
+    run(async {
+        let net = Net::new();
+        let (mut alice, carol) = (Peer::new(&net, 1), Peer::new(&net, 3));
+        alice.cfg.control_lifetime = 2_000; // the stopper soon falls due
+        let rid = charter_private::init(&net, &alice.cfg, &alice.keys, &meta("secret"))
+            .await
+            .expect("init");
+        let mut r = Keyring::load(&alice.cfg.home, &rid)
+            .expect("load")
+            .expect("ring");
+        r.format = 1;
+        r.save(&alice.cfg.home).expect("save");
+        let gen0 = r.id_key;
+        invite(&net, &alice, &carol, &rid, Role::Read).await;
+        let before = stopper(&net, &gen0, &rid).await.expires_at;
+
+        let horizon = 100_000;
+        let opts = charter_sync::keepalive::KeepOpts {
+            horizon,
+            renew_below: horizon,
+            max_spend: None,
+            dry_run: false,
+        };
+        let sealed = Sealed::new(&net, ring(&net, &alice, &rid).await.expect("alice"));
+        charter_sync::keepalive::keepalive(
+            &sealed,
+            &alice.repo(&rid),
+            &alice.cfg,
+            &alice.keys.wallet(),
+            &opts,
+        )
+        .await
+        .expect("keepalive");
+        let after = stopper(&net, &gen0, &rid).await.expires_at;
+        assert!(
+            after > before + 50_000,
+            "stopper extended: {before} -> {after}"
+        );
+    });
+}
