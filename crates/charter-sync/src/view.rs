@@ -99,14 +99,44 @@ fn signer_nids(observed: &[Observed]) -> BTreeSet<Nid> {
         .collect()
 }
 
+/// The `id` and `idacc` entities of `rid`.
+pub fn identity_filter(rid: &Rid) -> Pred {
+    let kinds = Pred::Or(vec![kind(Kind::Id), kind(Kind::IdAcc)]);
+    Pred::And(vec![b32("ag.rid", rid), kinds])
+}
+
+/// Identity rows another step of this command just read (the private-repo check).
+static PREFETCHED: std::sync::Mutex<Option<(Rid, std::time::Instant, Vec<Observed>)>> =
+    std::sync::Mutex::new(None);
+/// How long prefetched identity rows stand in for a fresh read.
+const PREFETCH_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Hands the rows of [`identity_filter`] to the next [`identity`] of `rid`, which uses them
+/// once (within [`PREFETCH_TTL`]) instead of querying again.
+pub fn prefetched_identity(rid: &Rid, rows: Vec<Observed>) {
+    if let Ok(mut slot) = PREFETCHED.lock() {
+        *slot = Some((*rid, std::time::Instant::now(), rows));
+    }
+}
+
+fn take_prefetched(rid: &Rid) -> Option<Vec<Observed>> {
+    let mut slot = PREFETCHED.lock().ok()?;
+    match slot.take() {
+        Some((r, at, rows)) if r == *rid && at.elapsed() < PREFETCH_TTL => Some(rows),
+        _ => None,
+    }
+}
+
 /// The identity chain of `rid` and every signer the identity entities name.
 pub async fn identity<A: Arkiv>(
     a: &A,
     rid: &Rid,
     state: &State,
 ) -> Result<(IdentityChain, BTreeMap<Nid, PeerInfo>)> {
-    let kinds = Pred::Or(vec![kind(Kind::Id), kind(Kind::IdAcc)]);
-    let observed = all(a, Pred::And(vec![b32("ag.rid", rid), kinds])).await?;
+    let observed = match take_prefetched(rid) {
+        Some(rows) => rows,
+        None => all(a, identity_filter(rid)).await?,
+    };
     let nids: Vec<Nid> = signer_nids(&observed).into_iter().collect();
     let infos = try_join_all(nids.iter().map(|n| resolve_peer(a, rid, n))).await?;
     let peers: BTreeMap<Nid, PeerInfo> = nids

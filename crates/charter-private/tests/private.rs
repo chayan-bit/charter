@@ -258,3 +258,55 @@ fn ciphertext_hides_rid_and_name_and_is_padded() {
         );
     });
 }
+
+#[test]
+fn a_public_repo_is_remembered_and_its_identity_rows_feed_the_clone() {
+    run(async {
+        let net = Net::new();
+        let (alice, bob) = (Peer::new(&net, 1), Peer::new(&net, 2));
+        let rid = charter_sync::identity::init(&net, &alice.cfg, &alice.keys, &meta("open"))
+            .await
+            .expect("init");
+        let identity = |qs: &[String]| qs.iter().filter(|q| q.contains("idacc")).count();
+
+        net.take_queries();
+        let r = charter_private::ring_for(&net, &bob.cfg, Some(&bob.keys), &rid).await;
+        assert!(r.expect("ring_for").is_none(), "public");
+        let first = net.take_queries();
+        assert_eq!(identity(&first), 1, "one identity query: {first:?}");
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let _ = clone_into(&net, &bob, &rid, &tmp.path().join("bob")).await;
+        assert_eq!(identity(&net.take_queries()), 0, "the view reused the rows");
+
+        let r = charter_private::ring_for(&net, &bob.cfg, Some(&bob.keys), &rid).await;
+        assert!(r.expect("ring_for").is_none(), "still public");
+        assert_eq!(net.take_queries(), Vec::<String>::new(), "answered from disk");
+    });
+}
+
+#[test]
+fn a_forged_public_identity_row_is_not_remembered_and_does_not_hide_a_membership() {
+    run(async {
+        let net = Net::new();
+        let (alice, bob, carol) = (Peer::new(&net, 1), Peer::new(&net, 2), Peer::new(&net, 3));
+        let rid = private_repo(&net, &alice, "secret").await;
+        let attrs = [
+            ("ag.kind", charter_store::AttributeValue::Str("id".into()), true),
+            ("ag.rid", charter_store::AttributeValue::Bytes32(rid), true),
+        ];
+        let op = charter_store::create_op_flags(&attrs, 100, 1, 1).expect("op");
+        charter_sync::write::send(&net, &carol.keys.wallet(), &carol.cfg.pipeline, vec![vec![op]])
+            .await
+            .expect("forge");
+        invite(&net, &alice, &bob, &rid, Role::Read).await;
+
+        ring(&net, &bob, &rid).await.expect("bob still joins");
+        for _ in 0..2 {
+            net.take_queries();
+            let r = charter_private::ring_for(&net, &carol.cfg, Some(&carol.keys), &rid).await;
+            assert!(r.expect("ring_for").is_none(), "a public row wins for a non-member");
+            assert!(!net.take_queries().is_empty(), "never answered from disk");
+        }
+    });
+}
