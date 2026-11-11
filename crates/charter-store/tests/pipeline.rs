@@ -483,8 +483,9 @@ async fn one_estimate_prices_every_chunk_of_a_shape() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn bulk_keeps_two_blocks_of_gas_in_flight() {
+async fn bulk_fills_each_block_up_to_the_gas_target_so_the_base_fee_never_rises() {
     let (fake, key) = setup();
+    let fee0 = fake.base_fee().await.expect("fee");
     let cfg = PipelineConfig::default().bulk();
     let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, cfg);
     let jobs: Vec<_> = (0..40).map(|i| vec![blob(65_536, DAY, i)]).collect();
@@ -493,11 +494,18 @@ async fn bulk_keeps_two_blocks_of_gas_in_flight() {
         .expect("run");
     assert_eq!((landed.len(), t.txs), (40, 40));
     assert!(t.bytes > 40 * 65_536 && t.mb_per_s() > 0.0);
-    let best = gas_by_block(&landed).values().map(|(_, c)| *c).max();
+    let blocks = gas_by_block(&landed);
+    let target = charter_store::BLOCK_GAS_LIMIT / 2;
+    assert!(
+        blocks.values().all(|(gas, _)| *gas <= target),
+        "at most the target per block: {blocks:?}"
+    );
+    let best = blocks.values().map(|(_, c)| *c).max();
     assert!(
         best > Some(4),
         "more than the 4 chunks per block the 40 percent pace allows: {best:?}"
     );
+    assert!(fake.base_fee().await.expect("fee") <= fee0, "no fee spiral");
 }
 
 #[tokio::test(start_paused = true)]

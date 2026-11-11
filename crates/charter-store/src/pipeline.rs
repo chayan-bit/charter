@@ -71,11 +71,13 @@ impl Default for PipelineConfig {
 }
 
 impl PipelineConfig {
-    /// For many large independent txs (a big upload): up to two blocks of gas may be
-    /// unconfirmed, so this sender keeps every block it can get full instead of 40 percent.
+    /// For many large independent txs (a big upload): up to the block gas target (half
+    /// the limit, EIP-1559 elasticity 2) unconfirmed, refilled as each block lands. The base
+    /// fee rises only above the target: a 10 MiB push that kept blocks 91% full moved it
+    /// from 1.00 to 2.64 gwei over 10 blocks (MEASURED on Rabdi, 2026-11-11).
     pub fn bulk(&self) -> Self {
         Self {
-            pace_percent: self.pace_percent.max(200),
+            pace_percent: 50,
             ..self.clone()
         }
     }
