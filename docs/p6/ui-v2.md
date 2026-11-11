@@ -1,0 +1,388 @@
+# P6 v2: audit and redesign proposal for `chart ui`
+
+Status: PROPOSAL.
+Nothing here is implemented, and no Rust code was changed to write it.
+Implementation waits for the user's go-ahead, slice by slice.
+Date: 2026-11-11.
+Branch `ui/v2`, from main at bda7571 (v0.4.0).
+Builds on `docs/p6/ui.md`, which stays the record of the v1 architecture (axum, askama, htmx, local-first, CSRF and Host guard).
+
+## 0. Scope
+
+Reader: a developer who already has keys and a funded wallet.
+The user called the current UI "abysmally bad".
+This document says what is actually wrong with it, what is missing, and what to build, in slices.
+
+Onboarding is out of scope until after the mainnet release; see section 8.
+Nothing in this proposal needs a new user flow, a faucet or a recovery phrase.
+
+Evidence used:
+
+- the release build of this branch (`target/release/chart`, built with `mac-heavy cargo build --release`);
+- a fixture repo `charter-demo` on the file-backed fake chain (`crates/charter-ui/e2e/fixture.sh`): 4 commits, branches and tags, 2 issues with comments and a close, a patch with a review and an approval, a release with 2 artifacts, a pinned bounty program; writes were made here, so no tGLM was spent;
+- a read-only scratch clone of the hosted repo (`arkiv::zBZ3MRTENmgPBebpq97ZPTbxeFZNaS8VX6Es25hpdJsSJ`) in a home with no keys, read from Rabdi;
+- 72 page screenshots plus 72 state screenshots, each in light and dark at 1280x800 and at 390x844 at 2x; page widths were measured on all of them, and `axe-core` was run on 6 pages.
+
+Screenshot root (all file names below are relative to it): `/private/tmp/claude-501/-Users-chayanaggarwal-Code-Arkiv-Github/ee1320ae-45b8-4a79-93f4-e2e71a76e497/scratchpad/ui-audit/shots/`.
+`fx-*` is the fixture repo, `st-hosted-*` is the hosted repo, `st-*` is a state (write flow, empty, error).
+Names end in `-desktop-light`, `-desktop-dark`, `-phone-light` or `-phone-dark`.
+
+tGLM spent: 0.
+The fixture ran on the fake chain and the hosted repo was only read.
+
+## 1. Audit
+
+### 1.1 What is already good
+
+This matters, because the redesign keeps it.
+
+- No horizontal scroll at 390 px on any of the 18 pages in 4 themes and viewports.
+- `axe-core` reports 0 violations on home, repo, patch, commits, releases and the confirm dialog.
+- Dark and light both work, contrast is sound, and the focus ring is visible.
+- Every page is server-rendered, has a skip link, and the keyboard map (`g` then a letter, `j`/`k`, `?`) is a real asset for people who live in git.
+- Diffs, highlighting, markdown sanitising and the verification facts are correct and fast.
+- The write path already has the right safety shape: one confirm click, cost first, CSRF, keys stay in the process.
+
+So the UI is not broken.
+It is a competent read-only skeleton that speaks the protocol's vocabulary to a person who wants to do git work.
+The pain is in vocabulary, missing product features, and a write flow that does not tell the user what they are publishing.
+
+### 1.2 Confusion points, ranked by impact
+
+1. **The verification line is protocol text.**
+   "Verified identity rev 1, 1 of 1 peers anchored, signatures valid" appears on every page and means nothing to a user; on a phone it is cut to "identity rev 1, 1 of 1 peers anchored, ...".
+   The panel behind it says "Delegate 3664a2b ... head seq 1, body 6ea83e9 at block 31, entity 44064d7".
+   `fx-repo-desktop-light.png`, `fx-repo-phone-dark.png`, `st-verify-open-desktop-light.png`.
+2. **People are 7-hex strings.**
+   "by 3664a2b", "Delegate 3664a2b", "opened by 3664a2b" on every issue, patch, review and commit-adjacent view.
+   The CLI already records an alias per peer (`PeerBody.alias`), but the UI cache does not carry it.
+   `fx-patch-desktop-light.png`, `fx-issue-desktop-light.png`.
+3. **Time is block numbers.**
+   "Last push: block 486342", "opened at block 20, op ec65041", "Anchored at block 31".
+   The only wall-clock times are the author's own clocks ("12 min ago"), which the page itself warns may be wrong.
+   `hosted-loading-home-desktop-light.png`, `fx-commit-first-desktop-dark.png`.
+4. **The Code page spends half its height on two near-identical ref lists.**
+   "Canonical" and "Delegate 3664a2b" list the same refs, the second as raw `refs/heads/...` paths.
+   There is no branch or tag switcher; the only way to view another ref is to know the URL.
+   `fx-repo-desktop-light.png`, `fx-repo-phone-dark.png`.
+5. **The confirm dialog shows plumbing, not the action.**
+   Opening one issue shows "Transactions 2", "Wallet top-up 0.000375462 tGLM to the control address, fee at most 0.000042 tGLM", "Entities 1".
+   Approving a patch shows "Transactions 4" and "2 transfers ... to the control address".
+   Amounts have 9 decimals.
+   Nothing says the write is public, permanent, and has a lifetime; the content being published is hidden under "What will be signed".
+   On a phone the dialog opens inside the page under the tab bar, so it does not read as a modal.
+   `st-confirm-issue-desktop-light.png`, `st-confirm-review-phone-dark.png`.
+6. **After Send the user gets a 66-character tx hash.**
+   "Sent, waiting for the receipt", a raw transaction id, and a toast at the bottom right, far from where the eyes are.
+   No estimate of how long it takes, no step that says when it is visible to others.
+   `st-sent-issue-desktop-light.png`.
+7. **The patch page cannot answer "is this change good".**
+   It has no title body, no commit list, no diff, no changed files, no checks, and revisions appear only as hashes.
+   On the hosted repo all 8 patches show "open" and "0 comments" although each was accepted into main under CI-gated rules; the approvals and CI attestations that gate main are invisible there.
+   `fx-patch-desktop-light.png`, `st-hosted-patches-desktop-light.png`.
+8. **The Program page is raw.**
+   "Pinned program rhai/1 f3d22b6", "Ref moves 1 accepted", and a Bounties table whose amounts are bare numbers ("5", "0", no unit).
+   It does not say what the rules require, or why a push was accepted.
+   `fx-program-desktop-light.png`, `st-hosted-program-desktop-light.png`.
+9. **Releases speak program jargon and raw bytes.**
+   "not tracked by the program", "valid under the pinned program", sizes like "21983268 B", a 12-character hash with no copy button, and a footer telling the user to go to the CLI to verify.
+   `fx-releases-phone-light.png`, `st-hosted-releases-phone-dark.png`.
+10. **Phone chrome is cramped and clips content.**
+    The tab bar cuts "Program" to "Pr" with no scroll hint; the clone box shows only `git clone arkiv::z32QC1rhuaDVw7`, so the address cannot be read; the header buttons "theme" and "?" are text buttons at full size; the verification card is truncated.
+    `fx-repo-phone-dark.png`, `fx-blob-phone-light.png`, `fx-log-phone-light.png`.
+11. **Dead ends and "restart the program" instructions.**
+    The empty home says to use the CLI; an unknown or unfetched repo is a bare "404 / No such repo in this $CHARTER_HOME"; with no keys, every write form says "Run `chart keys init`, fund the wallet, then restart `chart ui`", because keys are loaded once at startup.
+    `st-empty-home-phone-dark.png`, `st-bad-rid-desktop-light.png`, `st-writes-off-desktop-light.png`.
+12. **A 3,200-line file is a 40,328 px page.**
+    Highlighting is capped at 2,000 lines but the whole file is rendered into the DOM.
+    `fx-blob-long-desktop-light.png`.
+
+Smaller items:
+
+- The theme button says "theme" with no hint of the current mode.
+- Issue and patch rows give no author alias, no comment counts on the issue list, and no filter or search.
+- The "Fund the bounty" form has an amount of 0 that shows no visible feedback on submit (page unchanged; not investigated further).
+- Times such as "Times are the authors' own clocks" appear as a disclaimer on every thread; correct, but it is a symptom of point 3.
+
+### 1.3 Empty, loading and error states
+
+| State | What a user sees today | Verdict |
+|---|---|---|
+| No repos | One sentence telling them to use `git clone` or `chart ui <rid>` | Dead end, no action on the page |
+| Repo not cached | 404 page, no hint that it can be fetched | Dead end |
+| First sync running | By source (`verify.rs` `unsynced`): "Pending: not verified by chart ui yet; the first sync round is running", "synced never" | Not seen on screen: the first sync of the hosted repo finished in seconds, so this state was read from source, not captured |
+| Sync paused by RPC quota | "paused: RPC quota, resumes in N min" in the verification line (by source) | Not exercised; plausible but easy to miss |
+| Arkiv unreachable | Not exercised (no way to cut the network from the backend options); by source there is a per-round error in the panel | Unverified |
+| No keys | "Writes are off ..." message in place of every form | Clear, but needs a restart to fix |
+| Write failed | Not exercised on the fake chain | Unverified |
+| Equivocation | Red "Equivocation" word and a red row in the panel | Correct but jargon; no page-level warning |
+
+## 2. Missing features, ranked by user value
+
+Ranked against what a person coming from GitHub or Radicle expects and against what `chart` already does.
+"UI today" is what the 11 current routes support.
+
+| # | Gap | UI today | CLI or protocol | Value |
+|---|---|---|---|---|
+| 1 | Branch and tag switcher, all-branches page | None; URL only | Refs per peer in `view.json` | Daily use |
+| 2 | Patch review: files changed, commits, revision compare, inline comments | Hashes only | Revisions and heads are in ops | Daily use |
+| 3 | Checks on patches and main: approvals needed, CI attestation, signed commits | None | `programs/ci-gated.rhai`, attestation ops, folded state | Charter's differentiator |
+| 4 | Issue and patch writes beyond open and comment: close, reopen, create a patch, revise, merge | Open issue, comment, review, mark merged, claim, fund | `op post` supports the full set (the fixture uses `issue close`) | Daily use |
+| 5 | Plain-language authors: aliases instead of 7-hex ids | Hex only | `PeerBody.alias` | Daily use |
+| 6 | Wallet: balance, spend history, low-balance warning | Balance only inside the confirm dialog | `chart fund` | Cost awareness |
+| 7 | Expiry and keep-alive: "kept until", warnings, renew with a cost preview | None | `chart status`, `chart keepalive --dry-run` | Prevents data loss |
+| 8 | Wall-clock time for blocks | None | Block times are on the chain | Daily use |
+| 9 | Search and filter: repos, issues, patches, commits, files | None | `chart search` (network); local cache is searchable | Daily use |
+| 10 | Maintainers and identity: show maintainers by name, propose and accept revisions, rename, threshold | Hex list in the verification panel | `chart id show/propose/accept` | Team use |
+| 11 | Private repos: lock badge, members, roles | Not shown at all (`private` is cached but unused in pages) | `chart member ...` | Team use |
+| 12 | Commit tools: file history, blame, compare, archive download | Log and single commit | Plain git on the cache | Daily use |
+| 13 | Activity feed: new pushes, patches awaiting your review, bounties, expiring repos | None | Derived from the sync loop and ops | Daily use |
+| 14 | Rules page that explains the program and shows why each push was accepted or refused | Raw table | `chart program status` | Trust |
+| 15 | Release verification in the page and humane sizes and hashes | "Verify with the CLI" text | `chart release verify` | Trust |
+
+Lower: escrow status and audit view (`chart escrow audit`), agent grants and devices (head model section 4), attached proofs (`op attach-proof`), timelock, ZK receipts, create and clone a repo (deferred with onboarding), markdown preview in forms, issue labels.
+
+## 3. Redesign
+
+Design read: a developer tool for engineers who know git and may be new to Arkiv; a calm, trustworthy, quietly dense product UI, not a landing page.
+Dials: variance 3, motion 2, density 5.
+The design-taste skill is written for landing pages, so only its product-safe rules are applied: one accent, one neutral ramp, no AI-purple, no centered hero, no serif, no decorative motion, a single shape rule, full state coverage, label above input, button contrast checked, and no hand-rolled icons in the shipped build.
+
+### 3.1 Principles
+
+1. Say what the action does, in git words.
+   "Approve this patch", "Comment", "Renew", never "anchor", "entity" or "control address" outside a "Technical details" disclosure.
+2. Verification is a state, not a paragraph.
+   One chip says Verified; it turns amber or red only when something is wrong, and a page-level banner appears for conflicts.
+3. Money is always visible and never a surprise.
+   The wallet balance sits in the header; every write shows the worst-case cost, what is published, and that it is public and lasting.
+4. Time is wall-clock time; blocks are details.
+5. Keep what works: server-rendered pages, htmx, the keyboard map, the guard, the 20 KB per page budget.
+
+### 3.2 Information architecture
+
+Global header (always): logo, Repositories, Activity, a "Jump to" command box (`/`), a quiet sync indicator, the wallet chip, the theme toggle.
+On phones the three destinations move to a bottom bar (Repositories, Activity, Wallet) and the header keeps only the logo, sync dot, wallet chip and theme.
+
+```text
+/                          Repositories (with attention strip: expiring, awaiting your review)
+/activity                  New pushes, reviews waiting for you, bounties, expiring repos
+/wallet                    Balance, address, spend history, renew-all
+/r/<rid>                   Code (branch picker, files, last commit, README, side panel)
+/r/<rid>/tree|blob/...     File browser: tree sidebar, file view, history link
+/r/<rid>/branches          All branches and tags with last push and author
+/r/<rid>/commits/<ref>     Commits grouped by day, filter, signed mark
+/r/<rid>/commit/<sha>      Commit and diff
+/r/<rid>/issues, /<id>     List with Open or Closed filter, thread with sidebar
+/r/<rid>/patches, /<id>    List with checks column; patch with Overview, Files changed, Commits
+/r/<rid>/releases          Releases with allowed-by-rules mark, humane sizes, copy hash
+/r/<rid>/rules             Rules and CI: what is enforced, recent decisions, bounties
+/r/<rid>/settings          Maintainers, identity history, storage and keep-alive, access (private)
+```
+
+Renames: Program becomes "Rules and CI"; Verification stops being a tab and becomes the chip plus a popover; "Delegate" becomes "Maintainer" in the UI.
+Old URLs keep working (redirects), so links in docs and the CLI output do not break.
+
+### 3.3 Layout and the pages that change most
+
+- **Repositories.**
+  Rows, not a table: name and visibility, description, "Updated 12 min ago by ravi", "Kept until 14 Jun 2027", and one status chip (Verified, Syncing first copy, Expires in 12 days).
+  An attention strip shows only exceptions; when there are none it does not exist.
+- **Repo page.**
+  Header row: name, Public or Private, the Verified chip (click for a plain-language popover, details behind a disclosure), Clone button with a popover that holds the full `git clone` line.
+  Below: tabs, then a two-column layout (main, then a 296 px side panel with Maintainers, Storage, Activity); one column on phones.
+  The branch picker replaces the "Branches and tags" section.
+- **File browser.**
+  Tree sidebar (hidden behind a button below 960 px), breadcrumb, last commit bar, Copy path, History, Raw.
+  Files over 2,000 lines render only the first screen and load the rest on demand.
+- **Patch.**
+  Title, state, "ravi wants to merge 2 commits into main from fix/empty-ledger", a revision picker, then Overview (checks panel, timeline), Files changed, Commits.
+  The right panel holds Your review (Approve, Comment), Merge, Reviewers.
+  Checks are derived from the pinned program and the attestation ops: maintainer approval (n of m), CI passed (who attested, which commit), commits signed.
+- **Issue.**
+  Thread plus side panel: Bounty (pledged amount with unit, fund), Linked patches, Participants; Close and Comment in the composer with a cost hint.
+- **Releases and Rules and CI.**
+  A release card shows "Allowed by repo rules" and a table of downloads with platform, size in MB and a copy button for the full hash.
+  Rules and CI states the rule in a sentence, lists recent decisions as Change, Who, Checks, Result, and shows bounties with units.
+
+### 3.4 The cost-confirm dialog (writes)
+
+The dialog already exists; this redesign changes what it says, not when it appears.
+Every on-chain write still shows it, with no "do not ask again" option in this proposal (see open question 2).
+
+```text
+Approve this patch?
+This publishes your approval on Arkiv. Anyone can read it. It cannot be edited or deleted.
+
+ What you publish
+ Approval of "Fix empty ledger crash", revision 2, commit 1a87e4f
+
+ Most you can pay                              0.0044 tGLM
+ Test tokens, no real value
+
+ Wallet now     12.4780 tGLM        Takes      about 10 s
+ After          about 12.4736       Kept for   about 6 months, then it needs a renewal
+
+ > Breakdown and what will be signed   (technical: records, transactions, top-ups, fee, payload)
+
+ [Cancel]                          [Approve for up to 0.0044 tGLM]
+ Esc cancels, Cmd+Enter sends. Your keys never leave this computer.
+```
+
+Rules:
+
+- The headline is the action in a question; the sentence under it says public, permanent and what is published.
+- One number: the most the user can pay, rounded to 4 decimals; the top-up transfers and the fee are in the breakdown.
+- The primary button repeats the amount, so the consent is on the button.
+- Cancel is the default focus and Enter does not send (kept from today); `Esc` cancels; `Cmd+Enter` sends.
+- Variants: low balance (red notice, button disabled, "Nothing was spent", copy the wallet address); RPC quota (amber notice with a countdown, button enabled when it ends); renew shows the new end date.
+- After Send the same dialog becomes a three-step progress: signed on this computer, in a block (with the block number and seconds), visible after the next sync; it can be closed and keeps going.
+- On phones it is a bottom sheet with full-width buttons.
+
+Measured on the fake chain (fees are not Rabdi fees): open issue at most 0.002164 tGLM in 2 transactions; approve patch at most 0.004358 tGLM in 4 transactions.
+The mockup shows rounded values.
+
+### 3.5 Tokens
+
+One accent, one neutral ramp, one shape rule.
+Shape: controls 6 px, containers 8 px, chips pill; nothing else.
+
+| Token | Light | Dark |
+|---|---|---|
+| `--bg` | `#f6f7f9` | `#0e1014` |
+| `--s1` (surface) | `#ffffff` | `#15181e` |
+| `--s2`, `--s3` | `#eff1f4`, `#e3e6eb` | `#1c2027`, `#272c35` |
+| `--line`, `--line-strong` | `#dde0e6`, `#8b929e` | `#292e38`, `#6d7584` |
+| `--text`, `--text-2`, `--text-3` | `#14171c`, `#434955`, `#5a606c` | `#e9ebef`, `#b6bbc6`, `#9199a6` |
+| `--accent` (links, primary) | `#2152c4` | `#7ba3ff` |
+| `--ok`, `--warn`, `--bad` | `#14683a`, `#80500a`, `#b0241c` | `#5ac882`, `#e3a53f`, `#f58179` |
+
+- Type: Geist for text and Geist Mono for hashes, paths and amounts; 14/21 base, 13 dense, 12.5 mono, 22/28 page title.
+- Status colours only mean status: green verified or passing, amber waiting or expiring, red conflict or refused; blue is the one accent.
+- Contrast was checked against the backgrounds for body text; all of `--text-3` is at least 4.5:1.
+- Motion: one live dot that pulses slowly while synced, a row flash when a live update lands, nothing else; all of it off under `prefers-reduced-motion`.
+
+### 3.6 Live sync and verification without noise
+
+- Header: a small dot and "Synced 12 s ago".
+  Amber "Paused: rate limited" and red "Cannot reach Arkiv, showing data from 4 min ago" appear only when true.
+- The Verified chip is the only per-repo verification element on normal pages.
+  Click opens a popover in plain sentences, with a Technical details disclosure for revisions, peers, block numbers and signature suites.
+- Conflicting history: the chip turns red ("Conflicting history") and a page-level banner appears on every page of that repo.
+- Updates arrive over the existing event stream (`/r/<rid>/events`); new rows flash once, and the wallet chip updates after a write.
+- The mockup has switches for these states (sync paused, offline, conflict).
+
+### 3.7 Libraries
+
+The stack stays axum, askama and htmx, with no SPA.
+The proposal adds only two vendored assets and no Rust dependency.
+
+| Need | Pick | License | Why |
+|---|---|---|---|
+| Typeface | Geist and Geist Mono, self-hosted woff2 (latin subset, about 70 KB, embedded like `htmx.min.js`) | OFL-1.1 | Readable at 13 px, has a real mono; the existing CSP forbids third-party fonts, so it must be embedded |
+| Icons | Phosphor icons, about 20 glyphs as an inline SVG sprite included by askama | MIT | Maintained set; the skill forbids hand-drawn icons; the mockup uses placeholder glyphs only |
+| Popovers, dialogs, details | Native `<dialog>`, `<details>` and the `popover` attribute | platform | No dependency, works with JS off for reading |
+| Command box | About 60 lines of vanilla JS in `keys.js` | none | It only filters a list the page already has |
+
+Library versions must be re-checked on crates.io, npm and the vendor sites at slice time, since none is pulled by Cargo.
+
+## 4. Backend and endpoint changes the redesign needs
+
+These are sketches; nothing is implemented.
+`RepoView` is the per-repo `view.json` written by the sync loop.
+
+1. **People and time.**
+   Add `alias: Option<String>` per peer and `time_ms` per anchored block to `RepoView` (block time from the receipt or header already read by the sync loop).
+   Pages show alias or short id, and "12 min ago" derived from block time.
+2. **Expiry.**
+   Add `expiry: { min_block, min_ms, checked_ms }` to `RepoView`, computed with the same function `chart status` uses.
+   `GET /r/{rid}/settings` shows it; the home row shows "Kept until".
+3. **Cost preview.**
+   `POST /r/{rid}/write/preview` returns JSON:
+   `{ "action": "approve", "publishes": "...", "visibility": "public|sealed", "max_wei": "...", "tx_count": 4, "records": 2, "eta_s": 10, "keep_days": 182, "balance_wei": "...", "after_wei": "...", "problems": ["low_balance" | "quota_paused"], "breakdown": {...}, "payload": "..." }`.
+   The existing prepare handler renders the dialog from it, so the numbers have one source.
+4. **Wallet.**
+   `GET /wallet` and `GET /wallet/chip` (htmx fragment for the header).
+   Append every confirmed write to `$CHARTER_HOME/ui/spend.json` (`{ts_ms, block, repo, action, wei, tx}`); the page lists it.
+   Add a `wallet` event to the event stream.
+5. **Write kinds.**
+   Add `issue-close`, `issue-reopen`, `patch-create`, `patch-revise` to `writes/form.rs`, mapped onto the ops the CLI already posts; add `keepalive` that calls the keep-alive function with the dry-run estimate as its cost.
+6. **Checks.**
+   `GET /r/{rid}/patches/{id}/checks` (fragment): from the folded program state and attestation ops, return approvals needed and present, CI attestation (attester, commit, time), and signed-commit status.
+7. **Branches and search.**
+   `GET /r/{rid}/branches` from the existing git reader; `GET /search?q=` over repo names, issue and patch titles and commit subjects in the local cache only (substring match; no new index crate).
+8. **Keys loaded late.**
+   Load `Keys` on demand per write instead of only at startup, so the "restart `chart ui`" instruction goes away.
+9. **Activity.**
+   `GET /activity` folds new pushes, reviews waiting for the local identity and expiring repos from the cache.
+
+Security model is unchanged: bind 127.0.0.1, Host check, session token cookie, CSRF on every write, strict CSP (fonts and icons are embedded, no third-party requests), keys never reach the browser.
+
+## 5. Slices
+
+Effort is one engineer, in working days, and includes tests and Playwright screenshots in light and dark at desktop and phone width.
+Each slice ends with a short real-flow recording on the fake chain, per the project rule on PR demo videos.
+Total about 34 days; slices 0 to 3 (about 14 days) give the biggest visible change and should go first.
+
+| Slice | Delivers | Days | Acceptance | Files touched |
+|---|---|---|---|---|
+| 0 | Tokens, shell, fonts, icon sprite, phone bottom bar, theme toggle with state, sync indicator, wallet chip placeholder | 3 | No horizontal scroll at 390 px on all pages; axe 0 violations; header fits one line at 1024 px; page weight still under 20 KB gzipped plus cached assets | `assets/app.css`, `assets/fonts/*`, `assets/icons.svg`, `templates/base.html`, `src/assets.rs` |
+| 1 | Repo list rows and attention strip; repo header, Clone popover, branch picker, branches page, side panel; Code page without the ref lists | 4 | Switch branch and tag from the picker; every ref of the fixture reachable without typing a URL; phone tabs show a scroll hint | `templates/index.html`, `repo.html`, `home.html`, `tree.html`, `src/pages/repos.rs`, `code.rs`, `mod.rs` |
+| 2 | Vocabulary and time: aliases, wall-clock times, Verified chip and popover, "Maintainer", Rules and CI naming, conflict banner | 3 | No page shows "delegate", "rev", "anchored", "entity" or a bare block number outside a Technical details disclosure; times read "12 min ago" or a date; an equivocation fixture shows the red banner on every page | `src/cache.rs`, `sync_loop.rs`, `pages/verify.rs`, `templates/verify.html`, `thread.html`, `commit.html`, `program.html` |
+| 3 | Cost dialog v2, write progress, wallet page and chip, spend ledger, low-balance and quota variants | 4 | Dialog shows what is published, max cost, balance after and lifetime; no tx hash on the success path; low balance disables Send; the e2e write flow still passes and `chart op list` shows the op | `templates/confirm.html`, `status.html`, `toast.html`, `src/writes/*`, `pages/write.rs`, new `pages/wallet.rs`, `assets/live.js` |
+| 4 | Issues and patches v2: filters, close and reopen, patch Overview, Files changed, Commits, revision picker, checks panel | 6 | A patch shows its diff and checks without leaving the page; the hosted repo's patches show approvals and CI attestation; closing an issue from the UI verifies with `chart op list` | `templates/threads.html`, `thread.html`, new `patch.html`, `src/pages/cobs.rs`, `fold.rs`, `writes/form.rs` |
+| 5 | Releases and Rules and CI pages, humane sizes, copy hash, plain-language rule text, decisions table | 3 | Sizes in MB or KB; the full hash is copyable; each accepted or refused push links to its patch and checks | `templates/releases.html`, `program.html`, `src/pages/program.rs` |
+| 6 | Activity page, local search, "Jump to" box, large-file paging | 4 | Search finds a repo, issue, patch and commit subject from the fixture; a 3,200-line file renders in under 50 ms and under 200 KB; Activity lists a pending review | new `pages/activity.rs`, `pages/search.rs`, `assets/keys.js`, `pages/code.rs`, `highlight.rs` |
+| 7 | Settings: maintainers, identity history, propose and accept, storage and renew with cost preview | 5 | Renew shows the dry-run cost and extends the expiry; adding a maintainer creates an identity proposal visible to `chart id show` | new `pages/settings.rs`, `writes/*`, `cache.rs` |
+| 8 | Phone and accessibility pass, empty and error states for every page, e2e screenshots, performance budget re-check | 2 | Every page has a designed empty, loading and error state; the `ui.md` section 6 budgets pass; axe 0 violations | `templates/*`, `assets/app.css`, `e2e/e2e.py` |
+
+Private-repo views (lock badge, members, roles) are small and ride along in slices 1 and 7; they need `RepoView.private`, which is already cached.
+
+## 6. Mockup
+
+`/private/tmp/claude-501/-Users-chayanaggarwal-Code-Arkiv-Github/ee1320ae-45b8-4a79-93f4-e2e71a76e497/scratchpad/ui-audit/mockup.html`.
+One self-contained file with inline CSS and JS; the only external request is Google Fonts (Geist), which the shipped build embeds instead.
+It is clickable: repository list, repo code page with branch picker and Clone popover, file browser, commits, issue, patch with checks and a Files changed tab, releases, Rules and CI, and the cost dialog with four variants and a sending then done sequence.
+It follows `prefers-color-scheme` and has a theme toggle; the bottom "Mockup" bar switches screens, opens dialog variants and simulates sync states (paused, offline, conflict).
+Checked in Chrome at 1280 px and 390 px in light and dark: no horizontal scroll on any screen or dialog variant, no console errors.
+Mockup screenshots are in `scratchpad/ui-audit/mock-shots/` (for example `patch-desktop-dark.png`, `dialog-approve-desktop-light.png`, `code-phone-light.png`).
+All data in the mockup is made up, including the repo address; it uses no real key, phrase or hosted-repo data.
+
+## 7. Open questions
+
+1. Name aliases: show the peer alias from the identity, or let each user keep a local nickname for peers, or both?
+2. Should small writes (for example a comment under 0.005 tGLM) ever skip the dialog after a one-time opt-in?
+   The proposal says no, because the user asked for an explicit dialog before every on-chain write.
+3. May we embed Geist and Phosphor in the binary (OFL-1.1 and MIT, about 90 KB together), or should we keep system fonts and a smaller custom icon set?
+4. Patch states: today a patch is open until a `merged` op; the hosted repo shows all 8 patches open although main moved.
+   Should the UI infer "merged" from the accepted ref move, or show only what ops say?
+5. Is block time acceptable as the displayed time (accurate, chain-sourced), or do we also show the author's own clock?
+6. Should Activity and Search stay local-cache only, or later query Arkiv (`chart search`) for repos not on this computer?
+7. Is the order slices 0 to 3 first right, or should patches (slice 4) come before the cost dialog?
+
+## 8. Deferred to after mainnet: onboarding
+
+The user decided on 2026-11-11 that onboarding waits until after the mainnet release; Charter stays in its dev phase until then.
+This section only lists what that work would cover.
+It is not designed here, nothing in this document depends on it, and no new-user flow was walked.
+
+The onboarding work would cover:
+
+- a first-run wizard inside `chart ui`;
+- creating the identity and keys, and the recovery phrase flow (show, back up, restore);
+- the wallet address and QR code, and how a new user gets funds;
+- the funding path, including the public faucet route, and a live balance wait;
+- cost estimates for the first actions;
+- creating or cloning a first repository from the UI, and the first push;
+- the second-computer story;
+- plain-language error handling for each of those steps.
+
+One fact from the audit that bears on it: the seed is raw 32 bytes in `keys/seed`, so a recovery phrase would be a new encoding of it, not a change to key derivation.
+
+## 9. Not verified
+
+- The first-sync "Pending" state, the RPC-quota pause and the Arkiv-unreachable state were read from source, not captured on screen.
+- The write-failure state and a real Rabdi write were not exercised; the cost figures come from the fake chain.
+- Keyboard and accessibility coverage is `axe-core` on 6 pages plus the shortcut help dialog; there was no screen-reader pass.
+- The "fund 0" submit showing no feedback was seen once and not investigated.
+- The mockup was checked in Chrome only, not Safari or Firefox.
