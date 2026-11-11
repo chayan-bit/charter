@@ -17,6 +17,7 @@ pub mod identity;
 pub mod ids;
 pub mod keepalive;
 pub mod keys;
+pub mod manifest_cache;
 pub mod observe;
 pub mod packs;
 pub mod pieces;

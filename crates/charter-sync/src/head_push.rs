@@ -14,6 +14,7 @@ use crate::device::device_keys;
 use crate::git::Git;
 use crate::heads::{self, V2};
 use crate::keys::Keys;
+use crate::manifest_cache;
 use crate::pieces::PIECE_SIZE;
 use crate::push::{Update, stage};
 use crate::repo::{Config, Repo};
@@ -392,10 +393,10 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
         let snap_bytes: u64 = match prev {
             Some(p) => {
                 let dev = self.own_device(p)?;
-                crate::pieces::snapshot_manifests(self.a, &self.rid(), &dev, &p.head.body.snapshot)
+                manifest_cache::facts(self.a, self.repo, &self.rid(), &dev, &p.head.body.snapshot)
                     .await?
                     .iter()
-                    .map(|(_, m)| m.size)
+                    .map(|f| f.size)
                     .sum()
             }
             None => 0,

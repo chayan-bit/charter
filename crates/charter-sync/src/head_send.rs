@@ -282,7 +282,9 @@ impl<A: Arkiv> HeadPush<'_, A> {
 
     async fn content(&self, plan: &Plan) -> Result<Content> {
         if plan.snapshot {
-            return self.snapshot(plan).await;
+            let c = self.snapshot(plan).await?;
+            crate::manifest_cache::record_files(self.repo, &c.snapshot, &c.files)?;
+            return Ok(c);
         }
         let mut packs = plan.carried.clone();
         let mut files = vec![];
