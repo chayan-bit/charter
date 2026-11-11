@@ -384,7 +384,7 @@ async fn a_head_patch_that_grows_by_almost_its_whole_calldata_lands_in_one_tx() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_push_whose_snapshot_is_due_whatever_it_sends_builds_no_thin_pack() {
+async fn a_due_push_builds_no_thin_pack_and_a_refs_only_push_at_the_threshold_is_no_refresh() {
     let net = Net::new();
     let alice = Peer::new(&net, 1);
     let rid = init(&net, &alice, "due").await;
@@ -392,11 +392,11 @@ async fn a_push_whose_snapshot_is_due_whatever_it_sends_builds_no_thin_pack() {
     let work = work_repo(tmp.path(), "work");
     commit(&work, &[("a.txt", b"one")], "feat: one");
     // The repo is opened per plan: an open `Repo` holds the push lock `push2` takes.
-    let plan_of = |work: std::path::PathBuf| {
+    let plan_of = |work: std::path::PathBuf, r: &'static str| {
         let (net, alice, rid) = (&net, &alice, &rid);
         async move {
             let repo = &alice.repo(rid);
-            let hp = Box::pin(prepare2(net, alice, repo, &work, &[upd("refs/heads/main")]))
+            let hp = Box::pin(prepare2(net, alice, repo, &work, &[upd(r)]))
                 .await
                 .expect("prepare");
             let state = charter_sync::state::State::load(&repo.state_path()).expect("state");
@@ -404,7 +404,7 @@ async fn a_push_whose_snapshot_is_due_whatever_it_sends_builds_no_thin_pack() {
             (plan.snapshot, plan.thin.len(), plan.stored.len())
         }
     };
-    let (snapshot, thin, _) = plan_of(work.clone()).await;
+    let (snapshot, thin, _) = plan_of(work.clone(), "refs/heads/main").await;
     assert_eq!(
         (snapshot, thin),
         (true, 0),
@@ -426,8 +426,16 @@ async fn a_push_whose_snapshot_is_due_whatever_it_sends_builds_no_thin_pack() {
     push2(&net, &alice, &rid, &work, &["refs/heads/main"])
         .await
         .expect("small push");
+    // A refs-only push sends no piece: at the threshold it refreshes no earlier than v0.4.0.
+    git(&work, &["branch", "topic"]);
+    let refs_only = plan_of(work.clone(), "refs/heads/topic").await;
+    assert_eq!(
+        refs_only,
+        (false, 0, 0),
+        "a refs-only push is not a refresh"
+    );
     commit(&work, &[("c.txt", b"three")], "feat: three");
-    let (snapshot, thin, stored) = plan_of(work.clone()).await;
+    let (snapshot, thin, stored) = plan_of(work.clone(), "refs/heads/main").await;
     assert!(snapshot, "due with any new piece");
     assert_eq!(
         (thin, stored),

@@ -387,15 +387,13 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
         };
         let due = |new: usize| !has_snapshot || snapshot_due(&layers, &carried, new);
         // A push whose snapshot is due with any new piece (always so without a snapshot)
-        // never sends a thin pack, so it neither builds nor encodes one.
-        // shortcut: a refs-only push right at the threshold refreshes one push early.
-        let forced = !tips.is_empty() && due(1);
+        // never sends a thin pack, so it neither builds nor encodes one. Only then is it
+        // asked whether it carries new objects: a refs-only push stays a head push.
+        let git = self.repo.git();
+        let forced = !tips.is_empty() && due(1) && git.has_new_objects(&tips, &exclude)?;
         let thin = match tips.is_empty() || forced {
             true => vec![],
-            false => self
-                .repo
-                .git()
-                .thin_pack_bytes(&tips, &exclude, MAX_PACK_SIZE)?,
+            false => git.thin_pack_bytes(&tips, &exclude, MAX_PACK_SIZE)?,
         };
         // Its zlib fallback can still pass what readers decode: send a snapshot instead.
         let oversize = thin.len() as u64 > MAX_PACK_SIZE;
@@ -405,7 +403,7 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
         };
         let snapshot = forced || oversize || due(stored.len());
         let keep_layers = match snapshot {
-            true => layers_to_keep(&layers, |t| self.repo.git().has_pack(t)),
+            true => layers_to_keep(&layers, |t| git.has_pack(t)),
             false => vec![],
         };
         Ok(Plan {

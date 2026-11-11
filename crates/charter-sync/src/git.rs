@@ -311,6 +311,14 @@ impl Git {
         Ok(if empty { vec![] } else { bytes })
     }
 
+    /// Whether anything reachable from `tips` is missing from `exclude` (as for
+    /// [`Self::thin_pack_bytes`]): one object answers, so a refs-only push costs one spawn.
+    pub fn has_new_objects(&self, tips: &[String], exclude: &[String]) -> Result<bool> {
+        let input = rev_input(tips, &self.present(exclude)?);
+        let args = ["rev-list", "--objects", "--max-count=1", "--stdin"];
+        Ok(!self.run(&args, input.as_bytes())?.is_empty())
+    }
+
     /// Snapshot packs (head-model 4.4 and 13.3): self-contained packs of everything reachable
     /// from `tips` that no pack in `keep` (git pack trailers of packs in this repo) holds,
     /// with deltas searched afresh and without per-object zlib. Objects of `keep` are never
