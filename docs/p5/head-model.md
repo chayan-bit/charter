@@ -285,6 +285,7 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
   A later push reads the landed head first and continues its chain.
   A push refused this way after its bulk pieces landed has already paid for them, so the writer records where each bulk piece landed (`outgoing/bulk-pieces.json`, by the sha256 of its bytes) and the retry names those txs again instead of uploading (issue #26).
   The retry reads each recorded tx back first and reuses it only if it was sent by this device's `B_d` and carries exactly that piece's bytes, which is what every reader will check; anything else is uploaded again.
+  In a private repo a piece is sealed under the epoch key, so the retry also seals an empty piece locally and reuses a landed one only if it was sealed in the same epoch; a piece from before a membership change is uploaded again under the new key, since a member removed in between could still open it.
   Readers take piece bytes from calldata, live or not, so the 20-block lifetime of the piece entity does not bound the reuse; block-history retention does, as for every piece push.
   Bulk pieces come from `B_d`, never from `C_d`, so reuse does not change `pieces_created` or the rollback rule; inline pieces travel in the refused head tx itself and never landed.
   The record costs a first attempt one local file write and no round trip; a successful push deletes it.
@@ -598,9 +599,14 @@ The record names the device's last valid body by seq, hash and landing tx, inste
 ### 15.7 Private repos
 
 - In a private repo a device is also an MLS leaf, and since v0.6.0 the leaf names its device: the MLS credential is `nid || device`, and the leaf binding (the member's composite signature in the key package) covers the device too, so a revoke record maps to exactly one leaf.
-- An admin's client removes that leaf on its next refresh of the group, which every private-repo command, push, fetch and clone does; the revoke records arrive in the refresh's commit query, so this costs nothing until a revoke is pending, then one commit tx.
+- Removing that leaf is an explicit, paid write by an admin, never a side effect of a sync.
+  `chart device revoke` by an admin removes it at once; otherwise an admin runs `chart member sync --repo R`, or confirms the priced "Remove from the group" write that `chart ui` shows on the repo page, and both print or show the cost.
+  An admin's refresh only counts the revoked leaves still in the group, from the revoke records that arrive in its commit query, so finding them costs no query and sends nothing.
   The removal rotates the epoch key and the id-key generation, as a member removal does; the member keeps its role and its other devices.
-  An admin's own revoked device is removed by its remaining device; two admins racing make one removal (the first commit for the epoch wins, the other admin undoes its own and applies it).
+  An admin's own revoked device is removed by its remaining device.
+  Two admins racing make one removal: each leaves its commit pending, and its next refresh merges it only if it is the first valid commit for that epoch, else drops it and applies the other (docs/p2/private-repos.md, "Pending commits").
 - The revoked device's heads after the cut are ignored from the revoke on (15.2), before the leaf removal lands.
-  Until the removal lands it can still decrypt new rows: the gap lasts until an admin's client next syncs the repo, plus one commit tx, and `chart device revoke` prints a note saying so (or removes the leaf at once when the revoker is an admin).
+  Until the removal lands it can still decrypt new rows, and `chart device revoke` prints a note saying so, with the command that ends it.
+- A revoke stops a device seed, not an identity: a machine that also held `keys/` holds N's key (15.3), so it can still sign as N, revoke N's other devices and read what N can.
+  `chart device revoke` prints this warning in public and private repos; the recovery is removing the identity and starting a new one (docs/p2/private-repos.md, "Lost or stolen machine").
 - Leaves made before v0.6.0 name no device; `chart member list` marks them, and removing the member and adding its remaining devices again makes them revocable one by one (docs/p2/private-repos.md, "Revoked devices").

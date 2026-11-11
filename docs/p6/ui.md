@@ -73,6 +73,7 @@ The UI must never make a push wait on it, so:
 - Page handlers never take the lock; they only read `git/` (safe for concurrent readers) and the JSON files, which are replaced atomically.
 - The sync loop opens the repo with a new non-blocking `Repo::try_open`, runs one round (`sync` plus a `cob::list` from the last block seen), writes the files, and drops the lock; if the lock is busy it skips the round.
 - Interval: a round runs only when a one-query probe (newest `ag.rid` entity and the count) changed, since Rabdi bills an `arkiv_query` 10 units of a per-IP 10,000 (`docs/p0/arkiv-limits.md`); the repo on screen is probed every 10 s (with a `newHeads` socket, at the first block after that), other repos every 5 min while any page is open, and nothing with no page open (`crates/charter-ui/src/pace.rs`).
+  Anyone can write rows that carry a repo's `ag.rid` and so hide a change from the probe, so a repo with a page open also gets a full round at least every 30 min (`BACKSTOP_EVERY`), which adds 4 queries an hour to the on-screen repo (365 to 369) and to an idle one (17 to 21).
 - Quota: the RPC client keeps the latest `RateLimit` and `Arkiv-Quota-Used-Percent` headers; the loop slows from 50 % used, pauses at 80 % or on a 429 until the reset, never sleeps out a `Retry-After` inside a round, and the pages show "paused: RPC quota".
 
 Additions to `charter-sync` (both small, both tested): `Repo::try_open`, and `cob::list_since(rid, from_block)` so the loop reads only new ops.
@@ -100,6 +101,7 @@ Each fact links to the block or entity it came from.
 - Open an issue, comment, review or merge a patch, publish a release, fund or claim a bounty, through the same `charter-sync` functions the CLI calls, signed with `Keys` from `$CHARTER_HOME`.
 - Every write shows its cost first (the existing `push_send::Cost` estimate, in tGLM) and needs one confirm click; nothing is signed on page load.
 - After a write, the page shows "sent" at once and "confirmed in block N" when the receipt lands.
+- In a private repo where a revoked device still holds an MLS leaf, an admin's repo page offers "Remove from the group": a priced write like the others, which removes every revoked leaf in one commit; the sync loop only counts such leaves and never sends the removal itself (docs/p2/private-repos.md, "Revoked devices").
 
 ### 4.5 Live updates (slice 3)
 
