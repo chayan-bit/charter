@@ -233,6 +233,7 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
   Clients before this rule signed at the pending nonce and could land a second head transaction behind a pending one; `C_d` then created more entities than the current body records and every reader fails with `E_CONTROL_NOT_LIVE`.
   The machine that sent the current body (it is the one recorded in its `sent_heads`) accepts that head anyway, with a warning, and its next push signs a body whose `pieces_created` matches the real `entityNonce(C_d)`, which every reader accepts again.
   Any other machine, including another copy of the same seed that sent a different body, keeps failing closed until that repair lands.
+  The repair re-reads the head inside one `entityNonce(C_d)` bracket just before signing and runs only if that head is still the body it sent and planned on; if a copy landed a consistent body after the plan, the push fails with `E_CONCURRENT_PUSH` instead of overwriting it.
   A rollback is not repaired: an older body is not the body the device sent last, and the local mark rejects it as before (section 6).
   If a body still forks (two bodies naming the same `prev_tx`), readers follow only the current head back along `prev_tx`, so the discarded body never enters the merge or the fold, and the rollback check stays sound because every head transaction adds creates.
 

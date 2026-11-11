@@ -464,7 +464,8 @@ impl<A: Arkiv> HeadPush<'_, A> {
             };
             let sent = state.sent_head(&self.me())?;
             let own = plan.prev.as_ref().is_some_and(|p| Some(p.head.h) == sent);
-            if nonce > expected && own && out.is_empty() {
+            if nonce > expected && own && out.is_empty() && self.head_is(sent, nonce, state).await?
+            {
                 warn(
                     "repairing this device's head: it now accounts for every entity its control address created",
                 );
@@ -561,6 +562,18 @@ impl<A: Arkiv> HeadPush<'_, A> {
             ErrorCode::Rpc,
             "head txs keep landing late; push again",
         ))
+    }
+
+    /// Whether this device's head, read inside one `entityNonce` bracket at `nonce`, is
+    /// still `sent`: a copied seed may have landed a consistent body since the plan.
+    async fn head_is(&self, sent: Option<Hash32>, nonce: u64, state: &State) -> Result<bool> {
+        let v2 = self.own_v2(state).await?;
+        let dv = v2.as_ref().and_then(|v| v.device(&self.me()));
+        Ok(dv.is_some_and(|d| {
+            d.nonce.before == nonce
+                && d.nonce.after == nonce
+                && d.head.as_ref().map(|h| h.h) == sent
+        }))
     }
 
     async fn created_head_key(&self, rid: &Hash32) -> Result<Hash32> {

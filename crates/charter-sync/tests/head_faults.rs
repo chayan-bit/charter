@@ -466,3 +466,56 @@ async fn a_signed_base_that_is_not_an_ancestor_of_its_commit_fails_closed() {
         "every reader with the objects refuses it"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repair_never_overwrites_a_head_a_copied_seed_landed_after_the_plan() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 1);
+    let rid = init(&net, &alice, "repair-race").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    pushed(&net, &alice, &rid, tmp.path(), 1).await;
+    let twin = alice.second_device(&net);
+    let seed = charter_sync::device::device_seed_path(alice.home.path());
+    let copy = charter_sync::device::device_seed_path(twin.home.path());
+    std::fs::create_dir_all(copy.parent().expect("dir")).expect("dir");
+    std::fs::copy(&seed, &copy).expect("copy seed");
+    let dest = tmp.path().join("twin");
+    Box::pin(clone_into(&net, &twin, &rid, &dest))
+        .await
+        .expect("clone");
+
+    // Alice (who sent the current head X) plans a branch push; its upload is slow.
+    let work = tmp.path().join("work");
+    git(&work, &["checkout", "-q", "-b", "a-branch"]);
+    commit(&work, &[("a", b"alice")], "feat: a");
+    let ra = alice.repo(&rid);
+    let a = Box::pin(prepare2(
+        &net,
+        &alice,
+        &ra,
+        &work,
+        &[upd("refs/heads/a-branch")],
+    ))
+    .await
+    .expect("prepare");
+
+    // Meanwhile the twin lands Y on top of X, with a consistent nonce.
+    git(&dest, &["checkout", "-q", "-b", "t-branch"]);
+    commit(&dest, &[("t", b"twin")], "feat: t");
+    push2(&net, &twin, &rid, &dest, &["refs/heads/t-branch"])
+        .await
+        .expect("twin push");
+
+    let r = Box::pin(a.run()).await;
+    assert_eq!(code(r), "E_CONCURRENT_PUSH", "no repair over a landed head");
+    drop(ra);
+    let view = Box::pin(charter_sync::sync(&net, &twin.repo(&rid), &twin.want()))
+        .await
+        .expect("the twin still fetches");
+    let refs = view.peers[&alice.keys.nid()]
+        .refs_body()
+        .expect("refs")
+        .clone();
+    let names: Vec<&str> = refs.refs.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["refs/heads/main", "refs/heads/t-branch"]);
+}
