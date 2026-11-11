@@ -11,6 +11,7 @@ mod canonical;
 mod cbor;
 mod chain;
 mod chunk;
+pub mod codec;
 mod entity;
 mod envelope;
 mod error;
@@ -21,8 +22,10 @@ mod types;
 pub use attrs::{AttrValue, Attribute, check_arkiv_rules, chunk_attributes};
 pub use body::{
     AnchorBody, BindBody, Body, CREATE, CobOpBody, DEVICE_LAYOUT_VERSION, DEVICE_SEQ, DeviceBody,
-    HeadBody, HeadPack, HeadRef, IdAccBody, IdBody, MAX_ACTION, MAX_HEAD_PIECES, MAX_PAYLOAD,
-    MAX_TYPE_NAME, ManifestBody, PeerBody, PieceRef, ProgramPin, RefEntry, RefsBody, Require,
+    HEAD_V3_LAYOUT_VERSION, HeadBody, HeadBodyV3, HeadPack, HeadRef, IdAccBody, IdBody, MAX_ACTION,
+    MAX_HEAD_PIECES, MAX_PAYLOAD, MAX_TYPE_NAME, ManifestBody, PackV3, PeerBody, PieceRef,
+    PieceRun, ProgramPin, RefEntry, RefsBody, Require, head_patch_attributes, open_head_calldata,
+    runs,
 };
 pub use canonical::{CanonicalRefs, canonical_refs};
 pub use chain::{

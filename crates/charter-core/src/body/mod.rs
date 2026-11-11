@@ -3,6 +3,7 @@
 mod anchor;
 mod cob;
 mod head;
+mod head_v3;
 mod id;
 mod peer;
 mod refs;
@@ -12,6 +13,10 @@ pub use cob::{CREATE, CobOpBody, MAX_ACTION, MAX_PAYLOAD, MAX_TYPE_NAME};
 pub use head::{
     DEVICE_LAYOUT_VERSION, DEVICE_SEQ, DeviceBody, HeadBody, HeadPack, HeadRef, MAX_HEAD_PIECES,
     PieceRef,
+};
+pub use head_v3::{
+    HEAD_V3_LAYOUT_VERSION, HeadBodyV3, PackV3, PieceRun, head_patch_attributes,
+    open_head_calldata, runs,
 };
 pub use id::{IdBody, ProgramPin};
 pub use peer::{BindBody, IdAccBody, PeerBody};
