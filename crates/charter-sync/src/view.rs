@@ -185,6 +185,28 @@ pub async fn chain_of<A: Arkiv>(
     Ok((chain, observed))
 }
 
+/// The completeness observation of `c` (design 3.3): the live count, then one
+/// `entityNonce` read, taken when they agree; anything else reads the full
+/// (nonce, count, nonce) observation. Sound because the live count never exceeds what `c`
+/// created and the nonce never decreases: a count equal to a later nonce was complete
+/// when it was read.
+async fn observe_completeness<A: Arkiv>(
+    a: &A,
+    c: &charter_core::Address,
+) -> Result<CompletenessObs> {
+    let live = observe::live_count(a, c).await?;
+    let n = a.entity_nonce(charter_store::Address::from(*c)).await?;
+    if live == n {
+        return Ok(CompletenessObs {
+            address: *c,
+            nonce_before: n,
+            live,
+            nonce_after: n,
+        });
+    }
+    observe::completeness(a, c).await
+}
+
 /// Bind chain, completeness, anchor chain and head acceptance for one peer (design 3.6).
 pub async fn verify_peer<A: Arkiv>(
     a: &A,
@@ -194,31 +216,42 @@ pub async fn verify_peer<A: Arkiv>(
     identity: &IdentityChain,
     state: &State,
 ) -> Result<PeerView> {
-    // Each completeness observation stays sequential inside (nonce, count, nonce); the
-    // observations and the anchor query are independent, so they run together.
+    // The completeness observations, and the anchor query then the device heads, are
+    // independent, so they run together; their outcomes are judged in the order below.
     let control: Vec<_> = info.binds.control_set().into_iter().collect();
-    let (completeness, (chain, anchors)) = try_join(
-        try_join_all(control.iter().map(|c| observe::completeness(a, c))),
-        chain_of(a, rid, nid, &info, identity),
+    let anchored = async {
+        let (chain, anchors) = chain_of(a, rid, nid, &info, identity).await?;
+        let device_rows: Vec<Observed> = anchors
+            .iter()
+            .filter(|o| is_device_row(o))
+            .cloned()
+            .collect();
+        let v2 = match device_rows.is_empty() {
+            true => None,
+            false => Some(
+                Box::pin(crate::heads::build(
+                    a,
+                    rid,
+                    nid,
+                    &info,
+                    identity,
+                    &device_rows,
+                    state,
+                ))
+                .await,
+            ),
+        };
+        Ok::<_, SyncError>((chain, anchors, v2))
+    };
+    let (completeness, anchored) = futures_util::future::join(
+        try_join_all(control.iter().map(|c| observe_completeness(a, c))),
+        anchored,
     )
-    .await?;
-    let device_rows: Vec<Observed> = anchors
-        .iter()
-        .filter(|o| is_device_row(o))
-        .cloned()
-        .collect();
-    if !device_rows.is_empty() {
+    .await;
+    let (completeness, (chain, anchors, v2)) = (completeness?, anchored?);
+    if let Some(v2) = v2 {
         check_control_set(nid, &info.binds.control_set(), &completeness)?;
-        let v2 = Box::pin(crate::heads::build(
-            a,
-            rid,
-            nid,
-            &info,
-            identity,
-            &device_rows,
-            state,
-        ))
-        .await?;
+        let v2 = v2?;
         // Before any device head landed (a half-done migration) the v1 chain still holds
         // the refs, so it is verified as before (head-model 5.1).
         if v2.heads().next().is_some() {

@@ -176,6 +176,9 @@ The next sync of the repo takes one of three paths, falling back to the next on 
 2. Speculative: every recorded query is sent at once, and the build is served from those answers; queries it did not record go out as before.
 3. The plain build.
 
+A replayed or speculative sync takes the probe's block as the chain head instead of asking the node for it.
+With `CHARTER_TRACE=1` each sync prints the path it took.
+
 What a replay can miss until the next full sync (at most the window, 10 minutes by default):
 
 - The deletion or expiry of a v1 `refs` entity, a v1 manifest or snapshot chunks: content-addressed entities whose kinds the probe does not list.
@@ -212,6 +215,10 @@ Why one nonce read after the heads is enough:
 - So a nonce read after the heads that equals the read head's `pieces_created + 1` is below every newer body's `pieces_created + 1`: no newer body had landed when the nonce was read, which is later than the heads were.
 - A push landing between the two reads raises the nonce past the read head's claim, so the short form fails and the full bracket decides, exactly as before.
 - Rabdi answers `entityNonce` only at the latest block, so the read cannot be pinned to the query's block (`arkiv_query` takes `atBlock`, `eth_call` does not); the short form costs two round trips per device instead of three.
+
+The completeness observation of design 3.3 takes the same short form: the live count of the control address, then one `entityNonce` read, accepted when they are equal, else the full (nonce, count, nonce) observation.
+A live count never exceeds what the address created and the nonce never decreases, so a count equal to a later nonce was complete when it was read.
+A peer's completeness observations and its device heads are read at the same time and judged in the old order, so a no-op fetch of a v2 peer costs two sequential round trips after discovery instead of four.
 
 An over-claiming body: a body that records more creates than `C_d` had made when it landed, from a buggy or malicious holder of the device seed.
 

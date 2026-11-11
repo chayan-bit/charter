@@ -209,6 +209,12 @@ pub fn expire(repo: &Repo) -> Result<()> {
     }
 }
 
+fn trace(path: &str, detail: impl FnOnce() -> String) {
+    if charter_store::trace::enabled() {
+        eprintln!("chart-trace: sync path {path} {}", detail());
+    }
+}
+
 fn key(q: &Query, o: &QueryOpts) -> String {
     format!("{}\u{0}{o:?}", q.render().unwrap_or_default())
 }
@@ -270,6 +276,8 @@ pub struct Served<'a, A> {
     inner: &'a A,
     ready: Mutex<BTreeMap<String, QueryPage>>,
     log: Mutex<Vec<Entry>>,
+    /// The block the probe was read at, answered as the head (it is this sync's head).
+    head: Option<u64>,
 }
 
 impl<'a, A: Arkiv> Served<'a, A> {
@@ -278,6 +286,14 @@ impl<'a, A: Arkiv> Served<'a, A> {
             inner,
             ready: Mutex::new(ready),
             log: Mutex::new(vec![]),
+            head: None,
+        }
+    }
+
+    fn at(self, probe: Option<&Probe>) -> Self {
+        Self {
+            head: probe.map(|p| p.block),
+            ..self
         }
     }
 
@@ -305,7 +321,10 @@ impl<A: Arkiv> Arkiv for Served<'_, A> {
         self.inner.chain_id().await
     }
     async fn head(&self) -> std::result::Result<u64, StoreError> {
-        self.inner.head().await
+        match self.head {
+            Some(h) => Ok(h),
+            None => self.inner.head().await,
+        }
     }
     async fn base_fee(&self) -> std::result::Result<u128, StoreError> {
         self.inner.base_fee().await
@@ -430,12 +449,17 @@ pub async fn build<'a, A: Arkiv>(
         let same = fresh
             .as_ref()
             .is_ok_and(|p| p.rows == old.rows && (!memo.pinned || p.ops == old.ops));
+        trace("probe", || {
+            let n = memo.entries.len();
+            format!("same={same} replayable_pages={} of {n}", pages.len())
+        });
         if same {
             if let Some(p) = ident {
                 pages.insert(key(&q, &o), p);
             }
-            let backend = Served::new(a, pages);
+            let backend = Served::new(a, pages).at(fresh.as_ref().ok());
             if let Ok(view) = super::build(&backend, &rid, state, want).await {
+                trace("replay", String::new);
                 let s = Session {
                     backend,
                     probe: None,
@@ -456,8 +480,9 @@ pub async fn build<'a, A: Arkiv>(
             }
         };
         let (p, pages) = futures_util::future::join(probed, prefetch(a, &rid, &memo)).await;
-        let backend = Served::new(a, pages);
+        let backend = Served::new(a, pages).at(p.as_ref().ok());
         if let Ok(view) = super::build(&backend, &rid, state, want).await {
+            trace("speculative", String::new);
             let s = Session {
                 backend,
                 probe: p.ok(),
@@ -469,6 +494,7 @@ pub async fn build<'a, A: Arkiv>(
     let backend = Served::new(a, BTreeMap::new());
     let (p, view) =
         futures_util::future::join(probe(a, &rid), super::build(&backend, &rid, state, want)).await;
+    trace("plain", || format!("probed={}", p.is_ok()));
     let s = Session {
         backend,
         probe: p.ok(),
