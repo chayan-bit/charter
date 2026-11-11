@@ -684,3 +684,19 @@ Re-run on the build with the review fixes (`aefc0b0`: pinned head nonce, fresh-r
 - Whether Rabdi's RPC watchers will prune block history later: on 2026-11-11 `eth_getTransactionByHash` still served transactions back to block 1, about 11 days (head-model section 12).
 - A fair wall-time comparison of compressed vs uncompressed responses.
 - Section 3.8 covers one key and one repo shape; section 3.15 exercises two devices of one identity, a snapshot refresh and the rollback rule, but not yet a repo with several delegates.
+
+## 7. Performance gate (issue #6, 2026-11-11)
+
+The rule, decided by the maintainer on 2026-11-11: no feature may make any operation slower or more expensive.
+The CI gate checks it on the fake chain, where every count is exact, so it compares with zero margin and never looks at wall time.
+
+- `crates/charter-ui/tests/bench_gate.rs` runs every gated operation once on a fresh `MemArkiv`, in a fixed order: `push` (a small inline push, including its `list for-push` sync), `push_refs_only`, `push_bulk` (48 KiB of new bytes, so bulk pieces), `fetch`, `fetch_noop`, `clone`, `op_post`, `fold` (the fetch of a repo that pins a program, after a push), and the UI's `ui_round`, `ui_round_noop` and `ui_probe_noop`.
+- Each operation runs through `charter_store::fake::Meter`, which counts sequential round trips (calls that overlap share one, as in `crates/charter-sync/tests/head_send_reads.rs`), RPC calls, `arkiv_query` calls, transactions sent, their calldata bytes, and the gas of the landed transactions.
+- Gas is the fake's `gasUsed` with every calldata byte priced as non-zero: ML-DSA signatures are hedged and salts are random, so the zero bytes of calldata move by a few dozen gas between runs, and the ceiling does not.
+- The results must equal `bench/baseline.json` exactly. A higher count fails as a regression; a lower count fails too, so the baseline always states what the code costs today and an improvement cannot quietly turn into slack for a later regression.
+- Commits use fixed dates, so packs are byte-identical between runs. A cache that goes stale on a slow machine can only add a read, so before failing the gate reruns twice and keeps the smallest count of each field.
+- `gate_fails_a_deliberately_slowed_operation` checks the gate itself.
+- Updating the baseline is its own commit: `CHARTER_BENCH_UPDATE=1 cargo test -p charter-ui --test bench_gate`, then commit `bench/baseline.json` with the reason. A regression additionally needs the maintainer decision recorded in its issue.
+- CI (`.github/workflows/ci.yml`) runs the gate as its own step, and the workspace test step skips it.
+
+Not covered yet: wall time, UI page server time and the periodic Rabdi bench that the issue proposes; those need real latency and stay out of the per-change gate.

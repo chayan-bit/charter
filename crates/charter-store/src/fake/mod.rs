@@ -8,6 +8,7 @@
 
 mod eval;
 mod exec;
+mod meter;
 mod persist;
 #[cfg(test)]
 mod tests;
@@ -25,6 +26,7 @@ use arkiv_bindings::{IEntityRegistry, Operation};
 pub use crate::derive_key;
 pub use exec::MAX_LIFETIME;
 use exec::{Env, World, intrinsic_gas};
+pub use meter::{Meter, Metrics};
 pub use persist::FileMemArkiv;
 
 use crate::{

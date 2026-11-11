@@ -1,0 +1,90 @@
+{
+  "clone": {
+    "rounds": 5,
+    "calls": 14,
+    "queries": 9,
+    "txs": 0,
+    "bytes": 0,
+    "gas": 0
+  },
+  "fetch": {
+    "rounds": 7,
+    "calls": 12,
+    "queries": 7,
+    "txs": 0,
+    "bytes": 0,
+    "gas": 0
+  },
+  "fetch_noop": {
+    "rounds": 3,
+    "calls": 4,
+    "queries": 2,
+    "txs": 0,
+    "bytes": 0,
+    "gas": 0
+  },
+  "fold": {
+    "rounds": 5,
+    "calls": 18,
+    "queries": 9,
+    "txs": 0,
+    "bytes": 0,
+    "gas": 0
+  },
+  "op_post": {
+    "rounds": 7,
+    "calls": 9,
+    "queries": 2,
+    "txs": 1,
+    "bytes": 5668,
+    "gas": 1009425
+  },
+  "push": {
+    "rounds": 8,
+    "calls": 22,
+    "queries": 11,
+    "txs": 1,
+    "bytes": 5764,
+    "gas": 1018772
+  },
+  "push_bulk": {
+    "rounds": 21,
+    "calls": 35,
+    "queries": 11,
+    "txs": 3,
+    "bytes": 55496,
+    "gas": 3059228
+  },
+  "push_refs_only": {
+    "rounds": 9,
+    "calls": 22,
+    "queries": 11,
+    "txs": 1,
+    "bytes": 4772,
+    "gas": 981520
+  },
+  "ui_probe_noop": {
+    "rounds": 1,
+    "calls": 1,
+    "queries": 1,
+    "txs": 0,
+    "bytes": 0,
+    "gas": 0
+  },
+  "ui_round": {
+    "rounds": 8,
+    "calls": 13,
+    "queries": 10,
+    "txs": 0,
+    "bytes": 0,
+    "gas": 0
+  },
+  "ui_round_noop": {
+    "rounds": 4,
+    "calls": 6,
+    "queries": 4,
+    "txs": 0,
+    "bytes": 0,
+    "gas": 0
+  }
+}
