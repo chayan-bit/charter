@@ -116,7 +116,10 @@ async fn verify_welcome<A: Arkiv>(
     };
     let pk = charter_sync::cob::peer_key_of(a, &signer).await?;
     let msg = att_msg(rid, epoch, body, bx, Some(kp));
-    if !pk.is_some_and(|pk| verifies(&pk, CTX_WELCOME, &msg, &sig)) {
+    if !pk
+        .as_ref()
+        .is_some_and(|pk| verifies(pk, CTX_WELCOME, &msg, &sig))
+    {
         return Err(bad("welcome attestation does not verify"));
     }
     ring.epochs.insert(epoch, key);
@@ -128,7 +131,8 @@ async fn verify_welcome<A: Arkiv>(
             "the welcome's keys do not open the repo's root identity",
         ));
     };
-    if !on_record(a, &mut ring, &roots, epoch, &signer).await? {
+    let pks = BTreeMap::from([(signer, pk)]);
+    if !on_record(a, &mut ring, &roots, epoch, &signer, pks).await? {
         return Err(bad(
             "this welcome does not continue the repo's commit history: it was not made by \
              an admin of the current group",
@@ -145,13 +149,14 @@ async fn verify_welcome<A: Arkiv>(
 /// to `epoch` is the one the admins committed to, a removed admin is out of it, and a
 /// welcome she forges with keys she never held fails at the first epoch she was not in,
 /// even before any genuine welcome exists. Sets `rotated` from those commits. One query,
-/// plus one key lookup per admin who committed.
+/// plus one key lookup per admin who committed (`pks` holds those already looked up).
 async fn on_record<A: Arkiv>(
     a: &A,
     ring: &mut Keyring,
     roots: &[Nid],
     epoch: u64,
     signer: &Nid,
+    mut pks: BTreeMap<Nid, Option<PublicKey>>,
 ) -> Result<bool> {
     let ct = auth::commits_tag(&ring.id_key, &ring.rid);
     let rows = find(a, T_COMMIT, vec![observe::b32("ag.ct", &ct)]).await?;
@@ -164,7 +169,6 @@ async fn on_record<A: Arkiv>(
             by_ep.entry(ep).or_default().push((c, att));
         }
     }
-    let mut pks: BTreeMap<Nid, Option<PublicKey>> = BTreeMap::new();
     let roots: BTreeSet<Nid> = roots.iter().copied().collect();
     let mut base = None;
     for (ep, cands) in by_ep.range(..=epoch) {
