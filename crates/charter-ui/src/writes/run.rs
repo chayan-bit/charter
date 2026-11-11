@@ -306,4 +306,10 @@ impl<A: Arkiv> Arkiv for Tap<A> {
     async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
         self.a.block_txs(n).await
     }
+    async fn tx_at(&self, n: u64, i: u32) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.a.tx_at(n, i).await
+    }
+    fn seals(&self) -> bool {
+        self.a.seals()
+    }
 }

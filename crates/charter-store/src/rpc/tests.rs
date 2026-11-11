@@ -448,6 +448,27 @@ async fn transaction_by_hash_and_mined_nonce_parse() {
 }
 
 #[tokio::test]
+async fn a_tx_is_read_by_block_and_index_in_one_call() {
+    let t = json!({
+        "hash": B256::repeat_byte(1), "from": Address::repeat_byte(2),
+        "to": Address::repeat_byte(3), "blockNumber": "0x2a",
+        "transactionIndex": "0x5", "input": "0x0102"
+    });
+    let (rpc, seen) = client(move |b| match b["method"].as_str().unwrap_or("") {
+        "eth_getTransactionByBlockNumberAndIndex" if b["params"] == json!(["0x2a", "0x5"]) => {
+            ok(t.clone())
+        }
+        _ => ok(json!(null)),
+    })
+    .await;
+    let got = rpc.tx_at(42, 5).await.expect("t").expect("some");
+    assert_eq!((got.block, got.index, got.input.to_vec()), (42, 5, vec![1, 2]));
+    assert_eq!(rpc.tx_at(42, 6).await, Ok(None));
+    let calls = seen.lock().expect("log").len();
+    assert!(calls <= 3, "one call per tx, plus at most the chain probe: {calls}");
+}
+
+#[tokio::test]
 async fn node_errors_map_to_store_errors() {
     let not_owner = IEntityRegistry::NotOwner {
         entityKey: B256::ZERO,

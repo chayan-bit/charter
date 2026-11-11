@@ -185,6 +185,9 @@ impl Arkiv for Backend {
     async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
         both!(self, b => b.block_txs(n).await)
     }
+    async fn tx_at(&self, n: u64, i: u32) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        both!(self, b => b.tx_at(n, i).await)
+    }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
         both!(self, b => b.estimate(from, ops).await)
     }

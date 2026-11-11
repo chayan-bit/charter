@@ -108,6 +108,23 @@ pub trait Arkiv: Send + Sync {
     ) -> impl Future<Output = Result<Option<MinedTx>, StoreError>> + Send;
     /// Every tx of block `n` with its calldata, in block order (head-model 5.4).
     fn block_txs(&self, n: u64) -> impl Future<Output = Result<Vec<MinedTx>, StoreError>> + Send;
+    /// The tx at `index` of block `n` with its calldata; `None` if there is none (format v3
+    /// pieces, head-model 13.1). [`RpcArkiv`] reads just that tx.
+    fn tx_at(
+        &self,
+        n: u64,
+        index: u32,
+    ) -> impl Future<Output = Result<Option<MinedTx>, StoreError>> + Send {
+        async move {
+            let txs = self.block_txs(n).await?;
+            Ok(txs.into_iter().find(|t| t.index == index))
+        }
+    }
+    /// Whether [`Arkiv::seal_ops`] seals (a P2 private repo): such a backend must see every
+    /// attribute of a head patch, so writers never send it a minimal patch.
+    fn seals(&self) -> bool {
+        false
+    }
     /// Opens rows read from calldata the way `query` opens its rows. Identity by default;
     /// P2 private repos decrypt sealed rows here.
     fn open_rows(&self, rows: Vec<EntityData>) -> Vec<EntityData> {

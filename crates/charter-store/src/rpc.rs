@@ -545,6 +545,16 @@ impl Arkiv for RpcArkiv {
         Ok(t.and_then(RawMinedTx::mined))
     }
 
+    async fn tx_at(&self, n: u64, index: u32) -> Result<Option<MinedTx>, StoreError> {
+        let t: Option<RawMinedTx> = self
+            .call(
+                "eth_getTransactionByBlockNumberAndIndex",
+                json!([format!("{n:#x}"), format!("{index:#x}")]),
+            )
+            .await?;
+        Ok(t.and_then(RawMinedTx::mined))
+    }
+
     async fn block_txs(&self, n: u64) -> Result<Vec<MinedTx>, StoreError> {
         let b: Option<RawFullBlock> = self
             .call("eth_getBlockByNumber", json!([format!("{n:#x}"), true]))

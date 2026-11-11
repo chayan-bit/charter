@@ -374,6 +374,16 @@ impl<A: Arkiv> Arkiv for Served<'_, A> {
     ) -> std::result::Result<Vec<charter_store::MinedTx>, StoreError> {
         self.inner.block_txs(n).await
     }
+    async fn tx_at(
+        &self,
+        n: u64,
+        i: u32,
+    ) -> std::result::Result<Option<charter_store::MinedTx>, StoreError> {
+        self.inner.tx_at(n, i).await
+    }
+    fn seals(&self) -> bool {
+        self.inner.seals()
+    }
     fn open_rows(&self, rows: Vec<EntityData>) -> Vec<EntityData> {
         self.inner.open_rows(rows)
     }
