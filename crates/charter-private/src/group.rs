@@ -73,6 +73,8 @@ pub async fn init<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys, meta: &RepoMeta) -
     ring.roles.insert(hex::encode(keys.nid()), Role::Admin);
     let roles = ring.roles.clone();
     ring.record_roles(epoch, &roles);
+    ring.adm_log
+        .insert(epoch, BTreeSet::from([hex::encode(keys.nid())]));
     ring.format = FORMAT;
     let mut ops = first_write_ops(keys, &rid, cfg)?;
     ops.push(entity_op::<IdBody>(&s.bytes, cfg.control_lifetime)?);

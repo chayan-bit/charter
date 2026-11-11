@@ -200,7 +200,7 @@ impl Keyring {
         }
     }
 
-    /// Adopts a newer lockbox: its roles and certificates, plus everything either side holds.
+    /// Adopts a newer lockbox: its roles and pinned heads, plus everything either side holds.
     pub fn merge(&mut self, newer: &Keyring) {
         self.epochs
             .extend(newer.epochs.iter().map(|(e, k)| (*e, *k)));
@@ -209,7 +209,9 @@ impl Keyring {
         for (e, m) in &newer.role_log {
             self.role_log.entry(*e).or_insert_with(|| m.clone());
         }
-        for (e, b) in &newer.rotated {
+        // An epoch end the committer could not have placed yet is junk.
+        let last = newer.current().map_or(0, |c| c.0);
+        for (e, b) in newer.rotated.range(..=last) {
             self.rotated.entry(*e).or_insert(*b);
         }
         self.pinned.clone_from(&newer.pinned);

@@ -131,8 +131,10 @@ async fn verify_welcome<A: Arkiv>(
             "the welcome's keys do not open the repo's root identity",
         ));
     };
+    let ct = auth::commits_tag(&ring.id_key, &ring.rid);
+    let records = find(a, T_COMMIT, vec![observe::b32("ag.ct", &ct)]).await?;
     let pks = BTreeMap::from([(signer, pk)]);
-    if !on_record(a, &mut ring, &roots, epoch, &signer, pks).await? {
+    if !on_record(a, &mut ring, &roots, epoch, Some(&signer), &records, pks).await? {
         return Err(bad(
             "this welcome does not continue the repo's commit history: it was not made by \
              an admin of the current group",
@@ -148,30 +150,23 @@ async fn verify_welcome<A: Arkiv>(
 /// epoch's key holders can compute, must match `ring`. So `ring`'s whole admin history up
 /// to `epoch` is the one the admins committed to, a removed admin is out of it, and a
 /// welcome she forges with keys she never held fails at the first epoch she was not in,
-/// even before any genuine welcome exists. Sets `rotated` from those commits. One query,
-/// plus one key lookup per admin who committed (`pks` holds those already looked up).
+/// even before any genuine welcome exists. `signer`, if given, must have made the commit
+/// of `epoch`. Sets `rotated` from those commits. Reads `rows` (the commit rows); costs one
+/// key lookup per admin who committed (`pks` holds those already looked up).
 async fn on_record<A: Arkiv>(
     a: &A,
     ring: &mut Keyring,
     roots: &[Nid],
     epoch: u64,
-    signer: &Nid,
+    signer: Option<&Nid>,
+    rows: &[Observed],
     mut pks: BTreeMap<Nid, Option<PublicKey>>,
 ) -> Result<bool> {
-    let ct = auth::commits_tag(&ring.id_key, &ring.rid);
-    let rows = find(a, T_COMMIT, vec![observe::b32("ag.ct", &ct)]).await?;
-    let mut by_ep: BTreeMap<u64, Vec<(&Observed, CommitAtt)>> = BTreeMap::new();
-    for c in &rows {
-        if let (Some(ep), Some(att)) = (
-            u64_of(c, "ag.ep"),
-            bytes(c, "ag.att").and_then(parse_commit_att),
-        ) {
-            by_ep.entry(ep).or_default().push((c, att));
-        }
-    }
+    let by_ep = records(rows);
     let roots: BTreeSet<Nid> = roots.iter().copied().collect();
     let mut base = None;
-    for (ep, cands) in by_ep.range(..=epoch) {
+    // No commit makes epoch 0 (the creating one), so a record naming it is junk.
+    for (ep, cands) in by_ep.range(1..=epoch) {
         if first_signed(a, &mut pks, &ring.rid, *ep, cands, &roots)
             .await?
             .is_some()
@@ -195,12 +190,28 @@ async fn on_record<A: Arkiv>(
         };
         let pinned = att.admins == auth::admins_digest(key, adm)
             && att.auth == auth::epoch_auth(key, &ring.rid);
-        if !pinned || (k == epoch && att.signer != *signer) {
+        if !pinned || (k == epoch && signer.is_some_and(|s| att.signer != *s)) {
             return Ok(false);
         }
         ring.rotated.insert(k, c.block);
     }
     Ok(true)
+}
+
+type Records<'c> = BTreeMap<u64, Vec<(&'c Observed, CommitAtt)>>;
+
+/// The commit rows of `rows` that carry a public attestation, by epoch, in Arkiv order.
+fn records(rows: &[Observed]) -> Records<'_> {
+    let mut by_ep: Records = BTreeMap::new();
+    for c in rows {
+        if let (Some(ep), Some(att)) = (
+            u64_of(c, "ag.ep"),
+            bytes(c, "ag.att").and_then(parse_commit_att),
+        ) {
+            by_ep.entry(ep).or_default().push((c, att));
+        }
+    }
+    by_ep
 }
 
 /// The first of `cands` (one epoch's commits, in Arkiv order) validly signed by one of
@@ -292,6 +303,7 @@ async fn apply_commits<A: Arkiv>(a: &A, mls: &Mls, ring: &mut Keyring) -> Result
                 continue;
             };
             if !g.is_active() {
+                ring.rotated.entry(next).or_insert(c.block);
                 break;
             }
             let (epoch, key) = mls.epoch_key(&g, &ring.rid)?;
@@ -323,7 +335,8 @@ async fn apply_commits<A: Arkiv>(a: &A, mls: &Mls, ring: &mut Keyring) -> Result
 /// `sender` was an admin of the epoch before, and the attested admin digest and epoch
 /// authenticator are those of `newer` (its lockbox) and `key`, so joiners replaying the
 /// record see what members applied. A commit without one is accepted only while the repo
-/// is still in the legacy format.
+/// is still in the legacy format, and the commit that migrates it only from a root
+/// delegate (one identity query, once per repo).
 async fn commit_attested<A: Arkiv>(
     a: &A,
     ring: &Keyring,
@@ -341,16 +354,25 @@ async fn commit_attested<A: Arkiv>(
         return Ok(ring.format < FORMAT);
     };
     let prev = epoch.saturating_sub(1);
-    let was_admin = match ring.adm_log.get(&prev) {
-        Some(set) => set.contains(&hex::encode(sender)),
-        None => ring.role_at(prev, sender) == Some(Role::Admin), // the migrating commit
-    };
     let pinned = newer
         .adm_log
         .get(&epoch)
         .is_some_and(|adm| att.admins == auth::admins_digest(key, adm))
         && att.auth == auth::epoch_auth(key, &ring.rid);
-    if att.signer != *sender || !was_admin || !pinned {
+    if att.signer != *sender || !pinned {
+        return Ok(false);
+    }
+    let was_admin = match ring.adm_log.get(&prev) {
+        Some(set) => set.contains(&hex::encode(sender)),
+        // The migrating commit: a joiner's replay starts at a root delegate's commit.
+        None => {
+            ring.role_at(prev, sender) == Some(Role::Admin)
+                && root_rows(a, ring)
+                    .await?
+                    .is_some_and(|(roots, _)| roots.contains(sender))
+        }
+    };
+    if !was_admin {
         return Ok(false);
     }
     let pk = charter_sync::cob::peer_key_of(a, sender).await?;
@@ -359,8 +381,8 @@ async fn commit_attested<A: Arkiv>(
 
 /// Where each epoch held started, from commit rows already read: the earliest row naming
 /// that epoch whose lockbox opens under its key (nobody holds that key before the commit
-/// lands). Also fills the role history of a keyring written before 0.5.1 from those
-/// lockboxes. Costs no query.
+/// lands). A row naming an epoch not held places nothing: anyone can write one. Also fills
+/// the role history of a keyring written before 0.5.1 from those lockboxes. Costs no query.
 fn derive_history(ring: &mut Keyring, rows: &[Observed]) {
     for c in rows {
         let Some(ep) = u64_of(c, "ag.ep") else {
@@ -369,18 +391,14 @@ fn derive_history(ring: &mut Keyring, rows: &[Observed]) {
         if ring.rotated.contains_key(&ep) {
             continue;
         }
-        let opened = match (ring.epochs.get(&ep), bytes(c, "ag.box")) {
-            (Some(k), Some(bx)) => match open_box(&ring.rid, ep, k, bx) {
-                Some(b) => Some(b),
-                None => continue,
-            },
-            (Some(_), None) => continue,
-            (None, _) => None, // a grant reader without this epoch: earliest row bounds it
+        let (Some(k), Some(bx)) = (ring.epochs.get(&ep), bytes(c, "ag.box")) else {
+            continue;
+        };
+        let Some(b) = open_box(&ring.rid, ep, k, bx) else {
+            continue;
         };
         ring.rotated.insert(ep, c.block);
-        if let Some(b) = opened
-            && !ring.role_log.contains_key(&ep)
-        {
+        if !ring.role_log.contains_key(&ep) {
             ring.record_roles(ep, &b.roles);
         }
     }
@@ -511,9 +529,16 @@ fn remember_public(home: &std::path::Path, rid: &Rid) -> Result<()> {
 /// Most distinct id keys tried for the root in one query (junk grants cannot widen it).
 const MAX_ID_CANDIDATES: usize = 16;
 
-/// A read-only keyring from published grants that authenticate: the grant whose keys open
-/// the root identity (content hash = rid), then grants signed by a root delegate. Costs the
-/// identity query the view then skips, and one commit query that places epoch ends.
+/// A read-only keyring from published grants that authenticate. The grant whose keys open
+/// the root identity (content hash = rid) gives the generation-0 id key; then the newest
+/// root-delegate grant whose epoch's commit lockbox opens under it and continues the commit
+/// record from the root ([`on_record`], as a joiner checks a welcome) fixes every epoch key
+/// and admin set up to it, and a grant counts only if its keys are those and its signer was
+/// an admin of the epoch before. So a root delegate removed from the group cannot publish
+/// a grant for an epoch it did not hold. A repo with no attested commit (legacy, or never
+/// changed) falls back to grants signed by a root delegate. Costs the identity query the
+/// view then skips and one commit query, plus a key lookup per committing admin that
+/// signed no grant.
 async fn published<A: Arkiv>(a: &A, rid: &Rid, grants: &[Observed]) -> Result<Option<Keyring>> {
     let cands: Vec<(u64, auth::SignedGrant)> = grants
         .iter()
@@ -533,7 +558,7 @@ async fn published<A: Arkiv>(a: &A, rid: &Rid, grants: &[Observed]) -> Result<Op
     if ids.is_empty() {
         return Ok(None);
     }
-    let blinded = ids
+    let blinded: Vec<Pred> = ids
         .iter()
         .map(|k| observe::b32("ag.rid", &blind(k, "rid", rid)))
         .collect();
@@ -542,13 +567,35 @@ async fn published<A: Arkiv>(a: &A, rid: &Rid, grants: &[Observed]) -> Result<Op
             .map(observe::kind)
             .to_vec(),
     );
-    let q = Query::from(Pred::And(vec![Pred::Or(blinded), kinds]));
+    let q = Query::from(Pred::And(vec![Pred::Or(blinded.clone()), kinds]));
     let raw = charter_store::paging::offset_all(a, &q, observe::full_select()).await?;
-    let Some((mut ring, roots)) = root_grant(rid, &cands, &raw) else {
+    let Some((root, roots)) = root_grant(rid, &cands, &raw) else {
         return Ok(None);
     };
-    for (ep, g) in &cands {
-        if ring.epochs.contains_key(ep) || !auth::grant_signed(g, rid, *ep, &roots) {
+    // Attested commits by their generation-0 tag, legacy ones by a granted id key.
+    let ct = observe::b32("ag.ct", &auth::commits_tag(&root.id_key, rid));
+    let commits = find(a, T_COMMIT, vec![Pred::Or([vec![ct], blinded].concat())]).await?;
+    let signed: Vec<&(u64, auth::SignedGrant)> = cands
+        .iter()
+        .filter(|(ep, g)| auth::grant_signed(g, rid, *ep, &roots))
+        .collect();
+    let mut ring = match records(&commits).is_empty() {
+        true => legacy_grants(root, &signed),
+        false => match verified_history(a, rid, &root, &roots, &signed, &commits).await? {
+            Some(full) => granted(full, &root, &roots, &signed),
+            None => root,
+        },
+    };
+    derive_history(&mut ring, &commits);
+    let rows = crate::arkiv::open_all(&ring, raw);
+    view::prefetched_identity(rid, observe::to_observed(rows));
+    Ok(Some(ring))
+}
+
+/// Before any attested commit, every root-delegate grant counts (the first per epoch).
+fn legacy_grants(mut ring: Keyring, signed: &[&(u64, auth::SignedGrant)]) -> Keyring {
+    for (ep, g) in signed {
+        if ring.epochs.contains_key(ep) {
             continue;
         }
         ring.epochs.insert(*ep, g.key);
@@ -558,11 +605,86 @@ async fn published<A: Arkiv>(a: &A, rid: &Rid, grants: &[Observed]) -> Result<Op
         let roles = g.roles.iter().map(|(n, r)| (hex::encode(n), *r)).collect();
         ring.record_roles(*ep, &roles);
     }
-    let commits = find(a, T_COMMIT, vec![rid_pred(&ring)]).await?;
-    derive_history(&mut ring, &commits);
-    let rows = crate::arkiv::open_all(&ring, raw);
-    view::prefetched_identity(rid, observe::to_observed(rows));
-    Ok(Some(ring))
+    ring
+}
+
+/// The keyring of the newest grant in `signed` whose epoch's commit lockbox opens under it
+/// and passes [`on_record`] against `commits`, with the end of that epoch placed from the
+/// first commit of the next one signed by one of its admins.
+async fn verified_history<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    root: &Keyring,
+    roots: &[Nid],
+    signed: &[&(u64, auth::SignedGrant)],
+    commits: &[Observed],
+) -> Result<Option<Keyring>> {
+    let mut pks: BTreeMap<Nid, Option<PublicKey>> = BTreeMap::new();
+    for (_, g) in signed {
+        if let Some(pk) = g
+            .sig
+            .as_ref()
+            .and_then(|(pk, _)| PublicKey::from_bytes(charter_crypto::Alg::MlDsa65Ed25519, pk).ok())
+        {
+            pks.insert(pk.nid(), Some(pk));
+        }
+    }
+    let mut newest_first: Vec<_> = signed.to_vec();
+    newest_first.sort_by_key(|(ep, _)| std::cmp::Reverse(*ep));
+    for (ep, g) in newest_first {
+        let boxes = commits
+            .iter()
+            .filter(|c| u64_of(c, "ag.ep") == Some(*ep))
+            .filter_map(|c| open_box(rid, *ep, &g.key, bytes(c, "ag.box")?));
+        for mut full in boxes {
+            let fits = full.epochs.get(ep) == Some(&g.key) && full.id_key == root.id_key;
+            if fits && on_record(a, &mut full, roots, *ep, None, commits, pks.clone()).await? {
+                let by_ep = records(commits);
+                let next = by_ep.get(&(ep + 1)).map_or(&[][..], Vec::as_slice);
+                let admins = nids(full.adm_log.get(ep));
+                if let Some((c, _)) = first_signed(a, &mut pks, rid, ep + 1, next, &admins).await? {
+                    full.rotated.insert(ep + 1, c.block);
+                }
+                full.rotated.retain(|e, _| *e <= ep + 1);
+                return Ok(Some(full));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `full` (a verified history) holding only the epochs of grants whose keys it confirms
+/// and whose signer was an admin of the epoch before (a root delegate for an epoch with no
+/// admin set on record), plus the root grant's epoch.
+fn granted(
+    mut full: Keyring,
+    root: &Keyring,
+    roots: &[Nid],
+    signed: &[&(u64, auth::SignedGrant)],
+) -> Keyring {
+    let admin_before = |ep: u64, g: &auth::SignedGrant| {
+        let signer = g.sig.as_ref().and_then(|(pk, _)| {
+            PublicKey::from_bytes(charter_crypto::Alg::MlDsa65Ed25519, pk).ok()
+        });
+        let before = ep.checked_sub(1).and_then(|p| full.adm_log.get(&p));
+        signer.is_some_and(|pk| match before {
+            Some(set) => set.contains(&hex::encode(pk.nid())),
+            None => roots.contains(&pk.nid()),
+        })
+    };
+    let mut keep: BTreeSet<u64> = root.epochs.keys().copied().collect();
+    for (ep, g) in signed {
+        if full.epochs.get(ep) == Some(&g.key)
+            && full.id_key_at(*ep) == &g.id_key
+            && admin_before(*ep, g)
+        {
+            keep.insert(*ep);
+        }
+    }
+    full.epochs
+        .retain(|e, k| keep.contains(e) && root.epochs.get(e).is_none_or(|r| r == k));
+    full.group.clear();
+    full
 }
 
 /// The keyring of the grant whose keys open the root identity (one a root delegate also
