@@ -11,9 +11,12 @@ use charter_store::{
 use crate::entity::{
     EPOCH, HIDDEN, PACK, blind_pred, is_stopper, late_head, open_row, open_row_unchecked, seal_op,
 };
+use charter_store::EntityData;
 use charter_sync::heads::{LANDING_WINDOW, calldata_rows};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-use crate::keyring::Keyring;
+use crate::keyring::{Keyring, write_private};
 
 /// Opens `rows` of `ring`'s repo as [`Sealed`] does: the migration stopper keeps its place
 /// (paging counts rows) but loses every attribute, so core sees no entity in it.
@@ -86,11 +89,82 @@ fn head_at(envelope: &[u8]) -> Option<u64> {
 pub struct Sealed<'a, A> {
     pub inner: &'a A,
     pub ring: Keyring,
+    /// Where [`landed_by`] verdicts are kept ([`Sealed::caching`]).
+    landed: Option<PathBuf>,
 }
 
 impl<'a, A: Arkiv> Sealed<'a, A> {
     pub fn new(inner: &'a A, ring: Keyring) -> Self {
-        Self { inner, ring }
+        Self {
+            inner,
+            ring,
+            landed: None,
+        }
+    }
+
+    /// Keeps each extended head's landing verdict under `home`, so its block reads are paid
+    /// once: the verdict is final, as the epoch it was sealed in has ended.
+    pub fn caching(mut self, home: &Path) -> Self {
+        let file = format!("{}.landed.json", hex::encode(self.ring.rid));
+        self.landed = Some(home.join("private").join(file));
+        self
+    }
+
+    /// Replaces each extended head in `rows` whose body landed in time by its opened row.
+    async fn admit_late_heads(&self, rows: &mut [EntityData]) -> Result<(), StoreError> {
+        let mut seen: Option<BTreeMap<String, bool>> = None;
+        let mut changed = false;
+        for row in rows.iter_mut() {
+            let Some(bound) = late_head(&self.ring, row) else {
+                continue;
+            };
+            let opened = open_row_unchecked(&self.ring, row.clone());
+            let id = verdict_id(&opened, bound);
+            let cache = seen.get_or_insert_with(|| read_verdicts(self.landed.as_deref()));
+            let landed = match cache.get(&id) {
+                Some(v) => *v,
+                None => {
+                    let v = landed_by(self.inner, &opened, bound).await?;
+                    changed |= cache.insert(id, v).is_none();
+                    v
+                }
+            };
+            if landed {
+                *row = opened;
+            }
+        }
+        if let (true, Some(path), Some(cache)) = (changed, &self.landed, seen) {
+            write_verdicts(path, &cache);
+        }
+        Ok(())
+    }
+}
+
+/// `entity key / ag.h / bound`: what a [`landed_by`] verdict depends on.
+fn verdict_id(head: &EntityData, bound: u64) -> String {
+    let h = head
+        .attributes
+        .iter()
+        .flatten()
+        .find(|x| x.name == "ag.h")
+        .and_then(|x| x.value.as_str())
+        .unwrap_or_default();
+    let key = head.key.map(|k| hex::encode(k.0)).unwrap_or_default();
+    format!("{key}/{h}/{bound}")
+}
+
+/// Cached verdicts; a missing or unreadable file is an empty cache (it only saves reads).
+fn read_verdicts(path: Option<&Path>) -> BTreeMap<String, bool> {
+    path.and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Saves the verdicts (mode 600). A cache that cannot be written only costs the reads again
+/// next time, so that is not an error for the read that computed them.
+fn write_verdicts(path: &Path, cache: &BTreeMap<String, bool>) {
+    if let Ok(bytes) = serde_json::to_vec(cache) {
+        let _ = write_private(path, &bytes);
     }
 }
 
@@ -136,15 +210,7 @@ impl<A: Arkiv> Arkiv for Sealed<'_, A> {
         }
         let mut page = self.inner.query(&q, &o).await?;
         page.rows = self.open_rows(std::mem::take(&mut page.rows));
-        for row in page.rows.iter_mut() {
-            let Some(bound) = late_head(&self.ring, row) else {
-                continue;
-            };
-            let opened = open_row_unchecked(&self.ring, row.clone());
-            if landed_by(self.inner, &opened, bound).await? {
-                *row = opened;
-            }
-        }
+        self.admit_late_heads(&mut page.rows).await?;
         Ok(page)
     }
     async fn entity_nonce(&self, c: Address) -> Result<u64, StoreError> {

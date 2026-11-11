@@ -30,7 +30,7 @@ pub async fn for_repo<'a, A: Arkiv>(
 ) -> Result<ForRepo<'a, A>> {
     Ok(match ring_for(a, cfg, keys, rid).await? {
         None => ForRepo::Plain(a),
-        Some(ring) => ForRepo::Sealed(Box::new(Sealed::new(a, ring))),
+        Some(ring) => ForRepo::Sealed(Box::new(Sealed::new(a, ring).caching(&cfg.home))),
     })
 }
 
@@ -44,7 +44,9 @@ pub async fn for_repo_cached<'a, A: Arkiv>(
     rid: &Rid,
 ) -> Result<ForRepo<'a, A>> {
     match Keyring::load(&cfg.home, rid)? {
-        Some(ring) => Ok(ForRepo::Sealed(Box::new(Sealed::new(a, ring)))),
+        Some(ring) => Ok(ForRepo::Sealed(Box::new(
+            Sealed::new(a, ring).caching(&cfg.home),
+        ))),
         None => for_repo(a, cfg, keys, rid).await,
     }
 }

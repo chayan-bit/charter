@@ -126,7 +126,7 @@ pub async fn serve<A: Arkiv>(a: &A, cfg: Config, url: charter_sync::ids::RemoteU
                 .as_ref()
                 .map(|k| ring.require(&k.nid(), Role::Write))
                 .and_then(|r| r.err());
-            let sealed = Sealed::new(a, ring);
+            let sealed = Sealed::new(a, ring).caching(&cfg.home);
             crate::helper::Session::new(&sealed, cfg, url)
                 .deny_push(gate)
                 .serve(&mut stdin.lock(), &mut out)
