@@ -192,3 +192,61 @@ async fn a_forged_first_peer_document_falls_back_to_every_document() {
         .expect("clone");
     assert_eq!(main_of(&view, &alice.keys.nid()), rev(&work, "main"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_extended_cob_op_of_a_pinned_repo_changes_the_probe() {
+    use charter_store::AttributeValue as V;
+    let net = Net::new();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (alice, bob, rid, _) = pushed_and_cloned(&net, tmp.path()).await;
+    let src = include_str!("../../../programs/bounty.rhai");
+    charter_sync::program::publish(&net, &alice.cfg, &alice.keys, &rid, "rhai/1", src)
+        .await
+        .expect("publish");
+    let pin = charter_core::ProgramPin {
+        engine: "rhai/1".into(),
+        hash: charter_program::Program::hash(src),
+    };
+    let st = charter_sync::state::State::default();
+    charter_sync::identity::propose(&net, &alice.cfg, &alice.keys, &rid, &st, |b| {
+        charter_core::IdBody {
+            program: Some(pin),
+            ..b.clone()
+        }
+    })
+    .await
+    .expect("pin");
+    let mallory = outsider(&net);
+    let rid_attr = V::Bytes32(rid);
+    let op = charter_store::create_op(
+        &[
+            ("ag.kind", V::Str("cob".into()), true),
+            ("ag.rid", rid_attr, true),
+        ],
+        10_000,
+        1,
+    )
+    .expect("op");
+    send_ops(&net, &mallory, vec![op]).await;
+    let repo = bob.repo(&rid);
+    charter_sync::sync(&net, &repo, &charter_sync::Want::default())
+        .await
+        .expect("full sync");
+
+    // Same op count, new `$updatedAt` (ops are read-only, so an extend): the probe sees it.
+    let key = created_by(&net, mallory.address()).await[0].key;
+    extend(&net, &mallory, &[key], 20_000).await;
+    net.stats.reset();
+    charter_sync::sync(&net, &repo, &charter_sync::Want::default())
+        .await
+        .expect("sync after the extend");
+    let sent = net.stats.calls();
+    let probe_or_count = |c: &&String| {
+        c.contains("str('bind')") || c.contains("str('cob')") || c.starts_with("query $creator")
+    };
+    assert!(
+        sent.iter()
+            .any(|c| c.starts_with("query") && !probe_or_count(&c)),
+        "the changed probe sends the view's queries: {sent:#?}"
+    );
+}

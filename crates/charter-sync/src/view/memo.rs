@@ -5,8 +5,8 @@
 //!
 //! - replays those pages without sending them, when it runs within [`window`] of the last
 //!   full sync and the probe is unchanged: the `(key, $updatedAt)` list of every `id`,
-//!   `idacc`, `bind`, `anchor` and `head` entity of the repo, plus the op count when the
-//!   repo pins a program; any create, delete, patch, extend or expiry of those changes it;
+//!   `idacc`, `bind`, `anchor` and `head` entity of the repo, plus that of every `cob` op
+//!   when the repo pins a program; any create, delete, patch, extend or expiry changes it;
 //! - or sends every recorded query at once and serves the build from those answers.
 //!
 //! `entityNonce` reads and count-only queries are never recorded: they are sent live, in
@@ -157,12 +157,12 @@ struct Entry {
     page: Page,
 }
 
-/// The probe: `(key, $updatedAt)` of the repo's control-plane entities, and its op count.
+/// The probe: `(key, $updatedAt)` of the repo's control-plane entities and of its ops.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Probe {
     block: u64,
     rows: Vec<(B256, u64)>,
-    ops: u64,
+    ops: Vec<(B256, u64)>,
 }
 
 /// What the last full sync of a repo read.
@@ -170,7 +170,7 @@ struct Probe {
 struct Memo {
     /// Unix seconds of the full sync.
     at: u64,
-    /// The repo pinned a program (its op count is then part of the probe).
+    /// The repo pinned a program (its op list is then part of the probe).
     pinned: bool,
     probe: Option<Probe>,
     entries: Vec<Entry>,
@@ -224,9 +224,9 @@ fn probe_filter(rid: &Rid) -> Pred {
     Pred::And(vec![b32("ag.rid", rid), Pred::Or(kinds.to_vec())])
 }
 
-/// The probe list: the first page carries the count, the other pages go out together.
-async fn probe_rows<A: Arkiv>(a: &A, rid: &Rid) -> Result<(u64, Vec<(B256, u64)>)> {
-    let q = Query::from(probe_filter(rid));
+/// A probe list: the first page carries the count, the other pages go out together.
+async fn probe_rows<A: Arkiv>(a: &A, filter: Pred) -> Result<(u64, Vec<(B256, u64)>)> {
+    let q = Query::from(filter);
     let opts = |offset| QueryOpts {
         limit: MAX_LIMIT,
         offset,
@@ -261,14 +261,17 @@ async fn probe_rows<A: Arkiv>(a: &A, rid: &Rid) -> Result<(u64, Vec<(B256, u64)>
     Ok((block, rows))
 }
 
+/// Both lists go out together, so the op list costs no round trip of its own unless it
+/// alone runs past one page.
 async fn probe<A: Arkiv>(a: &A, rid: &Rid) -> Result<Probe> {
-    let ops = Query::from(Pred::And(vec![b32("ag.rid", rid), kind(Kind::Cob)]));
-    let ((block, rows), ops) = try_join(probe_rows(a, rid), async {
-        let p = a.query(&ops, &QueryOpts::count_only()).await?;
-        Ok(p.count.unwrap_or(0))
+    let ops = Pred::And(vec![b32("ag.rid", rid), kind(Kind::Cob)]);
+    let ((block, rows), (ops_block, ops)) =
+        try_join(probe_rows(a, probe_filter(rid)), probe_rows(a, ops)).await?;
+    Ok(Probe {
+        block: block.max(ops_block),
+        rows,
+        ops,
     })
-    .await?;
-    Ok(Probe { block, rows, ops })
 }
 
 /// An `Arkiv` that serves recorded pages once each and records every page it returns.
