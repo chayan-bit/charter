@@ -148,7 +148,9 @@ impl<'a, A: Arkiv> Session<'a, A> {
             .repo
             .as_ref()
             .ok_or_else(|| CliError::Usage("repo not open".into()))?;
-        discard_v1_pending(repo);
+        if !self.dry_run {
+            discard_v1_pending(repo);
+        }
         // v0.4.0 writes format v2 only (docs/p5/head-model.md); a v1 repo migrates here.
         let p = HeadPush::prepare(
             self.a,

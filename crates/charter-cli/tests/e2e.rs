@@ -389,7 +389,7 @@ fn peer_url_fetches_a_non_delegate_peers_refs() {
 /// A dry run (and a push the program refuses) stages refs in the cache; the helper drops
 /// them again, and says so when it discards a v0.3.0 push left unfinished.
 #[test]
-fn a_dry_run_push_leaves_no_staging_refs_and_an_old_pending_push_is_reported() {
+fn a_dry_run_push_leaves_no_staging_refs_and_keeps_an_old_pending_push_a_real_push_reports() {
     let tmp = tempfile::tempdir().expect("tmp");
     let (root, log) = (tmp.path(), tmp.path().join("chain.log"));
     let alice = User::new(root, "alice", &log);
@@ -416,11 +416,18 @@ fn a_dry_run_push_leaves_no_staging_refs_and_an_old_pending_push_is_reported() {
     let out = alice.run("git", &work, &["push", "--dry-run", &url, "main"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
-    assert!(err.contains("v0.3.0"), "{err}");
-    assert!(!pending.exists(), "the old pending push is discarded");
+    assert!(pending.exists(), "a dry run deletes nothing");
     let staged = alice.git(
         &cache,
         &["for-each-ref", "--format=%(refname)", "refs/arkiv/staging/"],
     );
     assert_eq!(staged, "", "no staging refs left behind");
+    let out = alice.run("git", &work, &["push", "-q", &url, "main"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("v0.3.0"), "{err}");
+    assert!(
+        !pending.exists(),
+        "the real push discards the old pending push"
+    );
 }
