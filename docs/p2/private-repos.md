@@ -1,6 +1,6 @@
 # P2: private repos
 
-Date: 2026-11-07.
+Date: 2026-11-07, hardened 2026-11-11 (format 2, charter 0.5.1).
 Crate: `crates/charter-private`.
 
 ## What a private repo is
@@ -22,52 +22,132 @@ The suite code point is recorded in the body of the repo's `group` marker entity
 ## Keys
 
 The epoch content key is `export_secret("arkiv-git content", rid, 32)` of the current epoch.
-The id-blinding key is `export_secret("arkiv-git id", rid, 32)` of the creating epoch and never rotates, so blinded queries keep matching across epochs.
+The id-blinding key is `export_secret("arkiv-git id", rid, 32)`.
+Generation 0 comes from the creating epoch, and every removal starts a new generation from the epoch it creates (`Keyring::id_rot`).
+An entity is blinded with the generation of its epoch, and a query for the rid or a name is an `Or` over every generation the member holds, so history keeps matching.
 Members keep every epoch key they ever held in a keyring file, `$CHARTER_HOME/private/<rid hex>.json`, mode 600.
 OpenMLS state (the ML-DSA-44 signature key, key package secrets and groups) lives in `$CHARTER_HOME/private/mls.json`, mode 600.
-Each commit and welcome carries the keyring (id key, all epoch keys so far, roles) sealed under the new epoch key, so a new member can read history and every member learns role changes.
+Key material is zeroized on drop, and the buffers that load and save the keyring and the MLS state are zeroized after use.
+Each commit and welcome carries the keyring (id keys, all epoch keys so far, the role history, admin certificates, commit blocks and pinned heads) sealed under the new epoch key, so a new member can read history and every member learns role changes.
 A removed member cannot open that lockbox, because it cannot derive the new epoch key.
+The lockbox is sealed with the AAD kind `box`, and the attestation with `att`; both are reserved, so no repo entity can be sealed under the same AAD.
 
 ## Sealing
 
 Any create op whose `ag.rid` is the repo's rid is sealed in `Arkiv::seal_ops`, which the tx pipeline calls before pricing and signing.
 The attributes `ag.body`, `ag.rid`, `ag.name`, `ag.lang`, `ag.lic`, and any other `bytes32` attribute equal to the rid (the root identity's `ag.h`, revision 1's `ag.parent`) move into one sealed `ag.body`.
+In a format-2 repo `ag.pack` moves into the sealed body too, and the entity gains `ag.pack = HMAC-SHA-256(id_key, "pack" || 0x00 || pack)`.
 The sealed body is `nonce || XChaCha20-Poly1305(key, nonce, u32be(len) || plaintext || zeros)` with a random 24-byte nonce.
 The AAD is `rid || kind name || u64be(epoch)`.
 The plaintext is padded to a power-of-two bucket from 256 B to 64 KiB.
 Above 64 KiB (full chunks and near-maximal envelopes with their few hidden attributes) the bucket is the next 4 KiB multiple, because a doubled 128 KiB bucket would break the 128 KiB attribute and tx caps.
 The entity gains `ag.rid = HMAC-SHA-256(id_key, "rid" || 0x00 || rid)`, `ag.name = HMAC-SHA-256(id_key, "name" || 0x00 || name)` when it had a name, and the plaintext epoch `ag.ep` so readers pick the right key.
-`ag.kind`, `ag.v`, `ag.nid`, `ag.h`, `ag.seq`, `ag.at`, `ag.pack` and `ag.i` stay in plaintext for now (see TODO).
-The `Sealed` adapter rewrites queries for the rid and names to their blinded values and opens rows before the sync layer sees them.
-A row this member cannot open is passed through unchanged, and core then ignores it as malformed, like any junk entity.
+`ag.kind`, `ag.v`, `ag.nid`, `ag.h`, `ag.seq`, `ag.at` and `ag.i` stay in plaintext for now (see TODO).
+The `Sealed` adapter rewrites queries for the rid, names and packs to their blinded values and opens rows before the sync layer sees them.
+An `ag.pack` query is `Or(plain, blinded)`, so chunks sealed before the upgrade still match.
+A row this member cannot open, or one that fails admission (see "Threat model"), is passed through unchanged, and core then ignores it as malformed, like any junk entity.
 The identity root has `visibility = 1`.
 
 ## MLS entities
 
 All are `ag.kind = mls`, unsigned like chunks (MLS messages carry their own ML-DSA-44 signatures), with `ag.t` naming the type.
-`kp` is a key package published from the member's wallet, with `ag.h = sha256(bytes)` as its id.
+`kp` is a key package published from the member's wallet, with `ag.h = sha256(bytes)` as its id, `ag.pk` the member's composite public key, and `ag.sig` its leaf binding.
 `group` is the private-repo marker, with `ag.tag = H("private-tag", rid)`.
-`commit` comes from an admin's control address, with `ag.rid` blinded and `ag.ep` the new epoch.
-`welcome` carries `ag.kp`, the joiner's key package id, and `ag.ep`.
-`pub` is a published epoch grant (`id_key || content key`), with `ag.tag` and `ag.ep`.
+`commit` comes from an admin's control address, with `ag.rid` blinded, `ag.ep` the new epoch, `ag.box` the sealed keyring and `ag.att` the sealed attestation.
+`welcome` carries `ag.kp`, the joiner's key package id, `ag.ep`, `ag.box` and `ag.att`.
+`pub` is a published epoch grant, with `ag.tag` and `ag.ep`.
+`stop` is the migration stopper (see "Migration").
 Commits are MLS PrivateMessages (`PURE_CIPHERTEXT_WIRE_FORMAT_POLICY`), so proposals never reveal member identities.
-Members read commits in Arkiv order and apply the one for the next epoch; a commit whose sender is not an admin is skipped.
+Members read commits in Arkiv order and apply the one for the next epoch only if it is attested by its MLS sender and that sender is an admin.
 
 ## Roles
 
-Roles are `admin | write | read`, kept in the sealed keyring and keyed by nid.
-Only admins add or remove members or publish epoch keys, and write is needed to push.
-Enforcement is client-side, as for delegates of public repos: the CLI refuses with `E_ROLE_DENIED`, and members ignore commits from non-admins.
-The MLS credential is a basic credential naming the nid.
+Roles are `admin | write | read`, kept in the sealed keyring and keyed by nid, with one entry per epoch in which they changed (`Keyring::role_log`).
+Only admins add or remove members, and only root delegates publish epoch keys; write is needed to push.
+The CLI refuses with `E_ROLE_DENIED`, and readers apply the same rules to what they read (see "Threat model").
+The MLS credential is a basic credential naming the nid, and it is bound to the nid's composite key by the leaf binding.
+
+## Threat model
+
+The adversary controls any number of wallets, may have been a member or admin earlier, and can write any entity to Arkiv.
+It cannot break ML-DSA-65, Ed25519, ML-DSA-44, X-Wing or XChaCha20-Poly1305, and cannot forge the root identity of the repo.
+Content and membership must stay confidential to current members, and members must accept only state an authorized member made.
+The fixes below are named after the findings of the 2026-11 review.
+
+### Join (F2)
+
+A welcome is accepted only if it carries an attestation: the composite signature of an admin over `rid || epoch || sha256(welcome) || sha256(lockbox) || kp id`, sealed under the new epoch key.
+The signer must be the welcome's MLS sender and an admin, either a delegate of the root identity (its hash is the rid, so it cannot be forged) or an admin whose certificate chains to one.
+A certificate is an admin's composite signature over `rid || nid`, kept in the sealed keyring.
+A joiner evaluates every welcome for its key packages, each on a snapshot of its MLS state, keeps the ones that verify, and fails with `E_EQUIVOCATION` if two verified welcomes lead to different groups.
+A forged welcome from a removed member therefore cannot hijack a join, because that member is no longer an admin in the rid-rooted chain.
+
+### Late writes and role checks (F3)
+
+Each commit records the block it landed in (`Keyring::rotated`).
+A row sealed in epoch e is admitted only if it landed no later than the commit for e+1 plus `GRACE_BLOCKS` (64 blocks, about two minutes), so an in-flight push is not lost.
+Readonly rows use their creation block.
+Heads are mutable and anyone may extend them, which moves their update block, so a head is also admitted if its `ag.h` is in the snapshot of heads the admin pinned in the commit.
+A signed row of a write kind (anchor, refs, manifest, device, head) is admitted only if its `ag.nid` held write or admin in the row's epoch; other signed rows need read.
+Heads and snapshot manifests are signed by a device key, which holds no role, so they pass this check and core accepts them only under the member's `device` record, which needs write.
+Unsigned rows (chunks, pieces) pass, since only an admitted signed row can reference them.
+The same check covers cob ops, heads and refs, because all of them are opened by `Sealed`.
+
+### Removing every device (F4)
+
+A removal removes every MLS leaf whose credential names the nid, not only the first.
+`chart member list` prints how many devices each member has.
+A second leaf for a nid that already holds a role is added only by `chart member add --device`, never by a plain add.
+
+### Key package claims (F5)
+
+A key package names a nid, its composite public key and a signature by that key over the MLS signature key, and an admin refuses one whose binding does not verify (`E_BAD_SIG`).
+A plain add of a key package whose nid already holds a role is refused (`E_BAD_FORMAT`), so an add can never demote an admin or add a hidden device.
+
+### Published grants (F7)
+
+A grant is `id_key || key || public key || signature || (nid || role)*`, signed by a root delegate over the rid, the epoch, both keys and the roles of that epoch.
+A reader picks the root-epoch grant whose keys open the root identity row (its hash is the rid), preferring a signed one.
+A later grant is used only if it is signed by a delegate of that root identity.
+An outsider's grant therefore can neither block nor replace the real one.
+A legacy 64-byte grant is still accepted for the root epoch, where opening the root identity authenticates it.
+
+### Id-key rotation (F8)
+
+Every removal starts a new id-key generation, so a removed member can no longer link new entities to the repo by their blinded rid or names.
+Sealing uses the generation of the row's epoch; a row whose blinded rid does not match that generation is rejected.
+
+### Pack ids (F9)
+
+The plain SHA-256 of a pack linked a sealed chunk to a public copy of the same pack.
+In a format-2 repo it is sealed and blinded, as above.
+
+### Low-severity items (F12)
+
+Key material is zeroized on drop.
+The lockbox and the attestation have their own reserved AAD kinds.
+A welcome names its key package in plaintext (`ag.kp`), and key packages, commits and welcomes come from members' wallets, so an observer can link a joiner's wallet to the time it joined a group (not to the rid); relayers would remove this (see TODO).
+
+## Migration
+
+A repo created before 0.5.1 has keyring format 1: no certificates, attestations, role history or commit blocks.
+A 0.5.1 client reads such a repo as before, deriving the role history and commit blocks from the commits it can open, and accepts unattested commits only while the format is 1.
+The first membership change on 0.5.1 must be made by a root delegate; any other admin is refused with a clear upgrade message.
+That commit sets format 2, signs certificates for the existing admins, pins the heads, and is attested.
+From then on every client requires attestations, admission and the blinded pack.
+The same tx writes a `stop` row: an identity row under the generation-0 blinded rid whose `ag.v` no client supports.
+A pre-0.5.1 member then fails with `E_UNSUPPORTED_VERSION` on its next read instead of accepting forged state, and 0.5.1 clients skip the stopper.
+A grant reader on a migrated repo needs 0.5.1 as well.
 
 ## API
 
-`init(a, cfg, keys, meta) -> rid` creates the repo with the caller as sole delegate and admin.
-`publish_key_package(a, cfg, keys) -> id` publishes a key package.
-`add_member(a, cfg, keys, rid, kp_id, role) -> nid` and `remove_member(a, cfg, keys, rid, nid)` issue commits.
+`init(a, cfg, keys, meta) -> rid` creates the repo with the caller as sole delegate and admin, in format 2.
+`publish_key_package(a, cfg, keys) -> id` publishes a key package with its leaf binding.
+`add_member(a, cfg, keys, rid, kp_id, role) -> nid`, `add_device(a, cfg, keys, rid, kp_id) -> nid` and `remove_member(a, cfg, keys, rid, nid)` issue commits.
+`members(home, rid) -> (epoch, [(nid, role, devices)])` lists the current members.
 `refresh` and `ring_for` bring a member's keyring up to date, joining from a welcome when needed, and return `E_NOT_MEMBER` for a private repo the caller cannot read.
-`publish_epoch_key(a, cfg, keys, rid, epoch) -> grant` publishes one epoch's grant in plaintext, so anyone who knows the rid can read what was sealed in that epoch (sponsorware, source escrow).
-`export_epoch_key(home, rid, epoch) -> grant` returns the same 64 bytes locally, for an escrow agent or a timelock.
+`publish_epoch_key(a, cfg, keys, rid, epoch) -> grant` publishes one epoch's signed grant in plaintext, so anyone who knows the rid can read what was sealed in that epoch (sponsorware, source escrow).
+`export_epoch_key(home, rid, epoch) -> grant` returns the same grant locally, for an escrow agent or a timelock.
 Repo programs are expected to call these through obligations later.
 
 ## CLI
@@ -75,9 +155,33 @@ Repo programs are expected to call these through obligations later.
 `chart init --private` creates a private repo.
 `chart member keypackage` publishes a key package and prints its id.
 `chart member add --repo R --key-package <id> --role write` adds a member.
-`chart member remove --repo R --member <nid>` removes one.
-`chart member list --repo R` prints nids and roles.
+`chart member add --repo R --key-package <id> --device` adds another device of an existing member.
+`chart member remove --repo R --member <nid>` removes a member and all its devices.
+`chart member list --repo R` prints nids, roles and device counts.
 `git push` and `git clone arkiv::<rid>` on a private repo work for members (a new member joins on first use) and fail with `E_NOT_MEMBER` for anyone else.
+
+## Cost
+
+Push, clone, fetch and sync make no more queries than in 0.5.0, and `tests/query_counts.rs` holds them to the 0.5.0 counts on the fake chain.
+
+| Operation | 0.5.0 | 0.5.1 |
+| --- | --- | --- |
+| push | 20 | 20 |
+| clone (member, warm) | 3 | 3 |
+| fetch | 12 | 12 |
+| sync | 6 | 6 |
+| clone through published grants | 14 | 14 |
+| join and first clone | 13 | 15 |
+| add | 2 | 5 |
+| remove | 1 | 4 |
+
+Join reads the root identity and the signer's peer key to check the welcome's attestation.
+Add and remove read the root identity, the heads to pin and the admin's own peer document.
+Each commit applied costs one peer-key lookup for its signer, and a refresh queries commits again only when a removal starts a new id-key generation.
+A grant reader saves one query (the `group` and `pub` lookups are merged) and spends it on the commit list it needs for admission.
+Each attestation, certificate and signed grant costs one composite signature to make and one to check.
+Each commit and welcome grows by an attestation (about 3.4 KB sealed), and the lockbox by about 6.7 KB per non-root admin certificate plus a few bytes per role change, commit and pinned head.
+A signed grant is 64 B plus 5.4 KB of key and signature plus 33 B per member.
 
 ## Known limits
 
@@ -85,14 +189,17 @@ Knowing the rid reveals that a private repo exists, through the `group` marker, 
 A public identity for the rid takes precedence over the marker, so a forged marker cannot close a public repo.
 A published grant covers one epoch, so readers also need the grants of the epochs that sealed the identity and binds.
 Concurrent admins committing at the same epoch fork the group; the first commit in Arkiv order wins and the other admin must rejoin.
+An ex-admin whose certificate is still in an old lockbox, or an ex-root-delegate, can race a real admin with a forged welcome for a fresh key package; the equivocation check catches it only when both welcomes exist, and a revocation list in the lockbox would close it.
+A push that lands within the grace window and is extended by someone else before the next commit pins it can drop out of the admitted set until it is pushed again.
+The stopper lives for the control lifetime (about six months); a pre-0.5.1 client that first reads the repo after it expires sees no error, though it still cannot open anything sealed under a later id-key generation.
+Leaves added before 0.5.1 were never checked against a leaf binding; an admin who doubts one should remove that member and add it again.
 Libcrux ML-DSA and X-Wing overflow 2 MiB stacks in debug builds, so the tests run on 64 MiB worker stacks.
 
 ## TODO
 
 - Relayers, so commits, welcomes and pushes do not link members' control addresses to the repo.
-- Full blinded annotations: `ag.nid`, `ag.h`, `ag.seq`, `ag.at`, `ag.pack`, `ag.i` and entity sizes still leak structure.
+- Full blinded annotations: `ag.nid`, `ag.h`, `ag.seq`, `ag.at`, `ag.i` and entity sizes still leak structure.
 - History lockbox as its own rotating entity, instead of the full keyring inside every commit and welcome.
 - Rotation timer: a scheduled `self_update` commit for post-compromise security.
-- Binding the MLS credential to the composite identity key, so a key package cannot claim someone else's nid.
-- Reader-side role checks, so anchors from members without write are ignored rather than only refused at push.
+- Certificate revocation, so a demoted admin's old certificate cannot sign welcomes.
 - Re-encrypting history after a removal, if a removed member must also lose access to old content.
