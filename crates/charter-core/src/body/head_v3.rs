@@ -149,14 +149,19 @@ impl Body for HeadBodyV3 {
 
     fn validate(&self) -> Result<(), FormatError> {
         self.v2_rules()?;
+        // An unknown codec is a newer writer: `Unsupported`, so readers say upgrade.
+        for p in &self.packs {
+            p.codec()?;
+        }
         let runs_ok = self.packs.iter().all(|p| {
-            p.codec().is_ok()
-                && !p.runs.is_empty()
-                && p.runs
-                    .iter()
-                    .all(|r| r.count >= 1 && (r.block != 0 || *r == PieceRun::HERE))
+            !p.runs.is_empty()
+                && p.runs.iter().all(|r| {
+                    r.count >= 1
+                        && r.index.checked_add(r.count).is_some()
+                        && (r.block != 0 || *r == PieceRun::HERE)
+                })
         });
-        require(runs_ok, field("head", "packs", "unknown codec or bad run"))?;
+        require(runs_ok, field("head", "packs", "bad run"))?;
         let txs: usize = self.packs.iter().map(PackV3::tx_count).sum();
         require(
             txs <= MAX_HEAD_PIECES,

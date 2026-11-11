@@ -219,6 +219,53 @@ fn an_unknown_head_version_still_stops_the_current_reader() {
 }
 
 #[test]
+fn a_v3_head_with_an_unknown_codec_stops_the_reader_with_unsupported_version() {
+    let w = world();
+    let (_, identity, d) = device(w);
+    let mut b = v3(w.rid, 0, 3);
+    b.packs[0].codec = 7;
+    let (row, _) = observe(&peers()[1], &b, DEV_CONTROL, 41, 0);
+    let err = accept_device_head(
+        &w.rid,
+        &alice().nid,
+        &d,
+        &identity,
+        std::slice::from_ref(&row),
+        &nonce(2),
+        None,
+    )
+    .expect_err("codec 7");
+    assert_eq!(err.code(), ErrorCode::UnsupportedVersion);
+}
+
+#[test]
+fn runs_that_overflow_their_index_or_are_empty_are_refused() {
+    let w = world();
+    for (index, count) in [(u32::MAX, 2), (u32::MAX - 1, 2), (5, 0)] {
+        let mut b = v3(w.rid, 1, 1);
+        b.packs[0].runs = vec![PieceRun {
+            block: 9,
+            index,
+            count,
+        }];
+        assert!(
+            HeadBodyV3::decode(&b.encode()).is_err(),
+            "index {index} count {count}"
+        );
+    }
+    let mut b = v3(w.rid, 1, 1);
+    b.packs[0].runs = vec![PieceRun {
+        block: 9,
+        index: u32::MAX - 1,
+        count: 1,
+    }];
+    assert!(
+        HeadBodyV3::decode(&b.encode()).is_ok(),
+        "the last index fits"
+    );
+}
+
+#[test]
 fn a_v3_body_round_trips_and_its_signature_is_domain_separated() {
     let w = world();
     let body = v3(w.rid, 1, 34);
