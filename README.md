@@ -29,7 +29,7 @@ GitHub is a read-only mirror plus the host of the release binaries.
 
 ```sh
 # 1. install the prebuilt binaries (macOS arm64 or Linux x86_64), see docs/install.md
-TAG=v0.4.0 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
+TAG=v0.5.0 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 mkdir -p ~/.local/bin && curl -fsSL "https://github.com/chayan-bit/charter/releases/download/$TAG/charter-$TAG-$TARGET.tar.gz" | tar xz -C ~/.local/bin git-remote-arkiv chart chart-mcp
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -156,6 +156,12 @@ Never use real funds or mainnet keys.
 5. In any git repo: `git remote add arkiv arkiv::<rid>` and `git push arkiv main`.
 6. Anywhere else: `git clone arkiv::<rid> demo-clone`.
 7. `chart status arkiv::<rid>` shows each peer's head and the minimum expiry in days, and `chart keepalive arkiv::<rid> --dry-run` shows what it would extend.
+
+### Storage format v3 (v0.5.0)
+
+From v0.5.0 packs are stored brotli-compressed, a head names its pieces as compact block runs, and a push patches only what changed in the head (`docs/p5/head-model.md` section 13).
+The first v0.5.0 push of each machine migrates its head automatically; no command is needed.
+A v0.4.0 client stops with `E_UNSUPPORTED_VERSION` on a repo once any synced peer has pushed with v0.5.0, instead of showing stale refs, so upgrade every machine that reads the repo.
 
 ### Storage format v2 (v0.4.0)
 

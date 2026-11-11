@@ -11,15 +11,15 @@ https://github.com/chayan-bit/charter/releases/download/<tag>/charter-<tag>-<tar
 https://github.com/chayan-bit/charter/releases/download/<tag>/SHA256SUMS
 ```
 
-For v0.4.0 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.4.0/charter-v0.4.0-aarch64-apple-darwin.tar.gz`.
-For v0.4.0 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.4.0/charter-v0.4.0-x86_64-unknown-linux-gnu.tar.gz`.
+For v0.5.0 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.5.0/charter-v0.5.0-aarch64-apple-darwin.tar.gz`.
+For v0.5.0 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.5.0/charter-v0.5.0-x86_64-unknown-linux-gnu.tar.gz`.
 v0.1.0 predates the rename to Charter: its archives are named `arkiv-git-v0.1.0-<target>.tar.gz` and hold `git-remote-arkiv`, `arkiv-git` and `arkiv-git-mcp`.
 A combined `SHA256SUMS` file is attached to the release as well.
 
 ## Install snippet
 
 ```sh
-TAG=v0.4.0
+TAG=v0.5.0
 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 BASE=https://github.com/chayan-bit/charter/releases/download/$TAG
 curl -fsSLO "$BASE/charter-$TAG-$TARGET.tar.gz"
@@ -40,6 +40,13 @@ git clone arkiv::<rid>
 
 Files fetched with `curl` carry no quarantine flag, so the snippet above runs as is.
 If you download the archive in a browser and macOS refuses to open the binaries, clear the flag with `xattr -d com.apple.quarantine ~/.local/bin/git-remote-arkiv ~/.local/bin/chart ~/.local/bin/chart-mcp`.
+
+## Upgrading to v0.5.0
+
+v0.5.0 writes git data in storage format v3 (`docs/p5/head-model.md` section 13) and still reads repos written in formats v1 and v2.
+The first v0.5.0 push of each machine migrates that machine's head, and from then on v0.4.0 and older stop on the repo with `E_UNSUPPORTED_VERSION` rather than show stale refs.
+Upgrade every machine and CI runner that reads a repo before or right after its first v0.5.0 push.
+The device seed from v0.4.0 is kept; no new files are needed.
 
 ## Upgrading to v0.4.0
 
