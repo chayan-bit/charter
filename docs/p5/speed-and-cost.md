@@ -238,6 +238,10 @@ Before (v0.4.0, profiler traces of the same steps): small push 11.9 to 13.8 s; 2
 The refresh is the cut: v0.4.0 rewrites the whole 13.1 MiB snapshot, about 210 chunks at 3.88M gas, so about 815M gas and 1.08 tGLM at the same gas price (DERIVED, not run), against 187.4M gas and 0.249 tGLM here, -77%.
 The small push drops one RPC (34 instead of 35; the manifest query took 464 to 605 ms) and spawns as many git processes as before (17); its gas is unchanged, as expected without a format change.
 A clone of the 3-layer repo with the installed v0.4.0 binary (`chart 0.4.0`, fresh home) took 9 s, `git fsck --full` is clean and `HEAD` matches the pusher.
+A v0.4.0 writer on a layered repo is safe (MEASURED on Rabdi with the installed `chart 0.4.0`):
+the same device after a downgrade carries all 3 layers on piece pushes and, at its own refresh threshold (which sums every layer), replaces them with one full snapshot of the identity's refs;
+a second v0.4.0 device writes no snapshot until its first refresh, reads the first device's layers meanwhile, and its refresh writes a full snapshot while the first device's head keeps its layers.
+After each step both readers clone with a clean `git fsck --full`, and `chart keepalive --dry-run` of both versions lists the same keep set, which counts every layer a head lists (and none a head dropped).
 
 ### 2.9 Write latency and pacing modes on branch `perf/batch-b` (2026-11-11)
 
