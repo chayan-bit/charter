@@ -219,7 +219,13 @@ LAYOUT_JS = """() => {
     out.tabTops = [...new Set(links.map(a => Math.round(r(a).top)))];
     const tcs = getComputedStyle(tabs);
     out.tabScrollbar = tabs.offsetHeight - tabs.clientHeight - parseFloat(tcs.borderTopWidth) - parseFloat(tcs.borderBottomWidth);
-    out.tabHint = tabs.scrollWidth > tabs.clientWidth ? getComputedStyle(tabs).maskImage || getComputedStyle(tabs).webkitMaskImage : 'fits';
+    const fadeOf = () => { const cs = getComputedStyle(tabs); return /gradient/.test((cs.maskImage || '') + (cs.webkitMaskImage || '')); };
+    const fadeAt = () => { tabs.dispatchEvent(new Event('scroll')); return fadeOf(); };
+    const keep = tabs.scrollLeft, more = tabs.scrollWidth > tabs.clientWidth + 1;
+    tabs.scrollLeft = 0; const atStart = fadeAt();
+    tabs.scrollLeft = tabs.scrollWidth; const atEnd = fadeAt();
+    tabs.scrollLeft = keep; fadeAt();
+    out.tabHint = more ? (atStart && !atEnd ? 'ok' : 'start ' + atStart + ', end ' + atEnd) : (atStart ? 'fade with nothing to scroll' : 'fits');
     out.repoBottom = Math.round(r(q('.repo-head')).bottom);
     const vs = q('#verify > summary'); out.vpH = vs ? Math.round(r(vs).height) : null;
   }
@@ -531,7 +537,7 @@ def layout_checks(page, name, scope, vp, rid):
     if "tabTops" in m:
         rec("repo tabs sit on one row, no scrollbar artifact", scope, len(m["tabTops"]) == 1 and m["tabScrollbar"] == 0,
             f'rows at {m["tabTops"]}, scrollbar {m["tabScrollbar"]}px')
-        rec("tabs that scroll show a fade as the scroll hint", scope, m["tabHint"] == "fits" or "gradient" in m["tabHint"], m["tabHint"])
+        rec("tab fade shows only while more tabs sit past the edge", scope, m["tabHint"] in ("fits", "ok"), m["tabHint"])
         rec("verification seal fits its two lines", scope, m["vpH"] is not None and m["vpH"] <= 56, f'height {m["vpH"]}')
         if vp == "phone":
             rec("phone: content starts in the first 360 px", scope, m["repoBottom"] <= 360, f'repo header ends at y={m["repoBottom"]}')
