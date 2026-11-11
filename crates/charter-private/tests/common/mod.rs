@@ -2,6 +2,8 @@
 //! send-dropping fault, peers with their own `$CHARTER_HOME`, and real git work repos.
 #![allow(dead_code)]
 
+pub mod sec;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -28,6 +30,8 @@ pub struct Net {
     fee: Mutex<Option<(u64, u128)>>,
     /// Rendered text of every query, in order.
     pub queries: Mutex<Vec<String>>,
+    /// Blocks read through `block_txs`.
+    pub block_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl Net {
@@ -37,6 +41,7 @@ impl Net {
             drop: Mutex::new(None),
             fee: Mutex::new(None),
             queries: Mutex::new(vec![]),
+            block_reads: Default::default(),
         }
     }
 
@@ -105,6 +110,8 @@ impl Arkiv for Net {
         self.mem.mined_tx(h).await
     }
     async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        self.block_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.mem.block_txs(n).await
     }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
