@@ -1,6 +1,7 @@
 //! `chart device list` and `chart device revoke` (docs/p5/head-model.md section 15).
 
 use charter_core::{Nid, Rid};
+use charter_private::revoked::LeafState;
 use charter_store::Arkiv;
 use charter_sync::ids::{parse_id, to_text};
 use charter_sync::revoke::{self, DeviceInfo};
@@ -14,7 +15,8 @@ use crate::{CliError, Result};
 pub enum DeviceCmd {
     /// Every device delegated by this machine's identity in the repo.
     List { repo: String },
-    /// Revoke a device of this identity: its later heads are ignored (needs `keys/`).
+    /// Revoke a device of this identity: its later heads are ignored (needs `keys/`). In a
+    /// private repo an admin's client also removes the device's MLS leaf on its next sync.
     Revoke {
         repo: String,
         /// The device nid, as `chart device list` prints it.
@@ -86,4 +88,56 @@ pub async fn run<A: Arkiv>(a: &A, cfg: &Config, cmd: &DeviceCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// After a revoke in a private repo: refreshes the group (an admin's refresh removes the
+/// leaf right away) and says what the revoked device can still decrypt.
+pub async fn private_note<A: Arkiv>(a: &A, cfg: &Config, cmd: &DeviceCmd) -> Result<()> {
+    let DeviceCmd::Revoke { device, .. } = cmd else {
+        return Ok(());
+    };
+    let rid = cmd.rid()?;
+    let keys = Keys::require(&cfg.home)?;
+    let nid =
+        parse_id(device).map_err(|_| CliError::Usage(format!("{device}: not a device nid")))?;
+    let state = charter_private::revoked::leaf_state(a, cfg, &keys, &rid, &nid).await?;
+    println!("{}", note(state, &to_text(&keys.nid())));
+    Ok(())
+}
+
+fn note(state: LeafState, me: &str) -> String {
+    match state {
+        LeafState::Removed { epoch } => format!(
+            "private repo: no MLS leaf names this device any more, so it cannot decrypt \
+             anything sealed from epoch {epoch} on; what was sealed before stays readable to it"
+        ),
+        LeafState::Pending => "private repo: its writes after the cut are refused now, but it \
+             can still decrypt new rows until an admin's client next syncs this repo, which \
+             removes its MLS leaf automatically (one commit); what is sealed before that stays \
+             readable to it"
+            .into(),
+        LeafState::Legacy => format!(
+            "private repo: this identity's MLS leaves predate device binding (charter 0.6.0), \
+             so no leaf names this device and it can still decrypt new rows; to cut it off, an \
+             admin runs `chart member remove --member {me}`, then each remaining device runs \
+             `chart member keypackage` and the admin adds the first with `chart member add` \
+             and the rest with `chart member add --device`"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_leaf_state_says_what_the_device_can_still_read() {
+        assert!(note(LeafState::Removed { epoch: 7 }, "me").contains("from epoch 7 on"));
+        assert!(note(LeafState::Pending, "me").contains("until an admin's client next syncs"));
+        let legacy = note(LeafState::Legacy, "zMe");
+        assert!(
+            legacy.contains("chart member remove --member zMe"),
+            "{legacy}"
+        );
+    }
 }

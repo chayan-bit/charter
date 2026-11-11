@@ -99,9 +99,20 @@ pub async fn member_cmd<A: Arkiv>(a: &A, cfg: &Config, cmd: &MemberCmd) -> Resul
         MemberCmd::List { repo } => {
             let (epoch, list) = charter_private::members(a, cfg, &keys, &rid_of(repo)?).await?;
             println!("epoch {epoch}");
-            for (nid, role, leaves) in list {
-                let s = if leaves == 1 { "" } else { "s" };
-                println!("{} {role:?} {leaves} device{s}", to_text(&nid));
+            for (nid, role, leaves, unbound) in &list {
+                let s = if *leaves == 1 { "" } else { "s" };
+                let legacy = match unbound {
+                    0 => String::new(),
+                    n => format!(" ({n} made before 0.6.0, not revocable by device)"),
+                };
+                println!("{} {role:?} {leaves} device{s}{legacy}", to_text(nid));
+            }
+            if list.iter().any(|m| m.3 > 0) {
+                println!(
+                    "to make a member's devices revocable one by one: `chart member remove`, \
+                     then `chart member keypackage` on each device and `chart member add` \
+                     (the first) and `chart member add --device` (the rest)"
+                );
             }
         }
     }

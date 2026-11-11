@@ -82,3 +82,63 @@ fn the_identity_lists_and_revokes_a_device_and_the_device_can_no_longer_push() {
     );
     assert!(!refused.status.success());
 }
+
+/// Head-model 15.7: in a private repo an admin revoking her own laptop removes its MLS
+/// leaf at once (her remaining device commits it) and the CLI says what that leaves.
+#[test]
+fn revoking_a_private_repo_device_removes_its_mls_leaf_and_says_so() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root, log) = (tmp.path(), tmp.path().join("chain.log"));
+    let [alice, laptop] = ["alice", "laptop"].map(|n| User::new(root, n, &log));
+    fund(&log, field(&alice.arkiv(&["keys", "init"]), "wallet:"));
+    let url = field(
+        &alice.arkiv(&["init", "--private", "--name", "vault"]),
+        "url:",
+    )
+    .to_owned();
+    let work = root.join("work");
+    alice.git(root, &["init", "-q", &work.to_string_lossy()]);
+    write(&work, "README", b"v0\n");
+    alice.git(&work, &["add", "-A"]);
+    alice.git(&work, &["commit", "-q", "-m", "feat: v0"]);
+    alice.git(&work, &["push", "-q", &url, "main"]);
+
+    copy_dir(
+        &alice.home.join(".charter/keys"),
+        &laptop.home.join(".charter/keys"),
+    );
+    let kp = field(&laptop.arkiv(&["member", "keypackage"]), "key package:").to_owned();
+    alice.arkiv(&[
+        "member",
+        "add",
+        "--repo",
+        &url,
+        "--key-package",
+        &kp,
+        "--device",
+    ]);
+    let lap = root.join("lap");
+    laptop.git(root, &["clone", "-q", &url, &lap.to_string_lossy()]);
+    laptop.git(&lap, &["checkout", "-q", "-b", "topic"]);
+    write(&lap, "T", b"t\n");
+    laptop.git(&lap, &["add", "-A"]);
+    laptop.git(&lap, &["commit", "-q", "-m", "feat: topic"]);
+    laptop.git(&lap, &["push", "-q", "origin", "topic"]);
+    let members = alice.arkiv(&["member", "list", "--repo", &url]);
+    assert!(members.contains("Admin 2 devices"), "{members}");
+
+    let list = alice.arkiv(&["device", "list", &url]);
+    let lap_nid = list
+        .lines()
+        .find(|l| l.contains("active"))
+        .and_then(|l| l.split_whitespace().next())
+        .expect("laptop nid")
+        .to_owned();
+    let out = alice.arkiv(&["device", "revoke", &url, &lap_nid]);
+    assert!(
+        out.contains("no MLS leaf names this device any more"),
+        "{out}"
+    );
+    let members = alice.arkiv(&["member", "list", "--repo", &url]);
+    assert!(members.contains("Admin 1 device"), "{members}");
+}

@@ -518,7 +518,13 @@ pub fn run(cli: &Cli) -> Result<()> {
             }
             Cmd::Device(d) => {
                 let b = backend::for_repo(&a, &cfg, &d.rid()?).await?;
-                crate::device_cmd::run(&b, &cfg, d).await
+                crate::device_cmd::run(&b, &cfg, d).await?;
+                match b {
+                    charter_private::ForRepo::Sealed(_) => {
+                        crate::device_cmd::private_note(&a, &cfg, d).await
+                    }
+                    charter_private::ForRepo::Plain(_) => Ok(()),
+                }
             }
             Cmd::Keepalive(k) => {
                 let b = backend::for_repo(&a, &cfg, &rid_of(&k.repo)?).await?;
