@@ -595,9 +595,12 @@ The record names the device's last valid body by seq, hash and landing tx, inste
 
 - v0.5.0 reads every anchor of a tracked `C_N`; a revoke record is an anchor with layout version 3, which it does not know, so it stops with `E_UNSUPPORTED_VERSION` instead of trusting the revoked device's new heads.
 
-### 15.7 Follow-up: private repos
+### 15.7 Private repos
 
-- In a private repo a device is also an MLS leaf; revoking the device should remove that leaf in the same step, with the mechanism the private-repo work uses to drop every leaf of a removed member (`sec/private-core`).
-  Until then, a revoked device of a private repo can no longer write refs, but it can still decrypt new epochs; removing the member removes all of its leaves.
-  As of v0.6.0 this is still open: an MLS leaf is bound to the member's identity key (`auth::leaf_bound`), not to a head-model device key, so nothing yet says which leaf a revoked device holds, and only an admin may commit a removal while any identity may revoke its own device.
-  Closing it needs the device key in the leaf binding (or a device-signed key package) and a remove-by-leaf commit that an admin, or the revoking identity through a proposal, can send.
+- In a private repo a device is also an MLS leaf, and since v0.6.0 the leaf names its device: the MLS credential is `nid || device`, and the leaf binding (the member's composite signature in the key package) covers the device too, so a revoke record maps to exactly one leaf.
+- An admin's client removes that leaf on its next refresh of the group, which every private-repo command, push, fetch and clone does; the revoke records arrive in the refresh's commit query, so this costs nothing until a revoke is pending, then one commit tx.
+  The removal rotates the epoch key and the id-key generation, as a member removal does; the member keeps its role and its other devices.
+  An admin's own revoked device is removed by its remaining device; two admins racing make one removal (the first commit for the epoch wins, the other admin undoes its own and applies it).
+- The revoked device's heads after the cut are ignored from the revoke on (15.2), before the leaf removal lands.
+  Until the removal lands it can still decrypt new rows: the gap lasts until an admin's client next syncs the repo, plus one commit tx, and `chart device revoke` prints a note saying so (or removes the leaf at once when the revoker is an admin).
+- Leaves made before v0.6.0 name no device; `chart member list` marks them, and removing the member and adding its remaining devices again makes them revocable one by one (docs/p2/private-repos.md, "Revoked devices").
