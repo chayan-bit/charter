@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use charter_core::{
     DeviceHead, ErrorCode, Hash32, HeadPack, HeadRef, Merged, Nid, RefEntry, RefsBody, Winner,
-    ZERO, next_entries, resolve_stamps,
+    ZERO, is_device_row, next_entries, resolve_stamps,
 };
 use charter_store::Arkiv;
 
@@ -169,6 +169,63 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
 
     /// This identity's v2 view, read fresh (`None` before its first device delegation).
     pub(crate) async fn own_v2(&self, state: &State) -> Result<Option<V2>> {
+        let (rid, nid) = (self.rid(), self.nid());
+        let known = self.view.peers.get(&nid).map(|pv| {
+            let rows: Vec<_> = pv
+                .anchors
+                .iter()
+                .filter(|o| is_device_row(o))
+                .cloned()
+                .collect();
+            (pv, rows)
+        });
+        let Some((pv, rows)) = known.filter(|(_, rows)| !rows.is_empty()) else {
+            return self.own_v2_cold(state).await;
+        };
+        // The peer and anchor reads run alongside a build from the inputs the sync verified;
+        // that build stands only if the fresh reads return exactly those inputs.
+        let fresh = async {
+            let Some(info) = view::resolve_peer(self.a, &rid, &nid).await? else {
+                return Ok(None);
+            };
+            let rows = view::anchors(self.a, &rid, &nid, &info).await?;
+            let rows: Vec<_> = rows.into_iter().filter(is_device_row).collect();
+            Ok::<_, SyncError>(Some((info, rows)))
+        };
+        let early = heads::build(
+            self.a,
+            &rid,
+            &nid,
+            &pv.info,
+            &self.view.identity,
+            &rows,
+            state,
+        );
+        let (fresh, early) = futures_util::future::join(fresh, Box::pin(early)).await;
+        let Some((info, fresh_rows)) = fresh? else {
+            return Ok(None);
+        };
+        if fresh_rows.is_empty() {
+            return Ok(None);
+        }
+        if info.binds == pv.info.binds && fresh_rows == rows {
+            return early.map(Some);
+        }
+        let v2 = heads::build(
+            self.a,
+            &rid,
+            &nid,
+            &info,
+            &self.view.identity,
+            &fresh_rows,
+            state,
+        );
+        Ok(Some(Box::pin(v2).await?))
+    }
+
+    /// [`Self::own_v2`] when the sync knows none of this identity's devices: peer, then
+    /// anchors, then the device heads.
+    async fn own_v2_cold(&self, state: &State) -> Result<Option<V2>> {
         let Some(info) = view::resolve_peer(self.a, &self.rid(), &self.nid()).await? else {
             return Ok(None);
         };

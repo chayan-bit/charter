@@ -140,9 +140,9 @@ async fn a_small_push_sends_its_head_patch_without_an_estimate_or_a_tx_lookup() 
     .expect("prepare");
     counting.reset();
     Box::pin(hp.run()).await.expect("small push");
-    // Setup, plan (with entityNonce), send, the receipt poll, and the 3-round re-check;
-    // The 5-round re-check made it 9.
-    assert!(counting.rounds() <= 6, "{} round trips", counting.rounds());
+    // Setup, plan (with entityNonce), send, the receipt poll, and the re-check (the
+    // peer, its anchors and the device heads read together); the 5-round re-check made it 9.
+    assert!(counting.rounds() <= 5, "{} round trips", counting.rounds());
     assert_eq!(
         counting.count("estimate"),
         0,
@@ -165,6 +165,45 @@ async fn a_small_push_sends_its_head_patch_without_an_estimate_or_a_tx_lookup() 
     assert_eq!(
         landing.index, mined.index,
         "the recorded index is the real one"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_read_of_this_identity_reads_peer_anchors_and_heads_together() {
+    let net = Net::new();
+    let alice = Peer::new(&net, 3);
+    let rid = init(&net, &alice, "lean-plan").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let work = work_repo(tmp.path(), "work");
+    commit(&work, &[("a", b"one")], "feat: one");
+    push2(&net, &alice, &rid, &work, &["refs/heads/main"])
+        .await
+        .expect("first push creates the head");
+
+    commit(&work, &[("a", b"two")], "feat: two");
+    let counting = Counting::new(&net);
+    let repo = alice.repo(&rid);
+    let view = Box::pin(charter_sync::sync(&counting, &repo, &alice.want()))
+        .await
+        .expect("sync");
+    let hp = HeadPush::prepare(
+        &counting,
+        &repo,
+        &alice.cfg,
+        &alice.keys,
+        view,
+        &charter_sync::git::Git::work(Some(&work)),
+        &[upd("refs/heads/main")],
+    )
+    .expect("prepare");
+    let state = charter_sync::state::State::load(&repo.state_path()).expect("state");
+    counting.reset();
+    // A plan that does not reuse the sync's view reads this identity's heads afresh.
+    Box::pin(hp.plan(&state)).await.expect("plan");
+    assert!(
+        counting.rounds() <= 2,
+        "peer, anchors and device heads in 2 round trips, not 4: {}",
+        counting.rounds()
     );
 }
 
