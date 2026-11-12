@@ -12,6 +12,8 @@ use super::{App, Head, Layout, Pref, Repo, blocking, error_page, frame, html, op
 use crate::diff::{self, FileDiff};
 use crate::gitread::{self, CommitInfo, CommitRow};
 use crate::highlight::HIGHLIGHT_LINES;
+use charter_sync::gitsig::{self, CommitSig};
+use charter_sync::ids::hex32;
 
 pub const PAGE: usize = 50;
 
@@ -130,6 +132,72 @@ pub struct Commit {
     pub anchors: Vec<Anchor>,
     pub files: Vec<FileDiff>,
     pub hidden: usize,
+    pub sig: Sig,
+}
+
+/// The commit's git signature, as the page shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sig {
+    /// `ok` (verified and claimed), `warn` (valid, nobody claimed the key, or not checked),
+    /// `bad`, or empty for an unsigned commit.
+    pub state: &'static str,
+    /// The claimer's peer id (hex) of a verified signature.
+    pub signer: String,
+    /// The chip: `Not checked`, `Bad signature`, `Unclaimed key`.
+    pub label: &'static str,
+    pub text: String,
+    /// The key's `SHA256:` fingerprint.
+    pub key: String,
+}
+
+impl Sig {
+    fn of(s: CommitSig) -> Self {
+        let none = String::new();
+        let (state, label, text, key, signer) = match s {
+            CommitSig::Unsigned => ("", "", "unsigned".into(), none, None),
+            CommitSig::Unchecked(kind) => (
+                "warn",
+                "Not checked",
+                format!("signed with {kind}; Charter checks SSH Ed25519 signatures"),
+                none,
+                None,
+            ),
+            CommitSig::Bad => (
+                "bad",
+                "Bad signature",
+                "it does not match this commit".into(),
+                none,
+                None,
+            ),
+            CommitSig::Good {
+                fingerprint,
+                signer: Some(n),
+            } => ("ok", "", none, fingerprint, Some(n)),
+            CommitSig::Good { fingerprint, .. } => (
+                "warn",
+                "Unclaimed key",
+                "a valid SSH signature by a key no one in this repo has claimed".into(),
+                fingerprint,
+                None,
+            ),
+        };
+        Self {
+            state,
+            label,
+            signer: signer.as_ref().map(hex32).unwrap_or_default(),
+            text,
+            key,
+        }
+    }
+}
+
+/// Checks the signature only of a signed commit, so an unsigned one reads no ops.
+fn signature(r: &Repo, c: &CommitInfo) -> Sig {
+    if !c.git_signed {
+        return Sig::of(CommitSig::Unsigned);
+    }
+    let raw = gitread::raw_commit(&r.git, &c.oid).unwrap_or_default();
+    Sig::of(gitsig::commit_sig(&raw, &gitsig::claims(&r.ops())))
 }
 
 impl Commit {
@@ -190,6 +258,7 @@ fn commit_page(app: &App, pref: &Pref, r: &Repo, sha: &str, all: bool) -> Respon
     html(&Commit {
         l,
         r: head,
+        sig: signature(r, &c),
         anchors: anchors(r, &c.oid),
         date: super::people::date(u64::try_from(c.author_time).unwrap_or(0) * 1000),
         subject,

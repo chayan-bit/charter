@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 charter-crypto = { path = "../charter-crypto" }
+bs58 = "0.5"
+gix-glob = "0.29"
 hex = { version = "0.4", features = ["serde"] }
 minicbor = { version = "2", features = ["alloc"] }
 # no_module: no `import`, no module resolver, no file access.

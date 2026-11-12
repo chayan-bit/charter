@@ -244,8 +244,27 @@ pub fn of_commit(git: &Git, oid: &str) -> Option<String> {
         Some(p) => Some(git.find_commit(p).ok()?.tree().ok()?),
         None => None,
     };
+    trees(git, old.as_ref(), &new)
+}
+
+/// Unified diff of a patch: `head` against its merge base with `base` (a patch's whole
+/// change, as `git diff base...head` shows it); `None` if either commit is missing.
+pub fn of_range(git: &Git, base: &str, head: &str) -> Option<String> {
+    let id = |s: &str| gix::ObjectId::from_hex(s.as_bytes()).ok();
+    let (b, h) = (id(base)?, id(head)?);
+    let from = git
+        .merge_base(b, h)
+        .ok()
+        .flatten()
+        .map_or(b, |m| m.detach());
+    let old = git.find_commit(from).ok()?.tree().ok()?;
+    let new = git.find_commit(h).ok()?.tree().ok()?;
+    trees(git, Some(&old), &new)
+}
+
+fn trees(git: &Git, old: Option<&gix::Tree<'_>>, new: &gix::Tree<'_>) -> Option<String> {
     let opts = gix::diff::Options::default().with_rewrites(Some(Default::default()));
-    let mut changes = git.diff_tree_to_tree(old.as_ref(), Some(&new), opts).ok()?;
+    let mut changes = git.diff_tree_to_tree(old, Some(new), opts).ok()?;
     changes.sort_by(|x, y| x.location().cmp(y.location()));
     let mut out = String::new();
     for ch in &changes {

@@ -22,6 +22,7 @@ use crate::{Result, SyncError, cob};
 
 mod ancestry;
 pub mod heads;
+pub mod host;
 pub mod proofs;
 mod publish;
 
@@ -77,6 +78,7 @@ fn fold(
     let ancestry = |a: &[u8], b: &[u8]| is_ancestor(git, a, b);
     let (o, cp) = Program::load(&e.engine, &e.source)
         .map_err(|err| missing(err.to_string()))?
+        .with_host(std::rc::Rc::new(host::GitHost(git.clone())))
         .fold_cached(
             &e.source,
             e.repo.clone(),

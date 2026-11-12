@@ -277,3 +277,94 @@ fn identity_round_trips_with_and_without_program_pin() {
     };
     assert!(empty.validate().is_err());
 }
+
+#[test]
+fn an_archived_identity_has_key_14_and_entity_layout_2() {
+    let plain = root();
+    let archived = IdBody {
+        archived: Some(true),
+        ..root()
+    };
+    assert_eq!(
+        IdBody::decode(&archived.encode()).expect("archived"),
+        archived
+    );
+    let (a, b) = (plain.encode(), archived.encode());
+    assert_eq!(a[1..], b[1..a.len()], "fields 1..13 encode identically");
+    assert!(archived.is_archived() && !plain.is_archived());
+    let not = IdBody {
+        archived: Some(false),
+        ..root()
+    };
+    assert!(not.validate().is_err(), "false is written as an absent key");
+    assert_eq!(
+        (plain.ag_v(), archived.ag_v()),
+        (1, ID_ARCHIVED_LAYOUT_VERSION)
+    );
+
+    let (obs, _) = observe(alice(), &archived, addr(1), 5, 0);
+    let v = |o: &Observed| o.attr("ag.v").cloned();
+    assert_eq!(v(&obs), Some(AttrValue::U64(2)));
+    assert!(open::<IdBody>(&obs).is_ok());
+    let relabel = |o: &Observed, to: u64| {
+        let mut o = o.clone();
+        for a in &mut o.attributes {
+            if a.name == "ag.v" {
+                a.value = AttrValue::U64(to);
+            }
+        }
+        o
+    };
+    assert!(matches!(
+        open::<IdBody>(&relabel(&obs, 1)),
+        Err(FormatError::AttributeMismatch)
+    ));
+    let (plain_obs, _) = observe(alice(), &plain, addr(1), 5, 1);
+    assert!(matches!(
+        open::<IdBody>(&relabel(&plain_obs, 2)),
+        Err(FormatError::AttributeMismatch)
+    ));
+    assert!(matches!(
+        open::<IdBody>(&relabel(&obs, 3)),
+        Err(FormatError::Unsupported { .. })
+    ));
+}
+
+/// The identity body as a client before issue #63 read it: layout version 1 only.
+#[derive(Clone)]
+struct PreArchiveId(IdBody);
+
+impl Body for PreArchiveId {
+    const KIND: Kind = Kind::Id;
+    fn encode(&self) -> Vec<u8> {
+        self.0.encode()
+    }
+    fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
+        IdBody::decode(bytes).map(Self)
+    }
+    fn validate(&self) -> Result<(), FormatError> {
+        self.0.validate()
+    }
+    fn extra_attributes(&self, signer: &Nid, h: &Hash32) -> Vec<Attribute> {
+        self.0.extra_attributes(signer, h)
+    }
+}
+
+#[test]
+fn a_reader_before_the_archive_flag_stops_on_an_archived_revision() {
+    let archived = IdBody {
+        archived: Some(true),
+        ..root()
+    };
+    let (obs, _) = observe(alice(), &archived, addr(1), 5, 0);
+    // Unsupported is what the chain turns into E_UNSUPPORTED_VERSION for a tracked creator.
+    assert!(matches!(
+        open::<PreArchiveId>(&obs),
+        Err(FormatError::Unsupported { value: 2, .. })
+    ));
+    let (plain, _) = observe(alice(), &root(), addr(1), 5, 1);
+    assert!(
+        open::<PreArchiveId>(&plain).is_ok(),
+        "unarchived rows read as before"
+    );
+}

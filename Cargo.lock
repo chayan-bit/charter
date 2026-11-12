@@ -2017,7 +2017,9 @@ dependencies = [
 name = "charter-program"
 version = "0.6.0"
 dependencies = [
+ "bs58",
  "charter-crypto",
+ "gix-glob",
  "hex",
  "minicbor",
  "rhai",
@@ -2055,6 +2057,7 @@ name = "charter-sync"
 version = "0.6.0"
 dependencies = [
  "alloy-signer-local",
+ "base64 0.22.1",
  "bs58",
  "charter-core",
  "charter-crypto",

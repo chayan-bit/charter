@@ -129,6 +129,33 @@ async fn tools_dispatch_to_the_cli_on_the_fake_chain() {
     assert_eq!(issues[0]["payload"]["bounty"], 5);
     let none = ok(s.op_list(list(&url, None, Some("merged"))).await);
     assert_eq!(none, json!([]));
+    // Triage is a follow-up op on the issue (issue #40).
+    let label = Parameters(PostArgs {
+        object: Some(id.clone()),
+        parents: vec![id.clone()],
+        ..post("xyz.arkiv.issue", "label", json!({"labels": ["bug"]})).0
+    });
+    ok(s.op_post(label).await);
+    let labels = ok(s.op_list(list(&url, None, Some("label"))).await);
+    assert_eq!(labels[0]["payload"]["labels"], json!(["bug"]));
+    // An inline review comment rides in the review op's payload (issue #38).
+    let line = json!({"patch": id, "head": "ab".repeat(20), "comments": [
+        {"path": "src/lib.rs", "line": 3, "body": "why?", "suggestion": "fn f() {}"}
+    ]});
+    let rv = ok(s
+        .op_post(post("xyz.arkiv.review", "create", json!({"patch": id})))
+        .await);
+    let rv = rv["id"].as_str().expect("review id").to_owned();
+    let review = Parameters(PostArgs {
+        object: Some(rv.clone()),
+        parents: vec![rv],
+        ..post("xyz.arkiv.review", "comment", line.clone()).0
+    });
+    ok(s.op_post(review).await);
+    let seen = ok(s
+        .op_list(list(&url, Some("xyz.arkiv.review"), Some("comment")))
+        .await);
+    assert_eq!(seen[0]["payload"]["comments"], line["comments"]);
 
     let clone = tmp.path().join("clone");
     let cloned = s

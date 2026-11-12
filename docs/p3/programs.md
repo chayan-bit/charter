@@ -8,7 +8,8 @@ The engine lives in `crates/charter-program`; it is pure and does no I/O.
 ## Pinning
 
 The identity body has an optional field `13: program`, a map `{ 1: engine, 2: hash }`.
-`engine` is the engine tag; the only tag is `rhai/1`, and any other tag fails to load.
+`engine` is the engine tag: `rhai/1`, or `rhai/2` for a program that reads git (see "Git host functions"); any other tag fails to load.
+`chart program pin` picks `rhai/2` exactly when the source calls one of the git host functions, so every other program stays `rhai/1` and readable by older clients.
 `hash` is `H("program", source)`, the tagged SHA-256 of the exact UTF-8 source bytes (design section 2.1).
 A body without a pin omits key 13, so its canonical CBOR, its `h` and its signatures are unchanged.
 Changing the pin is an ordinary identity revision and needs the usual delegate quorum.
@@ -29,8 +30,28 @@ The engine is built without floats (`no_float`, `only_i64`), without time (`no_t
 `eval` is a disabled symbol, so a script that uses it fails to compile.
 `print` and `debug` write to the fold's log, never to stdout.
 Rhai maps are `BTreeMap`s, so map iteration and `keys()` are in sorted key order, and the JSON state has sorted keys.
-The only host function is `sha256_hex(string or blob)`, which returns lowercase hex and is pure.
+On `rhai/1` the only host function is `sha256_hex(string or blob)`, which returns lowercase hex and is pure.
 Each fold uses a fresh engine.
+
+## Git host functions
+
+Engine `rhai/2` adds three functions (issue #53).
+`changed_paths(a, b)` returns the repo paths that differ between commits `a` and `b`, with renames as a delete plus an add; when `a` is "" it returns every path of `b`.
+`file_at(commit, path)` returns the UTF-8 text of the file at `path` in `commit`, or `()` when there is no such file; a file over 64 KiB or not UTF-8 is an error.
+`codeowners(text, path)` returns the owners of `path` under the CODEOWNERS rules `text`, as sorted hex peer ids; it is pure.
+Git objects are content addressed, so the first two answer the same on every client that holds the objects.
+A client folds with its local git cache, which holds every pushed commit before the fold that decides on it, and every push is staged there before its local check.
+A client that lacks the objects gets an error, so a `check_push` that asks fails closed, and the fold is marked undecided: it is never checkpointed, and the verdict is taken again once the objects arrive (as with git ancestry).
+A fold may ask 256 distinct questions; repeats are answered from memory, and the 257th distinct one is an error.
+A dry run (`program check`) has no git, so the functions fail there.
+On `rhai/1` the functions do not exist, so an old client never silently folds a `rhai/2` program differently: it rejects the pin as an unknown engine (`E_PROGRAM_MISSING`).
+A program that never calls them costs nothing new: no git process runs unless a script asks.
+
+CODEOWNERS rules are GitHub's: one pattern then owners per line, `#` comments, and the last matching line wins.
+Patterns are gitignore globs (matched with gix-glob, as git matches them); a directory pattern owns everything under it, a pattern ending in `/*` owns only the files directly in that directory, and `!` lines are ignored.
+A line with a pattern and no owners leaves its paths unowned.
+Owners are peer ids, 64 hex digits or the `z` text form; other tokens such as `@user` or an email are skipped.
+A file has at most 1,000 rules read and a line at most 32 owners.
 
 ## Limits
 
@@ -195,7 +216,8 @@ Every client re-folds the whole history on each fetch; there is no cached state.
 ## Rust API
 
 `Program::load(engine_tag, source)` compiles a program and checks for `init`.
-`Program::hash(source)` gives the pin hash.
+`Program::hash(source)` gives the pin hash, and `engine_for(source)` the engine tag to pin it with.
+`Program::with_host(Rc<dyn Host>)` gives a `rhai/2` program the git its host functions read.
 `Program::fold(repo: RepoInfo, events)` takes `Event::Op(ProgramOp)` and `Event::Push(RefUpdate)` and returns an `Outcome`.
 `Program::fold_from(repo, seed, events)` starts the accepted heads at `seed` instead of empty; `Outcome::heads` holds the last accepted head per ref.
 `ProgramOp` mirrors the verified COB op: `id`, `author`, `rid`, `object`, `type_name`, `action`, `parents`, `payload` (canonical CBOR), `ts_ms`, `arkiv_order`, plus `proofs` (`Vec<ProofCheck>`, filled by the client before the fold; optional in dry-run JSON, so `program check` can test a policy without receipts).
@@ -212,9 +234,11 @@ All ids and oids are hex.
 
 ## Templates
 
-The `programs/` directory holds six demo programs, each tested from disk in the program crate.
+The `programs/` directory holds seven demo programs, each tested from disk in the program crate.
 
 - `branch-protection.rhai`: `refs/heads/main` moves only to a patch head that at least `repo.quorum` delegates approved at that exact head; a revise clears the approvals.
+- `codeowners.rhai` (`rhai/2`): `refs/heads/main` moves only to a patch head where, for each path the move changes, an owner of that path approved at that exact head.
+  Owners come from `CODEOWNERS`, `.github/CODEOWNERS` or `docs/CODEOWNERS` at the accepted head, never the pushed one, so a patch cannot rewrite its own owners; paths no line owns need no approval.
 - `ci-attested.rhai`: `main` moves only to a commit that k of the n attesters listed at the top of the script reported as passing CI.
 - `ci-gated.rhai`: `main` moves only to a patch head with `repo.quorum` delegate approvals and k passing CI attestations from the listed runners, both at that exact head; Charter's own repo runs it (docs/p3/arkiv-ci.md).
   It also tracks signed release records and their artifact attestations as state (docs/p3/releases.md).

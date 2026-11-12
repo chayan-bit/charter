@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::cache::RepoView;
 use crate::markdown;
+use crate::triage::{self, Triage};
 
 pub const ISSUE: &str = "xyz.arkiv.issue";
 pub const PATCH: &str = "xyz.arkiv.patch";
@@ -27,10 +28,18 @@ pub struct Entry {
     pub body: Option<String>,
     /// Other payload fields as `(name, text)`; shown escaped, in mono.
     pub fields: Vec<(String, String)>,
+    /// Labels a `label` or `unlabel` op names (checked, as the fold applies them).
+    pub labels: Vec<String>,
+    /// Peers (hex) an `assign` or `unassign` op names.
+    pub people: Vec<String>,
+    /// What a `milestone` op set ([`triage::milestone`]).
+    pub milestone: Option<Option<String>>,
     pub ts_ms: u64,
     pub block: u64,
     /// `(kind, verified)` of each proof attachment the fold checked.
     pub proofs: Vec<(String, Option<bool>)>,
+    /// Inline comments of a review op ([`crate::inline`]).
+    pub inline: Vec<crate::inline::Inline>,
 }
 
 /// An issue or a patch.
@@ -48,6 +57,8 @@ pub struct Thread {
     pub reviews: Vec<Entry>,
     /// Shown merged because the default branch contains its head, with no merge op.
     pub inferred: bool,
+    /// Labels, assignees and milestone.
+    pub triage: Triage,
 }
 
 impl Thread {
@@ -72,6 +83,7 @@ fn text(v: &Value) -> String {
 
 fn entry(o: &VerifiedOp, p: &Value, view: Option<&RepoView>) -> Entry {
     let id = hex32(&o.id);
+    let triaged = o.body.is_create() || triage::ACTIONS.contains(&o.body.action.as_str());
     let checks = view
         .and_then(|v| v.program.as_ref())
         .and_then(|p| p.proofs.get(&id));
@@ -93,12 +105,27 @@ fn entry(o: &VerifiedOp, p: &Value, view: Option<&RepoView>) -> Entry {
         .as_object()
         .map(|m| {
             m.iter()
-                .filter(|(k, _)| !matches!(k.as_str(), "title" | "body" | "proofs"))
+                .filter(|(k, _)| !matches!(k.as_str(), "title" | "body" | "proofs" | "comments"))
+                .filter(|(k, _)| {
+                    !(triaged && matches!(k.as_str(), "labels" | "assignees" | "milestone"))
+                })
                 .map(|(k, v)| (k.clone(), text(v)))
                 .collect()
         })
         .unwrap_or_default();
+    let (labels, people) = match triaged {
+        true => (triage::labels(p), triage::assignees(p)),
+        false => (vec![], vec![]),
+    };
+    let inline = match o.body.type_name == REVIEW {
+        true => crate::inline::parse(p),
+        false => vec![],
+    };
     Entry {
+        inline,
+        milestone: triage::milestone(p).filter(|_| o.body.action == "milestone"),
+        labels,
+        people,
         author: hex32(&o.author),
         action: o.body.action.clone(),
         body: p["body"].as_str().map(markdown::render),
@@ -121,6 +148,7 @@ fn apply(t: &mut Thread, o: &VerifiedOp, p: &Value) {
         ("reopen", _) => "open",
         (_, s) => s,
     };
+    t.triage.apply(&o.body.action, p);
     if matches!(o.body.action.as_str(), "revise" | "update")
         && let Some(h) = p["head"].as_str()
     {
@@ -181,6 +209,7 @@ fn new_thread(o: &VerifiedOp, p: &Value, view: Option<&RepoView>) -> Thread {
         revisions: p["head"].as_str().map(str::to_owned).into_iter().collect(),
         reviews: vec![],
         inferred: false,
+        triage: Triage::of_create(p),
     }
 }
 

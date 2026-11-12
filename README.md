@@ -105,6 +105,11 @@ Every feature below is on `main`, tested on the in-memory Arkiv in CI, and run l
 - ZK sealed patches: a RISC Zero receipt proves a sealed patch meets a spec, and the repo program decides whether a proof is required; [`docs/p4/zk-sealed-patch.md`](docs/p4/zk-sealed-patch.md).
 - Timelock seal and open with drand quicknet; [`docs/p3/timelock.md`](docs/p3/timelock.md).
 - AI agents: scoped, revocable agent grants ([`docs/p3/agents.md`](docs/p3/agents.md)) and an MCP server for Claude, Codex or any MCP client ([`docs/p3/mcp.md`](docs/p3/mcp.md)).
+- Labels, assignees and milestones on issues and patches, as ops any client folds; [`docs/p3/cob-ops.md`](docs/p3/cob-ops.md).
+- Inline review comments and suggested changes on a patch's lines, batched in the review's one op, on the UI's files page; [`docs/p3/cob-ops.md`](docs/p3/cob-ops.md).
+- Code owners: a `CODEOWNERS` file names peer ids, the blob page shows a file's owners, and `programs/codeowners.rhai` makes `main` need an owner's approval for each changed path; [`docs/p3/programs.md`](docs/p3/programs.md).
+- Archive, rename and hand-over: identity revisions under the delegate quorum, `chart id propose <repo> --archive`, `--unarchive`, `--name`, `--add-delegate` and `--remove-delegate`, or the UI's Manage page; an archived repo refuses pushes with `E_ARCHIVED`; [`docs/p1/design.md`](docs/p1/design.md) section 2.2.
+- Signed commits: SSH-signed git commits are checked in process and named by a signing-key claim, `chart signing-key claim` and `verify`; [`docs/p3/cob-ops.md`](docs/p3/cob-ops.md).
 - Arkiv-native CI: a runner posts signed CI attestations and `programs/ci-gated.rhai` gates `main` on them; [`docs/p3/arkiv-ci.md`](docs/p3/arkiv-ci.md).
 
 ## How to try it

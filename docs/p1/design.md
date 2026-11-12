@@ -172,6 +172,8 @@ IdBody = {
   ? 10: tstr .size (1..32),    ; primary language, lowercase (search)
   ? 11: tstr .size (1..64),    ; licence, SPDX id (search)
   ? 12: bstr .size 16,         ; nonce, required iff rev = 0, random
+  ? 13: { 1: tstr, 2: bstr .size 32 }, ; program pin (docs/p3/programs.md)
+  ? 14: true,                  ; archived (read only), present only when true
 }
 ```
 
@@ -179,6 +181,16 @@ IdBody = {
 - For the root, `ag.rid = ag.h = rid`.
 - Size: body at most about 1,170 B (16 delegates), entity at most about 4,520 B.
 - Delegates are capped at 16 so a revision plus its accepts stays small; more than 16 is open question Q9.
+
+Archive, rename and hand-over (issue #63) are ordinary revisions, so they need the delegate quorum like every other identity change.
+A rename changes field 4 and a hand-over changes field 7 (and field 8 if it must shrink); neither changes the format.
+An archived revision carries field 14 and its entity carries `ag.v = 2`, while every other revision keeps `ag.v = 1` and encodes exactly as before.
+A client that predates the flag therefore stops on the first archived revision with `E_UNSUPPORTED_VERSION` instead of skipping it (it would reject the unknown key 14 as malformed, and a skipped revision rolls the identity back).
+A reader checks that `ag.v` is 2 exactly when field 14 is present, like every other derived attribute.
+In a private repo the sealer moves that `ag.v = 2` into the sealed body and shows the ordinary `ag.v = 1`, so outsiders cannot tell that a repo is archived; a member's client restores it before verification.
+The helper refuses a push to an archived repo with `E_ARCHIVED` before it spends gas, and the UI hides its write forms and shows the repo as archived; this is a rule honest clients keep, like the program's local push check.
+Readers do not drop writes that a modified client sends anyway: canonical heads still need the delegate quorum, and a quorum could unarchive first.
+Unarchiving is another revision without field 14.
 
 #### `idacc`
 
@@ -765,6 +777,7 @@ One `thiserror` enum per crate (`CryptoError`, `FormatError`, `VerifyError`, `St
 | `E_REFS_TOO_LARGE` | refs body over the cap | no |
 | `E_RPC`, `E_RATE_LIMITED`, `E_INCONSISTENT_VIEW`, `E_PAGING` | transport and node issues | yes, with backoff |
 | `E_WRONG_CHAIN` | RPC chain id differs from the repo's | no |
+| `E_ARCHIVED` | the repo is archived (read only); a delegate quorum can unarchive it | no |
 | `E_INTERNAL` | a revert that indicates our bug | no |
 
 Mapping to git: fetch-side errors print `fatal: chart <CODE>: <message>` on stderr and exit 128; push-side errors are reported per ref as `error <dst> <CODE> <message>`; the `chart` CLI exits 1 for verification errors, 2 for usage, 3 for transport, 4 for funds.

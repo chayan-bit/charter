@@ -11,7 +11,7 @@ mod hash;
 mod seed;
 
 pub use alg::{Alg, PK_LEN, SECRET_LEN, SIG_LEN};
-pub use composite::{PublicKey, SecretKey, Sig};
+pub use composite::{PublicKey, SecretKey, Sig, ed25519_verify};
 pub use error::CryptoError;
 pub use hash::{h, sha256};
 pub use seed::MasterSeed;

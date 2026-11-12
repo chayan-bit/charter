@@ -232,6 +232,7 @@ fn error_codes_match_section_7_3() {
         (ErrorCode::NotMember, "E_NOT_MEMBER", false),
         (ErrorCode::RoleDenied, "E_ROLE_DENIED", false),
         (ErrorCode::UnsealedPrivate, "E_UNSEALED_PRIVATE", false),
+        (ErrorCode::Archived, "E_ARCHIVED", false),
         (ErrorCode::Internal, "E_INTERNAL", false),
     ];
     for (c, s, r) in all {

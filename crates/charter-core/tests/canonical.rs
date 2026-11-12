@@ -22,6 +22,7 @@ fn identity(delegates: &[u8], threshold: u64) -> IdBody {
         license: None,
         nonce: Some([0; 16]),
         program: None,
+        archived: None,
     }
 }
 

@@ -18,6 +18,7 @@
 <aside class="side" aria-label="About this repository">
 <section><h2>Maintainers</h2>
 {% if r.verify.delegates.is_empty() %}<p>Shown once the first sync finishes.</p>{% else %}<ul class="people">{% for d in r.verify.delegates %}<li><b>{{ r.who(d) }}</b><small title="{{ d }}">{{ r.short(d) }}</small></li>{% endfor %}</ul>{% endif %}
+{% if r.maintains() %}<a class="btn btn-sm manage" href="/r/{{ r.hex }}/manage">{{ m::i(l.v, "gear-six") }}Manage repository</a>{% endif %}
 </section>
 <section><h2>Changing {{ picker.current }}</h2><p>{{ rule }} <a href="/r/{{ r.hex }}/rules">Rules and CI</a></p></section>
 <section><h2>Address</h2>

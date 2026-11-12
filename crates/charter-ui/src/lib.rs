@@ -14,6 +14,7 @@ pub mod fold;
 pub mod gitread;
 pub mod head_watch;
 pub mod highlight;
+pub mod inline;
 pub mod last;
 pub mod markdown;
 pub mod pace;
@@ -23,6 +24,7 @@ pub mod search;
 pub mod security;
 pub mod spend;
 pub mod sync_loop;
+pub mod triage;
 pub mod writes;
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -51,7 +53,8 @@ pub enum UiError {
 pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
     use axum::routing::post;
     use pages::{
-        cobs, code, forms, history, live, program, repos, search, settings, wallet, write,
+        cobs, code, forms, history, live, program, repos, review, search, settings, wallet,
+        write,
     };
     Router::new()
         .route("/", get(repos::index))
@@ -78,11 +81,13 @@ pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
             post(write::confirm).get(write::status),
         )
         .route("/r/{rid}/issues/new", get(forms::new_issue))
+        .route("/r/{rid}/manage", get(forms::manage))
         .route("/r/{rid}/releases/new", get(forms::new_release))
         .route("/r/{rid}/issues", get(cobs::issues))
         .route("/r/{rid}/issues/{id}", get(cobs::issue))
         .route("/r/{rid}/patches", get(cobs::patches))
         .route("/r/{rid}/patches/{id}", get(cobs::patch))
+        .route("/r/{rid}/patches/{id}/files", get(review::files))
         .route("/r/{rid}/releases", get(program::releases))
         .route("/r/{rid}/program", get(program::program))
         .route("/r/{rid}/rules", get(program::program))

@@ -245,6 +245,11 @@ pub fn commit(git: &Git, oid_hex: &str) -> Option<CommitInfo> {
     })
 }
 
+/// The raw commit object `oid_hex` (headers and message, no object header), what git signs.
+pub fn raw_commit(git: &Git, oid_hex: &str) -> Option<Vec<u8>> {
+    Some(git.find_commit(oid(oid_hex)?).ok()?.data.clone())
+}
+
 /// Whether `a` is an ancestor of (or equal to) `b`.
 pub fn is_ancestor(git: &Git, a: &str, b: &str) -> bool {
     let (Some(a), Some(b)) = (oid(a), oid(b)) else {

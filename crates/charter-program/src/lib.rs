@@ -2,15 +2,19 @@
 //! folded deterministically over Arkiv-ordered ops and ref updates. Pure, no I/O.
 
 mod checkpoint;
+pub mod codeowners;
 mod engine;
 mod fold;
+mod host;
 mod value;
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
 pub use checkpoint::{CHECKPOINT_ENGINE, CHECKPOINT_VERSION, Checkpoint};
+pub use host::{Host, MAX_HOST_CALLS};
 pub use value::cbor_from_json;
 
 /// `ancestry(a, b)`: `Some(true)` if commit `a` is an ancestor of (or equal to) commit `b`,
@@ -19,12 +23,16 @@ pub type Ancestry<'a> = &'a dyn Fn(&[u8], &[u8]) -> Option<bool>;
 
 /// The only engine tag this build runs.
 pub const ENGINE_RHAI_V1: &str = "rhai/1";
+/// rhai/1 plus the git host functions (`changed_paths`, `file_at`, `codeowners`). A client
+/// that predates it fails loudly on such a pin (unknown engine), instead of folding a
+/// different verdict.
+pub const ENGINE_RHAI_V2: &str = "rhai/2";
 /// Tag of `H(tag, source)` for program pins.
 pub const HASH_TAG: &str = "program";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProgramError {
-    #[error("unknown program engine {0:?} (only {ENGINE_RHAI_V1})")]
+    #[error("unknown program engine {0:?} (only {ENGINE_RHAI_V1} and {ENGINE_RHAI_V2})")]
     UnknownEngine(String),
     #[error("program does not compile: {0}")]
     Compile(String),
@@ -148,19 +156,52 @@ pub(crate) struct Abi {
     obligations: bool,
 }
 
+/// The engine tag to pin `source` with: [`ENGINE_RHAI_V2`] when it calls a git host
+/// function (a whole-word name followed by `(`), else [`ENGINE_RHAI_V1`], so programs that
+/// do not need them stay readable by older clients.
+pub fn engine_for(source: &str) -> &'static str {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let calls = |name: &str| {
+        source.match_indices(name).any(|(i, _)| {
+            let before = source[..i].chars().next_back().is_none_or(|c| !word(c));
+            let after = source[i + name.len()..].trim_start().starts_with('(');
+            before && after
+        })
+    };
+    match host::NAMES.iter().any(|n| calls(n)) {
+        true => ENGINE_RHAI_V2,
+        false => ENGINE_RHAI_V1,
+    }
+}
+
 /// A compiled repo program.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Program {
     ast: rhai::AST,
     abi: Abi,
+    /// Engine rhai/2: the git host functions exist (and fail without a host).
+    v2: bool,
+    host: Option<Rc<dyn Host>>,
+}
+
+impl std::fmt::Debug for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Program")
+            .field("abi", &self.abi)
+            .field("v2", &self.v2)
+            .field("host", &self.host.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Program {
     /// Compiles `source` for `engine_tag`; it must define `fn init(repo)`.
     pub fn load(engine_tag: &str, source: &str) -> Result<Self, ProgramError> {
-        if engine_tag != ENGINE_RHAI_V1 {
-            return Err(ProgramError::UnknownEngine(engine_tag.into()));
-        }
+        let v2 = match engine_tag {
+            ENGINE_RHAI_V1 => false,
+            ENGINE_RHAI_V2 => true,
+            _ => return Err(ProgramError::UnknownEngine(engine_tag.into())),
+        };
         let ast = engine::compile(source)?;
         let has = |name: &str, arity: usize| {
             ast.iter_functions()
@@ -175,7 +216,26 @@ impl Program {
             on_push: has("on_push", 2),
             obligations: has("obligations", 1),
         };
-        Ok(Self { ast, abi })
+        Ok(Self {
+            ast,
+            abi,
+            v2,
+            host: None,
+        })
+    }
+
+    /// The git this program's host functions read (rhai/2; ignored on rhai/1).
+    #[must_use]
+    pub fn with_host(self, host: Rc<dyn Host>) -> Self {
+        Self {
+            host: Some(host),
+            ..self
+        }
+    }
+
+    /// A fresh host-call state for one fold, on rhai/2.
+    pub(crate) fn calls(&self) -> Option<Rc<host::Calls>> {
+        self.v2.then(|| host::Calls::new(self.host.clone()))
     }
 
     /// `H("program", source)`, the hash an identity doc pins.
@@ -216,7 +276,11 @@ impl Program {
         ancestry: Ancestry<'_>,
         cache: Option<&Checkpoint>,
     ) -> Result<(Outcome, Option<Checkpoint>), ProgramError> {
-        let program = Self::hash(source);
+        // rhai/2 folds the same source differently (host functions), so never shares one.
+        let program = match self.v2 {
+            false => Self::hash(source),
+            true => charter_crypto::h("program rhai/2 checkpoint", source.as_bytes()),
+        };
         let hash = |evs: &[Event]| checkpoint::hash_all(evs).map_err(ProgramError::State);
         let usable = cache.filter(|c| {
             c.v == CHECKPOINT_VERSION

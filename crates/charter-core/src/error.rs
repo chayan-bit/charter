@@ -42,6 +42,8 @@ pub enum ErrorCode {
     DeviceRevoked,
     /// P2: a write to a private repo was about to leave without sealing (a caller bug).
     UnsealedPrivate,
+    /// The repo is archived (read only, issue #63); a delegate quorum can unarchive it.
+    Archived,
     Internal,
 }
 
@@ -80,6 +82,7 @@ impl ErrorCode {
             RoleDenied => "E_ROLE_DENIED",
             DeviceRevoked => "E_DEVICE_REVOKED",
             UnsealedPrivate => "E_UNSEALED_PRIVATE",
+            Archived => "E_ARCHIVED",
             Internal => "E_INTERNAL",
         }
     }
