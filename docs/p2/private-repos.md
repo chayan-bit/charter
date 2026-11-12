@@ -85,7 +85,10 @@ Every commit carries a public attestation: the signer's nid, `A = HMAC(epoch key
 Anyone holding the generation-0 id key finds every commit by `ag.ct`, reads its admin set and can check these signatures, so the admin chain needs no epoch key; only holders of that epoch's key can compute `A`.
 The signed message also names the commit row's creator, the signer's control address for the repo, and a commit counts only if the row was created by that address (R2).
 Without it, anyone could copy an attested commit into a new row with the same annotations, and a copy landing after the original's row expired would be taken for the commit and place the epoch's end at its own block.
-Welcomes and grants need no such binding: a member places an epoch's start only from the canonical commit, never from a welcome's block, and a grant carries no block at all, so a copy of either changes nothing.
+A copy of a welcome or a grant changes nothing: a member places an epoch's start only from the canonical commit, never from a welcome's block, and a grant carries no block of its own.
+A grant does make its epoch's key public, though, so for a grant reader a lockbox that opens under that key proves nothing about who wrote the row.
+So where the canonical chain does not reach (the commits before it expired), a grant reader places an epoch's start only from an attested commit row whose attestation verifies, with the row's creator, under a key it already looked up for the chain or the grants (no extra query); a row without an attestation places an epoch only in a repo that has no attested commit at all.
+An epoch whose start cannot be placed that way stays unplaced, and late writes of the epoch before it are not shown.
 A joiner replays the admin history from the root before it accepts a welcome for epoch E.
 It starts at the first commit signed by a delegate of the root identity (whose hash is the rid, and whose generation-0 blinding pins the welcome's generation-0 id key).
 At each epoch from there to E it takes the first commit in Arkiv order signed by an admin of the epoch before, as the previous commit's attested admin set names them, and requires that commit's admin set and `A` to match the welcome keyring's admin set and key for that epoch.
@@ -146,10 +149,16 @@ Leaves made before 0.6.0 name no device: a revoke cannot find them, `chart membe
 
 MLS state (`$CHARTER_HOME/private/mls.json`) is shared by every repo of a home, so every command that reads or changes it (add, remove, a revoked-leaf removal, the format migration, a refresh, a key package, init) takes the home's lock file (`private/lock`) for its whole run.
 Two commands on one machine therefore never both commit, and a refresh never saves over a commit made meanwhile.
-A membership change leaves its MLS commit pending instead of merging it, and records the block where it was sent (or the head, when the send failed).
+A membership change leaves its MLS commit pending instead of merging it, and saves it to disk together with the nonce its tx takes on the admin's control address before anything is sent, so a crash or Ctrl-C after the broadcast still finds it.
 The next refresh merges it only when its commit row is the first valid commit for that epoch (recognised by its lockbox opening under the pending epoch's key, since MLS cannot decrypt its own commit); when another admin's commit landed first, it drops its own and applies that one, so the group never forks.
 This costs no query: the refresh reads the commit rows anyway.
-While a commit is pending and less than `PENDING_BLOCKS` (64 blocks, about two minutes) old, a new membership change is refused with `E_CONCURRENT_PUSH` and the block to retry after; an older pending commit that never landed is dropped.
+A pending commit that the refresh did not settle is dropped only once another tx has taken that nonce on chain, since only then can it never land; a block count alone is not used, because a tx that timed out can still sit in the pool and land late.
+While the nonce is still free, the next membership change first sends a zero-value transfer from the control address at that nonce.
+If the node refuses it, the old commit is still waiting in the pool, and the change is refused with `E_CONCURRENT_PUSH` until it is mined; the next refresh then merges it.
+If the transfer is mined, the old commit can never land, so it is dropped and the new change is sent after it.
+That transfer is paid only after an interrupted or lost send; the normal path costs nothing extra (the nonce read replaces the one the send made anyway).
+Pricing a change in `chart ui` sends nothing and prices it as if the old commit is dropped.
+The commit tx is assumed to be one tx: a commit plus welcome is a few KB, far under the tx size limit.
 
 ### Key package claims (F5)
 
@@ -199,6 +208,8 @@ Recovery:
 2. In each private repo, have another admin remove the identity (`chart member remove --member <nid>`); this rotates the epoch key and the id-key generation, so the lost machine reads nothing new.
    If the lost identity is the repo's only admin, the lost machine holds the same powers as you, so the group cannot be taken back: start a new private repo from the new identity (step 4) and push the content there.
 3. In each public repo, have a delegate set that no longer names the lost identity take over (a new root identity or delegate set).
+   A public repo whose only delegate is the lost identity cannot be recovered: an identity change needs that delegate's signature, which the lost machine holds as much as you do.
+   The only remedy is ahead of time: add a second delegate (`chart id propose`) to every repo you cannot afford to lose.
 4. Start a new identity on a clean machine (a fresh `$CHARTER_HOME`) and have an admin add it again with `chart member keypackage` and `chart member add`.
 
 Until step 2 lands, the lost machine can also revoke your other devices and remove members as you, so act from the machine that still holds the keys first.
@@ -296,7 +307,7 @@ A published grant covers one epoch, so readers also need the grants of the epoch
 In a repo migrated from 0.5.0, the lockboxes written before the migration hold the full keyring, so a grant for one of those epochs still reveals the epochs before it.
 Concurrent admins committing at the same epoch do not fork the group: the first commit in Arkiv order wins and the other admin's pending commit is dropped on its next refresh ("Pending commits").
 An admin can still commit at an epoch before she is removed; the first commit in Arkiv order wins, as for members.
-A pending commit whose send result was lost and that lands more than `PENDING_BLOCKS` after it was sent is dropped locally while members apply it; the admin then rejoins from a welcome or is added again.
+A pending commit whose send result was lost is kept until its nonce is decided on chain ("Pending commits"), so it cannot be dropped locally while members apply it.
 Commits made before 0.6.0 carry no attestation, so their creator cannot be checked; they are accepted only while the keyring format is 1.
 A delegate of the root identity is trusted for good where no admin set is on record yet: it can sign the first commit of a replay while none exists, and in a migrated repo a junk record it signs for a legacy epoch makes joins fail until the row expires (the replay ignores records for epoch 0, which no commit makes).
 After the first attested commit it is an admin only while the admin sets say so, for joiners, members and grant readers alike.
