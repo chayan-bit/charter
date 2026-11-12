@@ -16,24 +16,33 @@ use crate::cmd::InitArgs;
 pub enum MemberCmd {
     /// Publish a fresh MLS key package and print its id for an admin.
     Keypackage,
-    /// Admin only: add the owner of a key package with a role (admin, write or read).
+    /// Admin only: add the owner of a key package with a role (admin, write or read), or
+    /// with --device another device of an existing member (its role is kept).
     Add {
         #[arg(long)]
         repo: String,
         #[arg(long = "key-package")]
         key_package: String,
-        #[arg(long, default_value = "write")]
+        #[arg(long, default_value = "write", conflicts_with = "device")]
         role: Role,
+        #[arg(long)]
+        device: bool,
     },
-    /// Admin only: remove a member, which rotates the content key.
+    /// Admin only: remove a member from all of its devices, which rotates the keys.
     Remove {
         #[arg(long)]
         repo: String,
         #[arg(long)]
         member: String,
     },
-    /// Members and roles of a private repo.
+    /// Members, roles and device (MLS leaf) counts of a private repo.
     List {
+        #[arg(long)]
+        repo: String,
+    },
+    /// Admin only: remove from the group the MLS leaf of every device a valid revoke record
+    /// names, in one commit (a paid tx; prints its cost). Syncing never does this on its own.
+    Sync {
         #[arg(long)]
         repo: String,
     },
@@ -73,27 +82,80 @@ pub async fn member_cmd<A: Arkiv>(a: &A, cfg: &Config, cmd: &MemberCmd) -> Resul
             repo,
             key_package,
             role,
+            device,
         } => {
             let rid = rid_of(repo)?;
             let kp = unhex32(key_package)?;
-            let nid = charter_private::add_member(a, cfg, &keys, &rid, &kp, *role).await?;
-            println!("added {} as {role:?}", to_text(&nid));
+            if *device {
+                let nid = charter_private::add_device(a, cfg, &keys, &rid, &kp).await?;
+                println!("added a device of {}", to_text(&nid));
+            } else {
+                let nid = charter_private::add_member(a, cfg, &keys, &rid, &kp, *role).await?;
+                println!("added {} as {role:?}", to_text(&nid));
+            }
         }
         MemberCmd::Remove { repo, member } => {
             let (rid, nid): (_, Nid) = (rid_of(repo)?, parse_id(member)?);
             charter_private::remove_member(a, cfg, &keys, &rid, &nid).await?;
-            println!("removed {}; the content key rotated", to_text(&nid));
+            println!(
+                "removed {} from every device; the keys rotated",
+                to_text(&nid)
+            );
         }
         MemberCmd::List { repo } => {
-            let (_, ring) = charter_private::member_ring(a, cfg, &keys, &rid_of(repo)?).await?;
-            println!("epoch {}", ring.current()?.0);
-            for (nid, role) in &ring.roles {
-                let nid = unhex32(nid).map(|n| to_text(&n))?;
-                println!("{nid} {role:?}");
+            let (epoch, list) = charter_private::members(a, cfg, &keys, &rid_of(repo)?).await?;
+            println!("epoch {epoch}");
+            for (nid, role, leaves, unbound) in &list {
+                let s = if *leaves == 1 { "" } else { "s" };
+                let legacy = match unbound {
+                    0 => String::new(),
+                    n => format!(" ({n} made before 0.6.0, not revocable by device)"),
+                };
+                println!("{} {role:?} {leaves} device{s}{legacy}", to_text(nid));
+            }
+            if list.iter().any(|m| m.3 > 0) {
+                println!(
+                    "to make a member's devices revocable one by one: `chart member remove`, \
+                     then `chart member keypackage` on each device and `chart member add` \
+                     (the first) and `chart member add --device` (the rest)"
+                );
+            }
+        }
+        MemberCmd::Sync { repo } => {
+            let rid = rid_of(repo)?;
+            let n = remove_revoked(a, cfg, &keys, &rid).await?;
+            if n == 0 {
+                println!("nothing to remove: no revoked device holds an MLS leaf");
             }
         }
     }
     Ok(())
+}
+
+/// Admin only: removes the MLS leaf of every revoked device ([`charter_private::revoked`])
+/// and prints what it removed and what it cost (the drop in the wallet and the repo's
+/// control address). Returns how many leaves it removed.
+pub async fn remove_revoked<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    rid: &charter_core::Rid,
+) -> Result<usize> {
+    let held = || async {
+        let (w, c) = (keys.wallet().address(), keys.control_address(rid));
+        Ok::<_, crate::CliError>(a.balance(w).await? + a.balance(c).await?)
+    };
+    let before = held().await?;
+    let n = charter_private::revoked::remove_revoked(a, cfg, keys, rid).await?;
+    if n > 0 {
+        let spent = before.saturating_sub(held().await?);
+        let (epoch, _) = charter_private::members(a, cfg, keys, rid).await?;
+        println!(
+            "removed {n} revoked device leaf(s) in one commit (epoch {epoch}); cost {}",
+            crate::units::fmt_glm(spent)
+        );
+    }
+    Ok(n)
 }
 
 /// Serves the remote helper over the plain backend, or over [`Sealed`] for a private repo
@@ -114,7 +176,7 @@ pub async fn serve<A: Arkiv>(a: &A, cfg: Config, url: charter_sync::ids::RemoteU
                 .as_ref()
                 .map(|k| ring.require(&k.nid(), Role::Write))
                 .and_then(|r| r.err());
-            let sealed = Sealed::new(a, ring);
+            let sealed = Sealed::new(a, ring).caching(&cfg.home);
             crate::helper::Session::new(&sealed, cfg, url)
                 .deny_push(gate)
                 .serve(&mut stdin.lock(), &mut out)

@@ -84,8 +84,12 @@ fn back(rid: &Rid, f: &Fields) -> String {
     }
 }
 
+/// The label of the write that removes revoked devices' leaves from a private repo's group.
+pub const REMOVE_REVOKED: &str = "Remove revoked devices";
+
 fn steps(rid: &Rid, f: &Fields) -> Result<(String, Vec<Step>), String> {
     Ok(match get(f, "kind") {
+        "remove-revoked" => (REMOVE_REVOKED.into(), vec![Step::RemoveRevoked]),
         "issue" => {
             let p = json!({"title": title(f)?, "body": get(f, "body")});
             ("Open issue".into(), vec![op(ISSUE, "create", Obj::New, p)])

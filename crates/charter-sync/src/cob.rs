@@ -6,7 +6,7 @@ pub mod json;
 use std::collections::{BTreeMap, BTreeSet};
 
 use charter_core::{
-    AttrValue, Body, CobOpBody, Hash32, Kind, Nid, Observed, Rid, VerifiedOp, peer_key, verify_ops,
+    AttrValue, Body, CobOpBody, Hash32, Kind, Nid, Observed, Rid, VerifiedOp, peer_doc, verify_ops,
 };
 use charter_store::{Arkiv, Pred, attr};
 
@@ -129,6 +129,28 @@ pub(crate) async fn peer_keys_with<A: Arkiv>(
     Ok(keys)
 }
 
+/// Aliases of every peer document this process verified, by peer; filled as keys are
+/// looked up, so naming peers costs no query of its own.
+static ALIASES: std::sync::Mutex<BTreeMap<Nid, String>> = std::sync::Mutex::new(BTreeMap::new());
+
+/// The alias the last verified peer document of `nid` carried; `None` if it was never
+/// looked up in this process or it set none.
+pub fn alias_of(nid: &Nid) -> Option<String> {
+    let m = ALIASES.lock().ok()?;
+    m.get(nid).filter(|a| !a.is_empty()).cloned()
+}
+
+fn remembered(
+    nid: &Nid,
+    doc: Option<(charter_crypto::PublicKey, String)>,
+) -> Option<charter_crypto::PublicKey> {
+    let (pk, alias) = doc?;
+    if let Ok(mut m) = ALIASES.lock() {
+        m.insert(*nid, alias);
+    }
+    Some(pk)
+}
+
 /// The key of `nid` from its self-signed `peer` documents: the first document alone when
 /// it verifies (any valid one gives the same key, since `nid` hashes it), else all of them.
 /// Peer documents carry no `ag.rid`, so a busy peer has many; this reads one row.
@@ -142,10 +164,10 @@ pub async fn peer_key_of<A: Arkiv>(a: &A, nid: &Nid) -> Result<Option<charter_cr
     let page = a
         .query(&charter_store::Query::from(filter.clone()), &one)
         .await?;
-    if let Some(pk) = peer_key(nid, &crate::observe::to_observed(page.rows)) {
+    if let Some(pk) = remembered(nid, peer_doc(nid, &crate::observe::to_observed(page.rows))) {
         return Ok(Some(pk));
     }
-    Ok(peer_key(nid, &all(a, filter).await?))
+    Ok(remembered(nid, peer_doc(nid, &all(a, filter).await?)))
 }
 
 /// New verified ops of `rid`: what [`list_since`] found at or after a block.

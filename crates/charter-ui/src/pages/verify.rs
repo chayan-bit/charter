@@ -1,10 +1,11 @@
-//! The verification panel on every repo page (docs/p6/ui.md 4.3, ui-design.md 5): what the
-//! last sync round verified, each fact with the block or entity it came from.
+//! The Verified seal on every repo page (docs/p6/ui-v2.md 3.6): one word, a plain sentence
+//! in its popover, and what the last sync round verified, with the block or entity each
+//! fact came from, behind Technical details.
 //!
 //! Rabdi's explorer documents only `/address/` and `/tx/` paths, and these facts are
 //! blocks and entity keys, so they are shown as ids in mono (full value in `title`).
 
-use super::{ago, short};
+use super::ago;
 use crate::cache::RepoView;
 use crate::sync_loop::{Round, mins_until};
 
@@ -13,6 +14,10 @@ use crate::sync_loop::{Round, mins_until};
 pub struct Verify {
     pub state: &'static str,
     pub word: &'static str,
+    /// Under the word: `on this computer, 12 s ago`.
+    pub sub: String,
+    /// The popover's heading and its plain sentence.
+    pub heading: &'static str,
     pub summary: String,
     pub open: bool,
     pub revisions: usize,
@@ -53,10 +58,17 @@ impl Verify {
         };
         let peers = peer_rows(v);
         let equivocations = equiv_rows(v);
-        let (state, word, summary) = status(v, &peers, equivocations.len());
+        let (state, word, heading, summary) = status(v, &peers, equivocations.len());
+        let synced = ago(v.synced_ms.max(round.checked_ms));
         Self {
             state,
             word,
+            sub: match state {
+                "verified" => format!("on this computer, {synced}"),
+                "equivocation" => "don't merge or release".into(),
+                _ => "no signed history yet".into(),
+            },
+            heading,
             summary,
             open: state == "equivocation",
             revisions: v.revisions.len(),
@@ -68,7 +80,7 @@ impl Verify {
             threshold: v.threshold,
             peers,
             equivocations,
-            synced: ago(v.synced_ms.max(round.checked_ms)),
+            synced,
             pause: pause(round),
             head_block: v.head_block,
             error: round.error.clone(),
@@ -80,8 +92,12 @@ impl Verify {
         let error = round.error.clone();
         Self {
             state: "pending",
-            word: "Pending",
-            summary: "not verified by chart ui yet; the first sync round is running".into(),
+            word: "Checking",
+            sub: "first copy".into(),
+            heading: "Checking the first copy",
+            summary: "This computer is fetching the repo from Arkiv and checking every \
+                      signature. Nothing is shown as verified until that finishes."
+                .into(),
             open: error.is_some(),
             revisions: 0,
             head_rev: None,
@@ -95,10 +111,6 @@ impl Verify {
             error,
             busy: round.busy,
         }
-    }
-
-    pub fn short(&self, h: &str) -> String {
-        short(h)
     }
 }
 
@@ -134,31 +146,47 @@ fn equiv_rows(v: &RepoView) -> Vec<EquivRow> {
         .collect()
 }
 
-/// `(state, word, summary)`: equivocation wins, then no anchored peer, then verified.
+/// `(state, word, heading, sentence)`: equivocation wins, then no signed head, then verified.
 fn status(
     v: &RepoView,
     peers: &[PeerRow],
     equivocations: usize,
-) -> (&'static str, &'static str, String) {
+) -> (&'static str, &'static str, &'static str, String) {
     let anchored = peers.iter().filter(|p| p.head.is_some()).count();
     if equivocations > 0 {
         return (
             "equivocation",
-            "Equivocation",
-            format!("{equivocations} conflicting heads"),
+            "Conflicting history",
+            "Two versions were signed",
+            "A key of this repo signed two different versions at the same step. Everything \
+             else checked out, but don't merge or release until a maintainer explains which \
+             one is right."
+                .into(),
         );
     }
     if anchored == 0 {
         return (
             "unverified",
-            "Unverified",
-            "no peer has an anchored head".into(),
+            "Not verified",
+            "Nothing signed to check yet",
+            "This computer found the repo on Arkiv, but none of its peers has published a \
+             signed history yet."
+                .into(),
         );
     }
-    let rev = v.revisions.last().map_or(0, |x| x.rev);
+    let n = v.delegates.len();
+    let who = match n {
+        1 => "its maintainer".to_owned(),
+        n => format!("its {n} maintainers"),
+    };
     let summary = format!(
-        "identity rev {rev}, {anchored} of {} peers anchored, signatures valid",
-        peers.len()
+        "This computer rebuilt the history from Arkiv and checked every signature. It is \
+         signed by {who}, and no one has published a conflicting version."
     );
-    ("verified", "Verified", summary)
+    (
+        "verified",
+        "Verified",
+        "Checked here, not taken on trust",
+        summary,
+    )
 }

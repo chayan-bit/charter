@@ -65,6 +65,7 @@ fn v3(rid: Rid, seq: u64, pieces: u32) -> HeadBodyV3 {
         }],
         prev_tx: if seq == 0 { ZERO } else { [8; 32] },
         object_hash: 1,
+        refs_table: None,
     }
 }
 
@@ -203,7 +204,7 @@ fn an_unknown_head_version_still_stops_the_current_reader() {
     let (_, identity, d) = device(w);
     let (mut row, _) = observe(&peers()[1], &v3(w.rid, 0, 3), DEV_CONTROL, 41, 0);
     for a in row.attributes.iter_mut().filter(|a| a.name == "ag.v") {
-        a.value = AttrValue::U64(4);
+        a.value = AttrValue::U64(5);
     }
     let err = accept_device_head(
         &w.rid,
@@ -214,7 +215,7 @@ fn an_unknown_head_version_still_stops_the_current_reader() {
         &nonce(2),
         None,
     )
-    .expect_err("v4");
+    .expect_err("v5");
     assert_eq!(err.code(), ErrorCode::UnsupportedVersion);
 }
 
@@ -369,7 +370,7 @@ fn a_minimal_patch_carries_only_body_and_hash_and_opens_from_calldata() {
     let w = world();
     let body = v3(w.rid, 2, 1);
     let (bytes, h) = sign(&peers()[1], &body);
-    let attrs = head_patch_attributes(&bytes);
+    let attrs = head_patch_attributes(Kind::HeadV3, &bytes);
     let names: Vec<&str> = attrs.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["ag.body", "ag.h"]);
     // Signatures are randomized: both rows carry the same envelope bytes.

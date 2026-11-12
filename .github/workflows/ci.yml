@@ -16,7 +16,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      - name: Performance gate (exact fake-chain costs vs bench/baseline.json)
+        run: cargo test --workspace --all-features --test bench_gate -- --nocapture
+      - run: cargo test --workspace --all-features -- --skip bench_gate
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit

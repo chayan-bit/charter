@@ -37,6 +37,16 @@ pub struct Config {
     pub alias: String,
 }
 
+/// `$CHARTER_ALIAS`, the display name a first write puts in this peer's `peer` document;
+/// empty when unset or over the 64 B the document allows.
+fn alias_from_env() -> String {
+    std::env::var("CHARTER_ALIAS")
+        .ok()
+        .map(|a| a.trim().to_owned())
+        .filter(|a| a.len() <= 64)
+        .unwrap_or_default()
+}
+
 impl Config {
     pub fn new(home: PathBuf) -> Self {
         Self {
@@ -46,7 +56,7 @@ impl Config {
             pipeline: PipelineConfig::default(),
             extra_peers: vec![],
             chunk_batch: 256,
-            alias: String::new(),
+            alias: alias_from_env(),
         }
     }
 
@@ -117,7 +127,17 @@ impl Repo {
     }
 
     fn locked(rid: &Rid, dir: PathBuf, lock: std::fs::File) -> Result<Self> {
+        // One stat per open once the marker exists; under the lock, so one opener migrates.
+        let marker = dir.join(OWNER_ONLY_MARKER);
+        let unmarked = !marker.exists();
+        let migrate = unmarked && dir.join("git").join("HEAD").exists();
         let git = Git::init_cache(&dir.join("git"))?;
+        if migrate {
+            tighten_cache(&dir)?;
+        }
+        if unmarked {
+            write_owner_only(&marker, b"")?;
+        }
         Ok(Self {
             rid: *rid,
             dir,
@@ -146,11 +166,80 @@ impl Repo {
     }
 }
 
-/// Creates the layout of `rid` under `home` and opens (without locking) its lock file.
+/// Marks a cache whose files are owner-only: made by this version, or tightened once by
+/// [`tighten_cache`].
+const OWNER_ONLY_MARKER: &str = "owner-only";
+
+/// A cache made before caches were owner-only, tightened once: every directory 0700, every
+/// file 0600 (symlinks untouched), and `core.sharedRepository=0600` so git keeps new
+/// objects owner-only.
+fn tighten_cache(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let io = |p: &Path, e| SyncError::io(p.display(), e);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).map_err(|e| io(&d, e))? {
+            let p = e.map_err(|e| io(&d, e))?.path();
+            let t = std::fs::symlink_metadata(&p)
+                .map_err(|e| io(&p, e))?
+                .file_type();
+            let mode = match (t.is_dir(), t.is_file()) {
+                (true, _) => 0o700,
+                (_, true) => 0o600,
+                _ => continue,
+            };
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode))
+                .map_err(|e| io(&p, e))?;
+            if t.is_dir() {
+                stack.push(p);
+            }
+        }
+    }
+    let config = dir.join("git").join("config");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, b"[core]\n\tsharedRepository = 0600\n"))
+        .map_err(|e| io(&config, e))
+}
+
+/// Creates `d` and makes it owner-only: `$CHARTER_HOME` and a repo's cache hold the
+/// decrypted objects and packs of private repos.
+fn owner_only_dir(d: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(d).map_err(|e| SyncError::io(d.display(), e))?;
+    std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| SyncError::io(d.display(), e))
+}
+
+/// Creates (or truncates) `p` with mode 0600: packs of a private repo are plaintext here.
+pub fn create_owner_only(p: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(p)
+        .map_err(|e| SyncError::io(p.display(), e))
+}
+
+/// [`std::fs::write`] through [`create_owner_only`].
+pub fn write_owner_only(p: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    create_owner_only(p)?
+        .write_all(bytes)
+        .map_err(|e| SyncError::io(p.display(), e))
+}
+
+/// Creates the layout of `rid` under `home` (owner-only, tightening an existing home) and
+/// opens (without locking) its lock file.
 fn lock_file(home: &Path, rid: &Rid) -> Result<(PathBuf, std::fs::File)> {
-    let dir = home.join("repos").join(hex32(rid));
-    for d in [dir.join("outgoing"), dir.join("tmp")] {
-        std::fs::create_dir_all(&d).map_err(|e| SyncError::io(d.display(), e))?;
+    let repos = home.join("repos");
+    let dir = repos.join(hex32(rid));
+    let (outgoing, tmp) = (dir.join("outgoing"), dir.join("tmp"));
+    for d in [home, &repos, &dir, &outgoing, &tmp] {
+        owner_only_dir(d)?;
     }
     let lock_path = dir.join("lock");
     let lock = std::fs::OpenOptions::new()

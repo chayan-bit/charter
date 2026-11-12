@@ -35,6 +35,9 @@ pub enum Cmd {
     /// Repo identity: show, propose a revision, accept one.
     #[command(subcommand)]
     Id(IdCmd),
+    /// This identity's devices in a repo: list them, revoke one.
+    #[command(subcommand)]
+    Device(crate::device_cmd::DeviceCmd),
     /// Extend everything a repo needs before it expires.
     Keepalive(KeepArgs),
     /// Find repos by annotation, verified against their identity heads.
@@ -108,6 +111,16 @@ pub enum IdCmd {
         repo: String,
         rev: String,
     },
+}
+
+impl IdCmd {
+    /// The repo every `id` subcommand names.
+    pub fn repo(&self) -> &str {
+        match self {
+            Self::Show { repo } | Self::Accept { repo, .. } => repo,
+            Self::Propose(p) => &p.repo,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -489,18 +502,39 @@ pub fn run(cli: &Cli) -> Result<()> {
                 Ok(())
             }
             Cmd::Program(ProgramCmd::Pin(p)) => {
-                for_repo!(&a, &cfg, &rid_of(&p.repo)?, |b| pin_cmd(b, &cfg, p).await)
+                let b = backend::for_repo(&a, &cfg, &rid_of(&p.repo)?).await?;
+                pin_cmd(&b, &cfg, p).await
             }
             Cmd::Program(ProgramCmd::Status { repo }) => {
                 let rid = rid_of(repo)?;
-                for_repo!(&a, &cfg, &rid, |b| program::status(b, &cfg, &rid).await)
+                let b = backend::for_repo(&a, &cfg, &rid).await?;
+                program::status(&b, &cfg, &rid).await
             }
             Cmd::Init(i) => crate::member::init_cmd(&a, &cfg, i).await,
             Cmd::Member(m) => crate::member::member_cmd(&a, &cfg, m).await,
-            Cmd::Id(c) => id_cmd(&a, &cfg, c).await,
-            Cmd::Keepalive(k) => keepalive_cmd(&a, &cfg, k).await,
+            Cmd::Id(c) => {
+                let b = backend::for_repo(&a, &cfg, &rid_of(c.repo())?).await?;
+                id_cmd(&b, &cfg, c).await
+            }
+            Cmd::Device(d) => {
+                let b = backend::for_repo(&a, &cfg, &d.rid()?).await?;
+                crate::device_cmd::run(&b, &cfg, d).await?;
+                match b {
+                    charter_private::ForRepo::Sealed(_) => {
+                        crate::device_cmd::private_note(&a, &cfg, d).await
+                    }
+                    charter_private::ForRepo::Plain(_) => Ok(()),
+                }
+            }
+            Cmd::Keepalive(k) => {
+                let b = backend::for_repo(&a, &cfg, &rid_of(&k.repo)?).await?;
+                keepalive_cmd(&b, &cfg, k).await
+            }
             Cmd::Search(s) => search_cmd(&a, s).await,
-            Cmd::Status { repo } => status_cmd(&a, &cfg, repo).await,
+            Cmd::Status { repo } => {
+                let b = backend::for_repo(&a, &cfg, &rid_of(repo)?).await?;
+                status_cmd(&b, &cfg, repo).await
+            }
             Cmd::Fund(FundArgs { dev: Some(wei), .. }) => {
                 let wallet = Keys::require(&cfg.home)?.wallet().address();
                 let have = backend::dev_fund(&a, wallet, *wei).await?;
@@ -510,16 +544,19 @@ pub fn run(cli: &Cli) -> Result<()> {
             }
             Cmd::Fund(f) => fund_cmd(&a, &cfg, f).await,
             Cmd::Ui(u) => ui_cmd(a, cfg, u).await,
-            Cmd::Op(o) => for_repo!(&a, &cfg, &o.rid()?, |b| crate::op::run(b, &cfg, o).await),
+            Cmd::Op(o) => {
+                crate::op::run(&backend::for_repo(&a, &cfg, &o.rid()?).await?, &cfg, o).await
+            }
             Cmd::Release(r) => {
-                for_repo!(&a, &cfg, &r.rid()?, |b| crate::release::run(b, &cfg, r)
-                    .await)
+                let b = backend::for_repo(&a, &cfg, &r.rid()?).await?;
+                crate::release::run(&b, &cfg, r).await
             }
             // A private repo's escrow ops and obligations are sealed like its other ops.
             Cmd::Escrow(e) => match e.repo() {
-                Some(r) => for_repo!(&a, &cfg, &rid_of(r)?, |b| {
-                    crate::escrow::run(b, &cfg, e).await
-                }),
+                Some(r) => {
+                    let b = backend::for_repo(&a, &cfg, &rid_of(r)?).await?;
+                    crate::escrow::run(&b, &cfg, e).await
+                }
                 None => crate::escrow::run(&a, &cfg, e).await,
             },
         }

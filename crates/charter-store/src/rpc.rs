@@ -122,6 +122,7 @@ struct RawMinedTx {
     to: Option<Address>,
     block_number: Option<U64>,
     transaction_index: Option<U64>,
+    nonce: U64,
     input: Bytes,
 }
 
@@ -133,6 +134,7 @@ impl RawMinedTx {
             to: self.to,
             block: u64_of(self.block_number?),
             index: u32::try_from(u64_of(self.transaction_index?)).ok()?,
+            nonce: u64_of(self.nonce),
             input: self.input,
         })
     }

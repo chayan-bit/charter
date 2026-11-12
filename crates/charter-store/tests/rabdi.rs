@@ -4,6 +4,8 @@
 //! `spike/arkiv-measure/.env`, never prints it, keeps lifetimes at or under 1 day and
 //! asserts it spent under 0.01 tGLM.
 
+mod racing;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -250,4 +252,112 @@ async fn rabdi_funded_create_query_extend() {
         tglm(gas)
     );
     assert!(drop < U256::from(MAX_SPEND_WEI));
+}
+
+/// What a funded live test may spend of `ARKIV_FUNDER_PRIVATE_KEY`: fees only, the rest is
+/// swept back.
+const COLLISION_BUDGET_WEI: u128 = 5_000_000_000_000_000; // 0.005 tGLM
+
+/// Moves everything but one transfer's fee reserve from `from` back to `to`.
+async fn sweep(a: &RpcArkiv, from: &PrivateKeySigner, to: Address) {
+    let cfg = PipelineConfig::default();
+    let have = a.balance(from.address()).await.expect("balance");
+    let reserve = cfg.tx_reserve(21_000, U256::ZERO, a.base_fee().await.expect("fee"));
+    if have <= reserve {
+        return;
+    }
+    let value = have - reserve;
+    TxPipeline::new(a, from.clone(), RABDI_CHAIN_ID, cfg)
+        .transfers(vec![(to, value)])
+        .await
+        .expect("sweep");
+    println!("transfer {} -> {to} {value} wei (sweep)", from.address());
+}
+
+/// Issue #28 on Rabdi: two devices of one identity top up from the shared wallet at the
+/// same moment. The other device's transfer takes the wallet nonce this client read; the
+/// prefund (wallet transfers) and the pipeline top-up both land anyway, with no nonce left
+/// open. Every transfer is printed; the throwaway addresses are swept back to the funder.
+///
+/// `set -a; . ~/.config/charter/.env; set +a; CHARTER_RABDI=1 cargo test -p charter-store
+/// --test rabdi rabdi_wallet_top_ups_survive_a_nonce_collision -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "live Rabdi: needs CHARTER_RABDI=1 and ARKIV_FUNDER_PRIVATE_KEY; spends fees only"]
+async fn rabdi_wallet_top_ups_survive_a_nonce_collision() {
+    if !enabled() {
+        return;
+    }
+    let funder: PrivateKeySigner = std::env::var("ARKIV_FUNDER_PRIVATE_KEY")
+        .expect("ARKIV_FUNDER_PRIVATE_KEY")
+        .parse()
+        .expect("key");
+    let a = RpcArkiv::connect(RpcConfig::rabdi(std::env::var("ARKIV_ACCESS_KEY").ok()))
+        .await
+        .expect("connect to Rabdi");
+    assert_eq!(
+        a.chain_id().await.expect("chain"),
+        RABDI_CHAIN_ID,
+        "testnet only"
+    );
+    let cfg = PipelineConfig::default();
+    let start = a.balance(funder.address()).await.expect("balance");
+    let [wallet, dev_a, dev_b, dev_c] = std::array::from_fn(|_| PrivateKeySigner::random());
+    let fund = U256::from(4_000_000_000_000_000u128); // 0.004 tGLM
+    TxPipeline::new(&a, funder.clone(), RABDI_CHAIN_ID, cfg.clone())
+        .transfers(vec![(wallet.address(), fund)])
+        .await
+        .expect("fund the wallet");
+    println!(
+        "transfer {} -> {} {fund} wei (fund)",
+        funder.address(),
+        wallet.address()
+    );
+
+    // The prefund path: wallet transfers, raced by device b's top-up.
+    let racing = racing::Racing::new(&a, wallet.clone(), RABDI_CHAIN_ID, dev_b.address());
+    let prefund = U256::from(500_000_000_000_000u128);
+    let r = TxPipeline::new(&racing, wallet.clone(), RABDI_CHAIN_ID, cfg.clone())
+        .transfers(vec![(dev_a.address(), prefund)])
+        .await;
+    println!(
+        "transfer {} -> {} {prefund} wei (prefund): {r:?}",
+        wallet.address(),
+        dev_a.address()
+    );
+    r.expect("the prefund lands despite the collision");
+
+    // The top-up path: device c's pipeline tops itself up from the wallet, raced again.
+    racing.arm();
+    let r = TxPipeline::new(&racing, dev_c.clone(), RABDI_CHAIN_ID, cfg.clone())
+        .funded_by(wallet.clone())
+        .transfers(vec![(wallet.address(), U256::from(1))])
+        .await;
+    println!(
+        "pipeline of {} topped up from {}: {r:?}",
+        dev_c.address(),
+        wallet.address()
+    );
+    r.expect("the top-up lands despite the collision");
+
+    let w = wallet.address();
+    assert_eq!(
+        a.tx_count(w).await.expect("pending"),
+        a.tx_count_mined(w).await.expect("mined"),
+        "no wallet nonce left open"
+    );
+    assert_eq!(
+        a.balance(dev_b.address()).await.expect("b"),
+        U256::from(2 * racing::OTHER_TOP_UP),
+        "both racing top-ups landed"
+    );
+    for k in [&dev_a, &dev_b, &dev_c, &wallet] {
+        sweep(&a, k, funder.address()).await;
+    }
+    let end = a.balance(funder.address()).await.expect("balance");
+    let spent = start.saturating_sub(end);
+    println!("spent {spent} wei of the funder");
+    assert!(
+        spent < U256::from(COLLISION_BUDGET_WEI),
+        "spent {spent} wei"
+    );
 }

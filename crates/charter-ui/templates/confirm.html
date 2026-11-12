@@ -1,19 +1,36 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
 <div class="scrim">
-<section class="dlg" role="dialog" aria-modal="true" aria-labelledby="cw-t">
-<h2 id="cw-t">Confirm write</h2>
-<dl class="rows">{% for (k, v, mono) in rows %}<div><dt>{{ k }}</dt><dd{% if *mono %} class="mono"{% endif %}>{{ v }}</dd></div>{% endfor %}</dl>
-{% if let Some(w) = short_of %}<p class="warnp">{{ w }}</p>{% endif %}
-{% if let Some(q) = quota %}<p class="warnp">{{ q }}</p>{% endif %}
-<details class="signed"><summary>What will be signed</summary>{% for (h, p) in ops %}<p><code>{{ h }}</code></p>{% if !p.is_empty() %}<pre>{{ p }}</pre>{% endif %}{% endfor %}</details>
-<form method="post" action="/r/{{ r.hex }}/write/{{ id }}" class="acts" data-confirm>
+<section class="cost" role="dialog" aria-modal="true" aria-labelledby="cd-title" aria-describedby="cd-sub">
+<div class="cd">
+<div>
+<h2 id="cd-title">{{ ask }}</h2>
+<p class="lede" id="cd-sub">This publishes it on Arkiv under your name.</p>
+</div>
+<p class="permline">{% if r.private %}{{ m::i(l.v, "lock-simple") }}Sealed for the repo's members, and permanent. It can't be edited or deleted.{% else %}{{ m::i(l.v, "globe-simple") }}Public and permanent. It can't be edited or deleted.{% endif %}</p>
+<div class="publish"><span class="label">What you publish</span><p>{{ publish }}</p></div>
+{% if let Some(w) = short_of %}<div class="notice bad" role="alert">{{ m::i(l.v, "warning-circle") }}<div><p><b>Not enough funds.</b> {{ w }}</p>{% if !address.is_empty() %}<button class="btn btn-sm js" type="button" data-copy="{{ address }}">{{ m::i(l.v, "copy") }}Copy wallet address</button>{% endif %}</div></div>{% endif %}
+{% if let Some(q) = quota %}<div class="notice warn" role="status">{{ m::i(l.v, "pause") }}<p><b>Arkiv is rate limiting this computer.</b> {{ q }}. Nothing was spent.</p></div>{% endif %}
+<div class="price"><span class="label">Most you can pay<small>Test tokens, no real value</small></span><span class="amt" title="{{ most.exact }}">{{ most.num }} <small>{{ most.unit }}</small></span></div>
+<dl class="cfacts">
+<div><dt>Funds now</dt><dd>{{ m::amt(funds_now) }}</dd></div>
+<div><dt>After, at least</dt><dd>{{ m::amt(funds_after) }}</dd></div>
+<div><dt>Takes</dt><dd class="tx">{{ takes }}</dd></div>
+<div><dt>Kept for</dt><dd class="tx">{{ kept }}</dd></div>
+</dl>
+<details><summary>Breakdown and what will be signed</summary>
+<ul class="receipt">{% for (k, v, x) in receipt %}<li{% if loop.last %} class="tot"{% endif %}><span>{{ k }}</span><span>{% if let Some(a) = x %}{{ m::amtcol(a) }}{% else %}{{ v }}{% endif %}</span></li>{% endfor %}</ul>
+{% for (h, p) in ops %}<p class="small sec"><code>{{ h }}</code></p>{% if !p.is_empty() %}<pre>{{ p }}</pre>{% endif %}{% endfor %}
+</details>
+<form method="post" action="/r/{{ r.hex }}/write/{{ id }}" class="cd-actions" data-confirm>
 <input type="hidden" name="csrf" value="{{ l.csrf }}">
 <a class="btn" href="{{ back }}" autofocus>Cancel</a>
-<button class="btn primary" type="submit"{% if quota.is_some() %} disabled{% endif %}>Send {{ cost }}</button>
+<button class="btn btn-ink" type="submit"{% if quota.is_some() || short_of.is_some() %} disabled{% endif %}>{{ button }}</button>
 </form>
-<p class="dim hint js"><kbd>Enter</kbd> cancels, <kbd>Cmd</kbd> <kbd>Enter</kbd> sends. Keys stay in this process.</p>
+<p class="cd-foot"><span class="js"><kbd>Esc</kbd>&nbsp;cancels, <kbd>Cmd</kbd>&nbsp;<kbd>Enter</kbd>&nbsp;sends.&nbsp;</span>Your keys never leave this computer.</p>
+</div>
 </section>
 </div>
 {% endblock %}

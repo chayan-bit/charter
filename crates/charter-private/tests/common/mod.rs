@@ -2,6 +2,8 @@
 //! send-dropping fault, peers with their own `$CHARTER_HOME`, and real git work repos.
 #![allow(dead_code)]
 
+pub mod sec;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -28,6 +30,10 @@ pub struct Net {
     fee: Mutex<Option<(u64, u128)>>,
     /// Rendered text of every query, in order.
     pub queries: Mutex<Vec<String>>,
+    /// Blocks read through `block_txs`.
+    pub block_reads: std::sync::atomic::AtomicUsize,
+    /// While set, polling a receipt mines nothing, so sends pile up unmined.
+    hold: std::sync::atomic::AtomicBool,
 }
 
 impl Net {
@@ -37,7 +43,14 @@ impl Net {
             drop: Mutex::new(None),
             fee: Mutex::new(None),
             queries: Mutex::new(vec![]),
+            block_reads: Default::default(),
+            hold: Default::default(),
         }
+    }
+
+    /// Stops (or resumes) mining on receipt polls, to make writers race.
+    pub fn hold_mining(&self, on: bool) {
+        self.hold.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Accept but never mine every send from `sender` after the next `after` ones.
@@ -105,6 +118,8 @@ impl Arkiv for Net {
         self.mem.mined_tx(h).await
     }
     async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        self.block_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.mem.block_txs(n).await
     }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
@@ -129,6 +144,9 @@ impl Arkiv for Net {
     async fn receipt(&self, h: TxHash) -> Result<Option<Receipt>, StoreError> {
         if let Some(r) = self.mem.receipt(h).await? {
             return Ok(Some(r));
+        }
+        if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(None);
         }
         let n = self.mem.mine();
         let held = *self.fee.lock().expect("lock");
@@ -327,5 +345,28 @@ pub fn run<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
         .enable_all()
         .build()
         .expect("runtime");
-    rt.block_on(rt.spawn(f)).expect("test task");
+    // A test that hangs fails instead of holding the whole run.
+    let task = rt.spawn(f);
+    rt.block_on(async { tokio::time::timeout(TEST_DEADLINE, task).await })
+        .unwrap_or_else(|_| panic!("the test did not finish within {TEST_DEADLINE:?}"))
+        .expect("test task");
+}
+
+/// The longest any one test may run.
+const TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The epoch `r` is on.
+pub fn current(r: &charter_private::Keyring) -> u64 {
+    r.current().expect("current").0
+}
+
+/// Waits (bounded) until the pool holds `n` txs.
+pub async fn pool_holds(net: &Net, n: usize) {
+    for _ in 0..250 {
+        if net.mem.pending() >= n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the pool never held {n} txs");
 }

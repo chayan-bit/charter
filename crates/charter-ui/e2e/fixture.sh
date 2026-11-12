@@ -14,6 +14,7 @@ export HOME="$root/home"
 export CHARTER_HOME="$root/home/.charter"
 export CHARTER_BACKEND="mem:$root/chain.log"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export CHARTER_ALIAS=alice
 export GIT_AUTHOR_NAME=alice GIT_AUTHOR_EMAIL=alice@example.com
 export GIT_COMMITTER_NAME=alice GIT_COMMITTER_EMAIL=alice@example.com
 mkdir -p "$HOME"

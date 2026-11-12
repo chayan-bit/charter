@@ -1,26 +1,8 @@
 //! charter-cli: the `git-remote-arkiv` helper and the `chart` tool (design 4.1, 7.3).
 
-/// Evaluates `$body` with `$b` bound to the backend `$a`, or to a `Sealed` view of it when
-/// `$rid` is a private repo this machine's identity can read: the remote helper's rule, so
-/// ops, pins and folds of a private repo are sealed and blinded like its pushes.
-macro_rules! for_repo {
-    ($a:expr, $cfg:expr, $rid:expr, |$b:ident| $body:expr) => {{
-        let keys = charter_sync::Keys::load(&$cfg.home)?;
-        match charter_private::ring_for($a, $cfg, keys.as_ref(), $rid).await? {
-            None => {
-                let $b = $a;
-                $body
-            }
-            Some(ring) => {
-                let $b = &charter_private::Sealed::new($a, ring);
-                $body
-            }
-        }
-    }};
-}
-
 pub mod backend;
 pub mod cmd;
+pub mod device_cmd;
 pub mod escrow;
 pub mod helper;
 pub mod member;

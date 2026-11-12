@@ -1,6 +1,8 @@
 //! The write worker: prices drafts and sends them. Sending goes through `cob::post`,
 //! `release::payload`, `TxPipeline::transfer` and `charter_escrow::ops::post`, as the
-//! CLI does; [`Tap`] wraps the backend only to record each tx hash as it is sent.
+//! CLI does; [`Tap`] wraps the backend only to record each tx hash as it is sent. Both
+//! pricing and sending pick the backend with `charter_private::for_repo`, the CLI's rule,
+//! so a private repo's draft is priced and sent sealed.
 
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +20,7 @@ use charter_sync::release::{self, RELEASE_TYPE};
 use charter_sync::write::{entity_op, price, sign};
 use charter_sync::{Config, Keys, view};
 
-use super::{Draft, Estimate, Obj, Shared, Status, Step};
+use super::{Balance, Draft, Estimate, Obj, Shared, Status, Step};
 
 /// Gas of a plain value transfer.
 const TRANSFER_GAS: u64 = 21_000;
@@ -27,6 +29,7 @@ pub struct Ctx<A> {
     pub a: Arc<A>,
     pub cfg: Config,
     pub keys: Keys,
+    pub balance: Balance,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -89,8 +92,21 @@ impl<A: Arkiv> Ctx<A> {
         self.keys.wallet().address()
     }
 
-    async fn bound(&self, rid: &Rid) -> Result<bool, String> {
-        let p = view::resolve_peer(&*self.a, rid, &self.keys.nid()).await;
+    fn keep_balance(&self, wei: U256) {
+        if let Ok(mut b) = self.balance.lock() {
+            *b = Some((wei, now_ms()));
+        }
+    }
+
+    /// One balance read, for the header chip and the wallet page.
+    pub async fn read_balance(&self) {
+        if let Ok(w) = self.a.balance(self.wallet()).await {
+            self.keep_balance(w);
+        }
+    }
+
+    async fn bound<B: Arkiv>(&self, b: &B, rid: &Rid) -> Result<bool, String> {
+        let p = view::resolve_peer(b, rid, &self.keys.nid()).await;
         Ok(p.map_err(err)?.is_some_and(|p| !p.binds.links.is_empty()))
     }
 
@@ -109,8 +125,9 @@ impl<A: Arkiv> Ctx<A> {
 
     /// Gas of one op step, signed with a throwaway key of the same algorithm so the
     /// entity has the exact size the real one will have; nothing of the user is signed.
-    async fn op_gas(
+    async fn op_gas<B: Arkiv>(
         &self,
+        b: &B,
         tmp: &Keys,
         d: &Draft,
         step: &Step,
@@ -124,45 +141,90 @@ impl<A: Arkiv> Ctx<A> {
         };
         ops.push(entity_op::<CobOpBody>(&s.bytes, self.cfg.control_lifetime).map_err(err)?);
         let from = self.keys.control_address(&d.rid);
-        let gas = self.a.estimate(from, &ops).await.map_err(err)?;
+        let gas = b.estimate(from, &ops).await.map_err(err)?;
         *prev = s.h;
         Ok((gas, ops.len()))
     }
 
+    /// The backend that sends to `rid`: sealed under the keys current now for a private repo.
+    async fn for_repo<'b, B: Arkiv>(
+        &self,
+        a: &'b B,
+        rid: &Rid,
+    ) -> Result<charter_private::ForRepo<'b, B>, String> {
+        charter_private::for_repo(a, &self.cfg, Some(&self.keys), rid)
+            .await
+            .map_err(err)
+    }
+
+    /// Prices `d` at its sealed size for a private repo. Pricing reads the keyring the last
+    /// sync saved and makes no group query; the send refreshes it once (the CLI's one).
     pub async fn prepare(&self, d: Draft) -> Result<(Draft, Estimate), String> {
+        let b = charter_private::for_repo_cached(&*self.a, &self.cfg, Some(&self.keys), &d.rid)
+            .await
+            .map_err(err)?;
         let tmp = Keys::from_seed(MasterSeed::generate().map_err(err)?);
-        let (mut prev, mut bind) = (ZERO, !self.bound(&d.rid).await?);
-        let base_fee = self.a.base_fee().await.map_err(err)?;
+        let (mut prev, mut bind) = (ZERO, !self.bound(&b, &d.rid).await?);
+        let base_fee = b.base_fee().await.map_err(err)?;
         let control = self.keys.control_address(&d.rid);
         let (w, mut have) =
-            futures_util::future::try_join(self.a.balance(self.wallet()), self.a.balance(control))
+            futures_util::future::try_join(b.balance(self.wallet()), b.balance(control))
                 .await
                 .map_err(err)?;
+        self.keep_balance(w);
         let mut e = Estimate {
             balance: w + have,
+            wallet: w,
+            lifetime: self.cfg.control_lifetime,
             ..Estimate::default()
         };
         let mut steps = Vec::with_capacity(d.steps.len());
         for step in d.steps.clone() {
             let step = Self::resolve(step).await?;
+            if step == Step::RemoveRevoked {
+                e.regroups = true;
+                let (gas, plugs) = self.removal_gas(&d.rid, &mut e).await?;
+                for _ in 0..plugs {
+                    self.control_tx(&mut e, &mut have, TRANSFER_GAS, base_fee);
+                }
+                self.control_tx(&mut e, &mut have, gas, base_fee);
+                steps.push(step);
+                continue;
+            }
             let op = match &step {
                 Step::Deposit { amount, purpose } => {
-                    let appt = ledger::load(&*self.a, &d.rid).await.map_err(|e| {
+                    let appt = ledger::load(&b, &d.rid).await.map_err(|e| {
                         format!("this repo has no escrow to fund a bounty through: {e}")
                     })?;
                     // The escrow transfer goes from the wallet itself: never topped up.
                     (e.value, e.txs) = (e.value + amount, e.txs + 1);
                     e.cost += price(TRANSFER_GAS, base_fee);
+                    e.from_wallet += *amount + price(TRANSFER_GAS, base_fee);
                     deposit_step(appt.appointment.object, *amount, purpose)?
                 }
                 _ => step.clone(),
             };
-            let (gas, n) = self.op_gas(&tmp, &d, &op, &mut prev, &mut bind).await?;
+            let (gas, n) = self.op_gas(&b, &tmp, &d, &op, &mut prev, &mut bind).await?;
             self.control_tx(&mut e, &mut have, gas, base_fee);
             e.entities += n;
             steps.push(step);
         }
         Ok((Draft { steps, ..d }, e))
+    }
+
+    /// Gas of the removal commit `charter_private::revoked::remove_revoked` would send now,
+    /// built and dropped without sending (a group refresh and the add and remove path's
+    /// reads: pricing an explicit write, never a background round), and how many zero-value
+    /// transfers it must send first to retire an earlier commit still pending at a free nonce.
+    async fn removal_gas(&self, rid: &Rid, e: &mut Estimate) -> Result<(u64, u64), String> {
+        let (ops, plugs) =
+            charter_private::revoked::removal_ops(&*self.a, &self.cfg, &self.keys, rid)
+                .await
+                .map_err(err)?
+                .ok_or("no revoked device holds a leaf in this repo's group any more")?;
+        e.entities += ops.len();
+        let from = self.keys.control_address(rid);
+        Ok((self.a.estimate(from, &ops).await.map_err(err)?, plugs))
     }
 
     /// One control-address tx of `gas`, preceded by the wallet top-up the send path makes
@@ -173,6 +235,7 @@ impl<A: Arkiv> Ctx<A> {
         if let Some(amount) = PipelineConfig::top_up(*have, reserve, 1) {
             let fee = pc.top_up_fee(base_fee);
             e.top_ups.push(amount);
+            e.from_wallet += amount + fee;
             (e.top_up_fee, e.cost, e.txs) = (e.top_up_fee + fee, e.cost + fee, e.txs + 1);
             *have += amount;
         }
@@ -182,7 +245,9 @@ impl<A: Arkiv> Ctx<A> {
         *have = have.saturating_sub(U256::from(gas) * U256::from(base_fee + pc.tip));
     }
 
-    async fn run(&self, tap: &Tap<A>, d: &Draft) -> Result<Vec<Hash32>, String> {
+    /// Sends `d`'s steps through `tap` (sealed for a private repo); the group commit of a
+    /// removal goes through `raw`, as group operations seal themselves.
+    async fn run<B: Arkiv>(&self, tap: &B, raw: &Tap<A>, d: &Draft) -> Result<Vec<Hash32>, String> {
         let (cfg, keys) = (&self.cfg, &self.keys);
         let (mut prev, mut ids) = (ZERO, vec![]);
         for step in &d.steps {
@@ -202,6 +267,16 @@ impl<A: Arkiv> Ctx<A> {
                         .map_err(err)?
                 }
                 Step::Release(_) => return Err("the release was not prepared".into()),
+                Step::RemoveRevoked => {
+                    let n = charter_private::revoked::remove_revoked(raw, cfg, keys, &d.rid)
+                        .await
+                        .map_err(err)?;
+                    if n == 0 {
+                        return Err("nothing to remove: another admin removed it first".into());
+                    }
+                    forget_revoked(&cfg.home, &d.rid);
+                    continue;
+                }
                 op => {
                     let b = body(&d.rid, op, prev)?;
                     cob::post(tap, cfg, keys, &b).await.map_err(err)?
@@ -218,12 +293,19 @@ impl<A: Arkiv> Ctx<A> {
             a: self.a.clone(),
             status: status.clone(),
         };
-        let out = self.run(&tap, &d).await;
+        let out = match self.for_repo(&tap, &d.rid).await {
+            Ok(b) => self.run(&b, &tap, &d).await,
+            Err(e) => Err(e),
+        };
         let last = status.lock().ok().and_then(|s| s.txs.last().copied());
         let block = match (&out, last) {
             (Ok(_), Some(h)) => tap.receipt(h).await.ok().flatten().map(|r| r.block_number),
             _ => None,
         };
+        // Before the status says confirmed, so the page that shows it has the new balance.
+        if out.is_ok() {
+            self.read_balance().await;
+        }
         if let Ok(mut s) = status.lock() {
             match (out, block) {
                 (Ok(ids), Some(b)) => (s.ids, s.block) = (ids, Some(b)),
@@ -233,7 +315,55 @@ impl<A: Arkiv> Ctx<A> {
                 }
                 (Err(e), _) => s.error = Some(e),
             }
+            if s.block.is_some() {
+                s.done_ms = now_ms();
+                self.ledger(&d, &s);
+            }
         }
+    }
+
+    /// Appends a confirmed write to the spend ledger; a ledger error is logged, never
+    /// turned into a failed write (the write is on chain already).
+    fn ledger(&self, d: &Draft, s: &Status) {
+        let (wei, estimated) = s.spent();
+        let entry = crate::spend::Spend {
+            ts_ms: s.done_ms,
+            block: s.block.unwrap_or_default(),
+            repo: charter_sync::ids::hex32(&d.rid),
+            action: d.label.clone(),
+            wei: wei.to_string(),
+            value: s.est.value.to_string(),
+            txs: s.txs.len(),
+            skipped: s.skipped,
+            estimated,
+        };
+        if let Err(e) = crate::spend::record(&self.cfg.home, entry) {
+            charter_sync::warn(&format!("ui: spend ledger not updated: {e}"));
+        }
+    }
+}
+
+/// Clears the cached count of revoked leaves after a removal, so the repo page stops
+/// offering it at once instead of after the next round, which confirms it.
+fn forget_revoked(home: &std::path::Path, rid: &charter_core::Rid) {
+    let path = home
+        .join("repos")
+        .join(charter_sync::ids::hex32(rid))
+        .join(crate::cache::VIEW);
+    let cleared = crate::cache::read::<crate::cache::RepoView>(&path).and_then(|v| match v {
+        Some(v) if v.revoked_leaves > 0 => crate::cache::write(
+            &path,
+            &crate::cache::RepoView {
+                revoked_leaves: 0,
+                ..v
+            },
+        ),
+        _ => Ok(()),
+    });
+    if let Err(e) = cleared {
+        charter_sync::warn(&format!(
+            "ui: cached view not updated after the removal: {e}"
+        ));
     }
 }
 
@@ -289,7 +419,14 @@ impl<A: Arkiv> Arkiv for Tap<A> {
         Ok(h)
     }
     async fn receipt(&self, h: TxHash) -> Result<Option<Receipt>, StoreError> {
-        self.a.receipt(h).await
+        let r = self.a.receipt(h).await?;
+        if let (Some(r), Ok(mut s)) = (&r, self.status.lock())
+            && !s.fees.iter().any(|(t, _)| *t == h)
+        {
+            let fee = U256::from(r.gas_used) * U256::from(r.effective_gas_price);
+            s.fees.push((h, fee));
+        }
+        Ok(r)
     }
     fn seal_ops(&self, ops: Vec<Operation>) -> Result<Vec<Operation>, StoreError> {
         self.a.seal_ops(ops)
@@ -311,5 +448,11 @@ impl<A: Arkiv> Arkiv for Tap<A> {
     }
     fn seals(&self) -> bool {
         self.a.seals()
+    }
+    fn incomplete_reason(&self) -> Option<&'static str> {
+        self.a.incomplete_reason()
+    }
+    fn seals_for(&self, rid: &[u8; 32]) -> bool {
+        self.a.seals_for(rid)
     }
 }

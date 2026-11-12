@@ -1,35 +1,29 @@
 {% extends "base.html" %}
-{% import "macros.html" as u %}
+{% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
-<section class="clone"><label for="clone">Clone</label> <input id="clone" class="mono" readonly value="{{ clone }}" data-copy="{{ clone }}"><button type="button" class="btn js" data-copy-from="clone">Copy</button></section>
-<div id="live" data-live="push">
+<div class="cols" id="live" data-live="push">
+<div class="maincol">
+<div class="toolbar">{% let small = false %}{% include "picker.html" %}<a class="muted small" href="/r/{{ r.hex }}/branches">{{ picker.branches }} branch{% if picker.branches != 1 %}es{% endif %}, {{ picker.tags }} tag{% if picker.tags != 1 %}s{% endif %}</a></div>
 {% if entries.is_empty() %}
-<section class="empty"><p>No verified commits on <code>{{ r.default_ref }}</code> yet.</p></section>
+<section class="empty"><h2>Nothing on {{ picker.current }} yet</h2><p>No verified commits on the default branch. Push one with <code>git push</code>; it shows here once a sync round checks it.</p></section>
 {% else %}
-<div class="box"><table class="list tree" data-list>
-<tbody>
+{% include "lastc.html" %}
+<ul class="files" data-list>
 {% include "entries.html" %}
-</tbody>
-</table></div>
+</ul>
 {% endif %}
-{% if let Some(html) = readme %}<article class="readme md">{{ html|safe }}</article>{% endif %}
-<section class="refs">
-<h2>Branches and tags</h2>
-{% if !canonical.is_empty() %}
-<h3>Canonical</h3>
-<div class="box"><table class="list"><tbody>
-{% for (name, oid) in canonical %}<tr><td><a href="/r/{{ r.hex }}/tree/{{ self.seg(self.bare(name.as_str())) }}"><code class="ref">{{ u::refname(self.bare(name.as_str())) }}</code></a></td><td class="num"><a href="/r/{{ r.hex }}/commit/{{ oid }}"><code title="{{ oid }}">{{ self.short(oid.as_str()) }}</code></a></td></tr>{% endfor %}
-</tbody></table></div>
-{% endif %}
-{% for p in peers %}
-<h3>{% if p.delegate %}Delegate{% else %}Peer{% endif %} <code title="{{ p.nid }}">{{ self.short(p.nid.as_str()) }}</code></h3>
-{% if p.refs.is_empty() %}<p class="dim">no refs</p>{% else %}
-<div class="box"><table class="list"><tbody>
-{% for (name, oid) in p.refs %}<tr><td><code class="ref">{{ u::refname(name) }}</code></td><td class="num"><a href="/r/{{ r.hex }}/tree/{{ oid }}"><code title="{{ oid }}">{{ self.short(oid.as_str()) }}</code></a></td></tr>{% endfor %}
-</tbody></table></div>
-{% endif %}
-{% endfor %}
+{% if let Some((name, html)) = readme %}<article class="readme"><p class="filelabel">{{ m::i(l.v, "book-open") }}{{ name }}</p><div class="md">{{ html|safe }}</div></article>{% endif %}
+</div>
+<aside class="side" aria-label="About this repository">
+<section><h2>Maintainers</h2>
+{% if r.verify.delegates.is_empty() %}<p>Shown once the first sync finishes.</p>{% else %}<ul class="people">{% for d in r.verify.delegates %}<li><b>{{ r.who(d) }}</b><small title="{{ d }}">{{ r.short(d) }}</small></li>{% endfor %}</ul>{% endif %}
 </section>
+<section><h2>Changing {{ picker.current }}</h2><p>{{ rule }} <a href="/r/{{ r.hex }}/rules">Rules and CI</a></p></section>
+<section><h2>Address</h2>
+<div class="clonebox"><code>{{ r.addr }}</code><button class="copy js" type="button" data-copy="arkiv::{{ r.addr }}" aria-label="Copy address">{{ m::i(l.v, "copy") }}</button></div>
+<p class="muted small note">Arkiv Rabdi testnet</p>
+</section>
+</aside>
 </div>
 {% endblock %}

@@ -73,6 +73,11 @@ pub struct Plan {
     pub carried: Vec<Pack>,
 }
 
+/// A delegation or revoke anchor: the rows the v2 view is built from (head-model 4.1, 15.1).
+fn head_model_row(o: &charter_core::Observed) -> bool {
+    is_device_row(o) || charter_core::is_revoke_row(o)
+}
+
 fn oid_bytes(hex_oid: &str) -> Result<Vec<u8>> {
     hex::decode(hex_oid).map_err(|e| SyncError::io("oid", e))
 }
@@ -119,6 +124,8 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
         work: &Git,
         updates: &[Update],
     ) -> Result<Self> {
+        // Every chunk, piece and head tx of this push leaves through `Self`.
+        crate::guard::require_sealed(a, &cfg.home, &repo.rid)?;
         let planned = stage(repo, &keys.nid(), work, updates)?;
         Ok(Self {
             a,
@@ -180,7 +187,7 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             let rows: Vec<_> = pv
                 .anchors
                 .iter()
-                .filter(|o| is_device_row(o))
+                .filter(|o| head_model_row(o))
                 .cloned()
                 .collect();
             (pv, rows)
@@ -195,7 +202,7 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
                 return Ok(None);
             };
             let rows = view::anchors(self.a, &rid, &nid, &info).await?;
-            let rows: Vec<_> = rows.into_iter().filter(is_device_row).collect();
+            let rows: Vec<_> = rows.into_iter().filter(head_model_row).collect();
             Ok::<_, SyncError>(Some((info, rows)))
         };
         let early = heads::build(
@@ -236,10 +243,7 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             return Ok(None);
         };
         let rows = view::anchors(self.a, &self.rid(), &self.nid(), &info).await?;
-        let device_rows: Vec<_> = rows
-            .into_iter()
-            .filter(charter_core::is_device_row)
-            .collect();
+        let device_rows: Vec<_> = rows.into_iter().filter(head_model_row).collect();
         if device_rows.is_empty() {
             return Ok(None);
         }
@@ -325,6 +329,17 @@ impl<'a, A: Arkiv> HeadPush<'a, A> {
             (true, Some(v)) => Some(v),
             _ => Box::pin(self.own_v2(state)).await?,
         };
+        if v2
+            .as_ref()
+            .and_then(|v| v.device(&self.me()))
+            .is_some_and(|d| d.revoked.is_some())
+        {
+            return Err(SyncError::coded(
+                ErrorCode::DeviceRevoked,
+                "the identity revoked this machine's device for this repo; remove device/seed \
+                 to get a new device key, then push again",
+            ));
+        }
         let prev = match &v2 {
             Some(v) => self.prev(v, state).await?,
             None => None,

@@ -1,14 +1,15 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
-<div id="live" data-live="push">
+<div id="live" data-live="push" data-list>
 {% if days.is_empty() %}<section class="empty"><p>No commits.</p></section>{% endif %}
 {% for d in days %}
-<h2 class="day">{{ d.date }}</h2>
-<div class="box"><table class="list commits" data-list><tbody>
-{% for c in d.commits %}<tr data-row data-copy="{{ c.oid }}"><td><a href="/r/{{ r.hex }}/commit/{{ c.oid }}">{{ c.subject }}</a><div class="dim">{{ c.author }}</div></td><td class="num"><code title="{{ c.oid }}">{{ self.short(c.oid.as_str()) }}</code></td></tr>
+<h2 class="h2 sec">{{ d.date }}</h2>
+<ul class="rows">
+{% for c in d.commits %}<li data-row data-copy="{{ c.oid }}"><a class="hash" href="/r/{{ r.hex }}/commit/{{ c.oid }}" title="{{ c.oid }}">{{ self.short(c.oid) }}</a><a class="t" href="/r/{{ r.hex }}/commit/{{ c.oid }}">{{ c.subject }}</a><p class="meta"><span>{{ c.author }}</span><span>{{ self.age(c.time) }}</span></p></li>
 {% endfor %}
-</tbody></table></div>
+</ul>
 {% endfor %}
 <nav class="pager">{% if page > 1 %}<a rel="prev" href="?page={{ page - 1 }}">Newer</a>{% endif %}{% if next %}<a rel="next" href="?page={{ page + 1 }}">Older</a>{% endif %}</nav>
 </div>

@@ -18,8 +18,10 @@ async fn repo_list_shows_the_synced_repo_verified() {
         h.contains(&format!("/r/{}", f.hex)) && h.contains(">demo<"),
         "{h}"
     );
-    assert!(h.contains("b-verified") && h.contains("Verified"));
-    assert!(h.contains("block <code>"), "last push block");
+    assert!(h.contains("sealmini verified") && h.contains("Verified"));
+    assert!(h.contains("Updated <time title=\""), "last push, as a time");
+    assert!(!h.contains("block <code>"), "no bare block number");
+    assert!(h.contains("1 issue, 1 patch<"), "counted at sync: {h}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -27,7 +29,11 @@ async fn empty_home_lists_no_repos() {
     let d = tempfile::tempdir().expect("tmp");
     let r = send(app_for(d.path()), req("/")).await;
     assert_eq!(r.status, StatusCode::OK);
-    assert!(r.text().contains("No repos in this"), "{}", r.text());
+    assert!(
+        r.text().contains("No repositories on this computer yet"),
+        "{}",
+        r.text()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -41,7 +47,11 @@ async fn repo_home_has_readme_refs_clone_and_panel() {
         h.contains("refs/tags/v1") || h.contains(">v1<"),
         "tags listed"
     );
-    assert!(h.contains(short(&f.main)) && h.contains("Delegate"));
+    assert!(h.contains(short(&f.main)) && h.contains("Maintainers"));
+    assert!(
+        !h.contains("Delegate"),
+        "plain words outside Technical details"
+    );
     assert!(h.contains("id=\"verify\"") && h.contains("ML-DSA-65"));
     assert!(h.contains("README.md") && h.contains("src/"), "root tree");
     // Also reachable by the z-base58 form of the rid.
@@ -120,7 +130,7 @@ async fn log_groups_commits_and_pages() {
         h.find("fix:").expect("a") < h.find("feat: first").expect("b"),
         "newest first"
     );
-    assert!(h.contains("class=\"day\"") && !h.contains("rel=\"next\""));
+    assert!(h.contains("<h2 class=\"h2 sec\">") && !h.contains("rel=\"next\""));
     let h = page(&format!("/r/{}/log/main?page=2", f.hex)).await;
     assert!(h.contains("No commits.") && h.contains("rel=\"prev\""));
 }
@@ -130,32 +140,38 @@ async fn commit_shows_message_anchors_and_collapsible_diff() {
     let f = fixture();
     let h = page(&format!("/r/{}/commit/{}", f.hex, f.main)).await;
     assert!(h.contains("fix: &#60;smaller&#62; main"));
-    assert!(h.contains("<details class=\"file box\" open") && h.contains("src/main.rs"));
+    assert!(h.contains("<details class=\"file\" open") && h.contains("src/main.rs"));
     assert!(
         h.contains("<tr class=a>") && h.contains("<tr class=d>"),
         "added and removed lines"
     );
     assert!(
-        h.contains("Reachable from") && h.contains("refs/<wbr>heads/<wbr>main"),
+        h.contains("Pushed by")
+            && h.contains("<code>main</code>")
+            && h.contains("<code>refs/heads/main</code>"),
         "anchored by alice's head"
     );
     assert!(h.contains("unsigned"), "no git signature");
     let h = page(&format!("/r/{}/commit/{}", f.hex, f.first)).await;
-    assert!(h.contains("The body of the first commit.") && h.contains("root commit"));
+    assert!(h.contains("The body of the first commit.") && h.contains("this is the first commit"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn issues_fold_into_a_closed_thread_with_sanitized_bodies() {
     let f = fixture();
     let h = page(&format!("/r/{}/issues", f.hex)).await;
-    assert!(h.contains("Crash on &#60;b&#62;start&#60;/b&#62;") && h.contains("s-closed"));
+    assert!(
+        h.contains("Crash on &#60;b&#62;start&#60;/b&#62;")
+            && h.contains("<span class=\"chip\">closed</span>")
+    );
     assert!(h.contains("1 comment"));
     let h = page(&format!("/r/{}/issues/{}", f.hex, f.issue)).await;
     assert!(h.contains("<strong>crashes</strong>") && !h.contains("<script>x()"));
     assert!(h.contains("seen it too") && h.contains("<b>closed</b>"));
     assert!(
-        h.contains("bounty") && h.contains("reason"),
-        "other payload fields"
+        h.contains("Bounty: <span title=\"0.000000000000000005 tGLM\">5 wei</span>")
+            && h.contains("Closed as fixed"),
+        "payload fields as phrases"
     );
     let r = get(&format!("/r/{}/issues/{}", f.hex, "0".repeat(64))).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
@@ -165,9 +181,13 @@ async fn issues_fold_into_a_closed_thread_with_sanitized_bodies() {
 async fn patches_show_revisions_and_reviews() {
     let f = fixture();
     let h = page(&format!("/r/{}/patches", f.hex)).await;
-    assert!(h.contains("Fix the crash") && h.contains("s-open"));
+    assert!(h.contains("Fix the crash") && h.contains("<span class=\"chip\">merged</span>"));
+    assert!(
+        h.contains("merged into main"),
+        "inferred from the default branch"
+    );
     let h = page(&format!("/r/{}/patches/{}", f.hex, f.patch)).await;
-    assert!(h.contains("rev 1") && h.contains(short(&f.main)));
+    assert!(h.contains("main already contains its latest commit") && h.contains(short(&f.main)));
     assert!(h.contains("Reviews") && h.contains("<b>approved</b>"));
 }
 
@@ -175,9 +195,9 @@ async fn patches_show_revisions_and_reviews() {
 async fn releases_list_artifacts_and_program_verdict() {
     let f = fixture();
     let h = page(&format!("/r/{}/releases", f.hex)).await;
-    assert!(h.contains(">v1 ") && h.contains("demo.tgz") && h.contains("abababa"));
+    assert!(h.contains("<h2>v1</h2>") && h.contains("demo.tgz") && h.contains("abababa"));
     assert!(
-        h.contains("not tracked by the program"),
+        h.contains("not tracked by the rules"),
         "bounty.rhai has no releases"
     );
 }
@@ -222,11 +242,11 @@ async fn a_cached_repo_before_its_first_ui_sync_is_pending() {
     assert_eq!(r.status, StatusCode::OK);
     let h = r.text();
     assert!(
-        h.contains("vp-pending") && h.contains("No verified commits"),
+        h.contains("seal pending") && h.contains("No verified commits"),
         "{h}"
     );
     let r = send(app_for(d.path()), req(&format!("/r/{hex}/issues"))).await;
-    assert!(r.text().contains("No issues among the verified ops."));
+    assert!(r.text().contains("No issues yet"));
 }
 
 /// Regression for the repo-home p99 spike: a page never waits on the lock a sync round or
@@ -267,7 +287,7 @@ async fn pages_render_while_a_round_holds_the_lock_and_rewrites_the_caches() {
                 .expect("a page must not wait on the repo lock");
             assert_eq!(r.status, StatusCode::OK, "{p}");
             let t = r.text();
-            assert!(t.contains(want) && t.contains("vp-verified"), "{p}: {t}");
+            assert!(t.contains(want) && t.contains("seal verified"), "{p}: {t}");
         }
     }
     stop.store(true, Ordering::Relaxed);

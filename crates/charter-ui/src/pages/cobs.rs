@@ -7,8 +7,29 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 
-use super::{App, Head, Layout, Repo, Theme, blocking, error_page, frame, html, open, short};
+use super::{App, Head, Layout, Pref, Repo, blocking, error_page, frame, html, open, short};
 use crate::fold::{self, Thread};
+use crate::gitread;
+use crate::prefs::Merged;
+
+/// Open patches whose latest head the default branch already contains read as merged,
+/// unless Settings asks for merge ops only. Local git only.
+fn infer_merged(r: &Repo, pref: &Pref, threads: &mut [Thread]) {
+    if pref.0.merged != Merged::Infer {
+        return;
+    }
+    let Some(main) = gitread::resolve(&r.git, r.view.as_ref(), &r.default_ref()) else {
+        return;
+    };
+    for t in threads.iter_mut().filter(|t| t.state == "open") {
+        if t.revisions
+            .last()
+            .is_some_and(|h| gitread::is_ancestor(&r.git, h, &main))
+        {
+            (t.state, t.inferred) = ("merged", true);
+        }
+    }
+}
 
 #[derive(Template)]
 #[template(path = "threads.html")]
@@ -18,12 +39,6 @@ pub struct Threads {
     /// `issues` or `patches`.
     pub kind: &'static str,
     pub threads: Vec<Thread>,
-}
-
-impl Threads {
-    pub fn short(&self, s: &str) -> String {
-        short(s)
-    }
 }
 
 #[derive(Template)]
@@ -57,9 +72,6 @@ impl ThreadPage {
     pub fn short(&self, s: &str) -> String {
         short(s)
     }
-    pub fn ago(&self, ms: &u64) -> String {
-        super::ago(*ms)
-    }
 }
 
 fn type_of(kind: &str) -> &'static str {
@@ -70,15 +82,18 @@ fn type_of(kind: &str) -> &'static str {
     }
 }
 
-fn list_page(app: &App, theme: &Theme, r: &Repo, kind: &'static str) -> Response {
+fn list_page(app: &App, pref: &Pref, r: &Repo, kind: &'static str) -> Response {
     let ops = r.ops();
-    let threads = fold::threads(&ops, type_of(kind), r.view.as_ref());
+    let mut threads = fold::threads(&ops, type_of(kind), r.view.as_ref());
+    if kind == "patches" {
+        infer_merged(r, pref, &mut threads);
+    }
     let title = if kind == "patches" {
         "Patches"
     } else {
         "Issues"
     };
-    let (mut l, head) = frame(app, theme, r, kind, title);
+    let (mut l, head) = frame(app, pref, r, kind, title);
     l.crumbs.push((String::new(), kind.to_owned()));
     html(&Threads {
         l,
@@ -88,20 +103,24 @@ fn list_page(app: &App, theme: &Theme, r: &Repo, kind: &'static str) -> Response
     })
 }
 
-fn thread_page(app: &App, theme: &Theme, r: &Repo, kind: &'static str, id: &str) -> Response {
+fn thread_page(app: &App, pref: &Pref, r: &Repo, kind: &'static str, id: &str) -> Response {
     let ops = r.ops();
-    let found = fold::threads(&ops, type_of(kind), r.view.as_ref())
+    let mut found: Vec<Thread> = fold::threads(&ops, type_of(kind), r.view.as_ref())
         .into_iter()
-        .find(|t| t.id == id);
-    let Some(t) = found else {
+        .filter(|t| t.id == id)
+        .collect();
+    if kind == "patches" {
+        infer_merged(r, pref, &mut found);
+    }
+    let Some(t) = found.pop() else {
         return error_page(
             app,
-            theme,
+            pref,
             StatusCode::NOT_FOUND,
             "No such thread among the verified ops.",
         );
     };
-    let (mut l, head) = frame(app, theme, r, kind, &t.title);
+    let (mut l, head) = frame(app, pref, r, kind, &t.title);
     l.crumbs
         .push((format!("/r/{}/{kind}", r.hex), kind.to_owned()));
     l.crumbs.push((String::new(), short(&t.id)));
@@ -113,33 +132,33 @@ fn thread_page(app: &App, theme: &Theme, r: &Repo, kind: &'static str, id: &str)
     })
 }
 
-async fn list(app: Arc<App>, theme: Theme, rid: String, kind: &'static str) -> Response {
-    blocking(move || match open(&app, &theme, &rid) {
-        Ok(r) => list_page(&app, &theme, &r, kind),
+async fn list(app: Arc<App>, pref: Pref, rid: String, kind: &'static str) -> Response {
+    blocking(move || match open(&app, &pref, &rid) {
+        Ok(r) => list_page(&app, &pref, &r, kind),
         Err(e) => e,
     })
     .await
 }
 
-async fn one(app: Arc<App>, theme: Theme, rid: String, id: String, kind: &'static str) -> Response {
-    blocking(move || match open(&app, &theme, &rid) {
-        Ok(r) => thread_page(&app, &theme, &r, kind, &id),
+async fn one(app: Arc<App>, pref: Pref, rid: String, id: String, kind: &'static str) -> Response {
+    blocking(move || match open(&app, &pref, &rid) {
+        Ok(r) => thread_page(&app, &pref, &r, kind, &id),
         Err(e) => e,
     })
     .await
 }
 
-pub async fn issues(State(a): State<Arc<App>>, t: Theme, Path(rid): Path<String>) -> Response {
+pub async fn issues(State(a): State<Arc<App>>, t: Pref, Path(rid): Path<String>) -> Response {
     list(a, t, rid, "issues").await
 }
 
-pub async fn patches(State(a): State<Arc<App>>, t: Theme, Path(rid): Path<String>) -> Response {
+pub async fn patches(State(a): State<Arc<App>>, t: Pref, Path(rid): Path<String>) -> Response {
     list(a, t, rid, "patches").await
 }
 
 pub async fn issue(
     State(a): State<Arc<App>>,
-    t: Theme,
+    t: Pref,
     Path((rid, id)): Path<(String, String)>,
 ) -> Response {
     one(a, t, rid, id, "issues").await
@@ -147,7 +166,7 @@ pub async fn issue(
 
 pub async fn patch(
     State(a): State<Arc<App>>,
-    t: Theme,
+    t: Pref,
     Path((rid, id)): Path<(String, String)>,
 ) -> Response {
     one(a, t, rid, id, "patches").await

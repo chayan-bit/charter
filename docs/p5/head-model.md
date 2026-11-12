@@ -54,8 +54,8 @@ DeviceBody = {
 - Because `C_N` creates it, deleting it or letting it expire trips N's P1 completeness check (`E_CONTROL_NOT_LIVE`), so a device cannot be hidden.
 - A device delegation is valid if it opens with layout version 2, its signature verifies under N's key, `body.rid = R`, and its creator is one of N's bind control addresses under the P1 creator rule.
 - The device key comes from its own seed (`device/seed`, outside `keys/`), not from the identity seed; the identity key only signs the delegation.
-- A device cannot be revoked on its own: there is no revoke entity, so a leaked device seed can sign heads for this identity until the identity itself is replaced by an identity revision (P1 section 3.5).
-  A machine that also holds `keys/` holds the identity key anyway, so in practice a lost machine means a lost identity key.
+- Until issue #27 a device could not be revoked on its own, so a leaked device seed could sign heads for this identity until the identity itself was replaced by an identity revision (P1 section 3.5); the identity now revokes a device with a revoke record (section 15).
+  A machine that also holds `keys/` holds the identity key anyway, so a lost machine with `keys/` still means a lost identity key.
 
 ### 4.2 Head (`head`)
 
@@ -86,7 +86,7 @@ Pack = [pack_id: bstr .size 32, pieces: [* [tx: bstr .size 32, sha256: bstr .siz
 - `base` is the merged oid this entry fast-forwards, signed by the writer, or empty when the entry creates the ref, deletes it or is not a fast-forward (section 8).
 - The head body has the byte cap of every signed body (`max_body_len`: 65,536 B minus the 3,417 B envelope, so 62,119 B), which its refs and piece list share.
   With sha1 oids and 20-byte names an entry is about 60 B (about 81 B for an entry updated by this body, which carries a base) and a piece about 70 B, so one device can list about 550 refs next to a full 256-piece list and about 900 with few pieces (DERIVED); the v1 refs entity held about 1,100 under the same cap.
-  A push past it fails with `E_REFS_TOO_LARGE` and writes nothing; moving an oversized ref list into a piece is not implemented (section 11).
+  Before format v4 a push past it failed with `E_REFS_TOO_LARGE` and wrote nothing; since then the writer keeps most entries in a ref table named by the signed body (section 14).
 - The writer sends a pack inline only when an upper bound of the body plus the 16 KiB of inline bytes fits one transaction (131,030 B); otherwise the pack goes as bulk pieces, so a large head never makes the head transaction too big.
 - `pack_id = SHA-256(pack bytes)`; a pack is the concatenation of its pieces in order; each piece is at most 65,536 B.
 - Body size (DERIVED): about 200 B of fixed fields, about 55 B per ref (about 77 B with a base), 34 B per snapshot manifest, about 70 B per piece, plus the 3,417 B envelope (44 B framing and the 3,373 B signature); a small repo's head is about 3.8 KiB.
@@ -154,8 +154,12 @@ The next body of the same device replaces every `stamp = 0` and every zero piece
 
 ### 5.5 Clone and fetch
 
-- Download, for every accepted head of every synced peer: the snapshot manifests (query by `ag.h`, creator `B_d`) and their chunks (P1 chunk paging, creator `B_d`), then the pieces of every pack not yet applied that a live ref of the merged view reaches.
-- A pack no live ref reaches is skipped with a warning when it cannot be indexed (its bases may have expired with an older snapshot); it is fetched again on the next fetch, a known waste for repos that delete many refs.
+- Download, for every accepted head of every synced peer: the snapshot manifests (query by `ag.h`, creator `B_d`) and their chunks (P1 chunk paging, creator `B_d`), then the pieces of every listed pack not yet applied (which objects a pack holds is known only once it is downloaded).
+- A pack that cannot be indexed (its thin bases may have left with a snapshot refresh) is skipped with a warning, and the connectivity check decides whether the live refs needed it.
+- When that peer then passes every check, the reader records the pack in `state.json` (`skipped_packs`), keyed by the `h` of every accepted head of the peer, and later fetches do not download it while those heads are unchanged (issue #25).
+  This is safe from local data alone: the same heads give the same merged live refs, those refs were complete without the pack when it was recorded, and the cache never drops their objects, so every check reaches the same verdict without the download.
+  Any new head of the peer drops the record: the pack is downloaded and tried once more, and recorded again if it still does not index.
+  A fresh clone has no record, so it still downloads such a pack once; marking packs unreachable in the signed head would avoid that, but changes the format and is not done.
 - Bulk pieces are fetched by `eth_getTransactionByHash`, inline pieces through the body transaction (section 5.4); every piece must match its sha256 in the signed head and every pack its `pack_id`.
 - Snapshots are indexed first, then packs with `index-pack --fix-thin`, retried in rounds while progress is made (thin packs only use bases of the same identity, section 7.2).
 - The connectivity check, the canonical-ref quorum and the program fold run on the merged refs exactly as on P1 refs.
@@ -279,6 +283,12 @@ Otherwise the push reports `E_LOST_RACE` (another device of the same identity wo
 - A copied `CHARTER_HOME` (two machines sharing one device seed) is the only way to get two writers of one head.
   Both sign from `C_d`, and each signs its head transaction at the confirmed tx count it read just before `entityNonce(C_d)`, so two concurrent head transactions carry the same nonce and only one can land; the other fails with `E_CONCURRENT_PUSH` and is never re-signed at the next nonce.
   A later push reads the landed head first and continues its chain.
+  A push refused this way after its bulk pieces landed has already paid for them, so the writer records where each bulk piece landed (`outgoing/bulk-pieces.json`, by the sha256 of its bytes) and the retry names those txs again instead of uploading (issue #26).
+  The retry reads each recorded tx back first and reuses it only if it was sent by this device's `B_d` and carries exactly that piece's bytes, which is what every reader will check; anything else is uploaded again.
+  In a private repo a piece is sealed under the epoch key, so the retry also seals an empty piece locally and reuses a landed one only if it was sealed in the same epoch; a piece from before a membership change is uploaded again under the new key, since a member removed in between could still open it.
+  Readers take piece bytes from calldata, live or not, so the 20-block lifetime of the piece entity does not bound the reuse; block-history retention does, as for every piece push.
+  Bulk pieces come from `B_d`, never from `C_d`, so reuse does not change `pieces_created` or the rollback rule; inline pieces travel in the refused head tx itself and never landed.
+  The record costs a first attempt one local file write and no round trip; a successful push deletes it.
   Clients before this rule signed at the pending nonce and could land a second head transaction behind a pending one; `C_d` then created more entities than the current body records and every reader fails with `E_CONTROL_NOT_LIVE`.
   The machine that sent the current body (it is the one recorded in its `sent_heads`) accepts that head anyway, with a warning, and its next push signs a body whose `pieces_created` matches the real `entityNonce(C_d)`, which every reader accepts again.
   Any other machine, including another copy of the same seed that sent a different body, keeps failing closed until that repair lands.
@@ -337,10 +347,13 @@ What remains noticeable: a snapshot push is slower and costs more (entity chunks
 
 Known limits not handled in v0.4.0:
 
-- A device's head holds at most about 550 to 900 refs (section 4.2); a migration or push past that fails with `E_REFS_TOO_LARGE` instead of moving the ref list into a piece.
-- A pack no live ref reaches that cannot be indexed is downloaded again on every fetch (section 5.5).
-- A copied `device/seed` makes two machines one device; they serialise on the confirmed nonce of `C_d`, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4).
-- Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can collide on the wallet nonce and one push fails with an RPC error; running it again succeeds.
+- Until format v4 a device's head held at most about 550 to 900 refs (section 4.2) and a push past that failed with `E_REFS_TOO_LARGE`; v4 moves the bulk of a large ref list into a ref table (section 14), which bounds a device at the table cap of 4 MiB stored (tens of thousands of refs).
+- A pack that cannot be indexed is downloaded once per change of the peer's heads, and by every fresh clone (section 5.5); until v0.5.0 it was downloaded on every fetch.
+- A copied `device/seed` makes two machines one device; they serialise on the confirmed nonce of `C_d`, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4); the retry reuses the bulk pieces the refused push landed.
+- Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can sign the same wallet nonce (issue #28).
+  After v0.5.0 the one that reaches the node second recovers instead of failing: when the node refuses its transfer with `replacement transaction underpriced` (the other transfer holds the nonce in the pool, MEASURED on Rabdi 2026-11-11) or `nonce too low` (it already landed), and the node does not hold the refused transfer, the client reads the wallet's pending nonce again and signs the transfer anew, up to four times; the prefund's wallet pipeline re-reads the nonce the same way.
+  The source of truth is the node's pending nonce, so clients with different retry timing never leave a gap; a transfer is only re-signed after the node confirmed it does not hold the first one, so nothing is sent twice.
+  Without a collision nothing changes: no extra read or transaction.
 
 ## 12. Measurements
 
@@ -451,3 +464,149 @@ PieceRun = [block: uint, index: uint, count: uint]
 | Head after a 2 MiB push (34 carried pieces) | +2,420 B per push | about +40 B | about -95k gas per push, growing to about -700k at 256 pieces |
 | Thin pack of 2 to 30 commits | 100% | 70 to 72% | -28 to -30% of piece gas |
 | Snapshot refresh (Charter's own repo) | 1.81 MB | 1.17 MB | -35% (-29% on top of the 13.3 pack settings) |
+
+## 14. Ref tables: heads past the body cap (issue #24, format v4)
+
+Status: designed 2026-11-11 on branch `fix/issues-batch-1`.
+Before it, a device whose refs did not fit the 62,119 B head body (about 550 to 900 refs, section 4.2) could not push at all: the push failed with `E_REFS_TOO_LARGE` and wrote nothing.
+
+### 14.1 Goal and budget
+
+- A head whose v3 body fits stays a v3 head, byte for byte: no new field, no new read, no new transaction, so every operation of the performance gate (`speed-and-cost.md` section 7) keeps its exact cost.
+- A device with more refs keeps most of them in a ref table stored as bulk pieces, named by hash from the signed head body, and lists only the entries that differ from the table inline.
+- A push that changes a few refs of a large device reuses the table and pays only for the changed entries, so a 5,000-ref device pushes at about the cost of a small device.
+- The table is rewritten only when the inline difference grows past a bound (14.3).
+
+### 14.2 Encoding
+
+```cddl
+HeadBodyV4 = {               ; HeadBodyV3 (13.1) plus field 12
+  12: RefTable,
+}
+RefTable   = [table_id: bstr .size 32, codec: uint, runs: [+ PieceRun], stamp: uint]
+TableBytes = [* RefEntry]    ; canonical CBOR, before the codec
+```
+
+- Signed with envelope kind code 14 and context `arkiv-git/head/v4`; the content hash is `H("head4", envelope)`; stored as `ag.kind = 'head'` with `ag.v = 4`, plus `ag.rid`, `ag.nid`, `ag.dev` and `ag.h` as in v3.
+- A v3 body never carries field 12 (minicbor omits the absent field, so v3 bytes are unchanged), and a v4 body always does.
+- `table_id = SHA-256(stored bytes)`, the concatenation of the table's pieces in order; `codec` is 0 (the stored bytes are `TableBytes`) or 1 (a brotli stream of them), as for packs (13.3).
+- The table's pieces are bulk pieces of `B_d`: every run has `block > 0` (never `PieceRun::HERE`), at most 64 piece transactions (4 MiB stored), and the decoded table is capped at 16 MiB, so a signed table bomb fails with `E_BAD_REFS`.
+- `TableBytes` follow the rules of 4.2 for a ref list: strictly ascending names, `counter >= 1`, oid and base lengths of field 11.
+- The effective refs of a v4 body are the table's entries, each table entry with `stamp = 0` taking the table's `stamp` instead, overlaid by the entries of field 7 by name (field 7 wins).
+  The effective list must pass every rule of 4.2, including `stamp <= at`; the table's own `stamp` must be at most `at`, and 0 means the block this body landed in, like an entry stamp.
+- The merge (5.3), the push re-check (7.3) and the program fold (section 8) read only effective refs, so a v4 head merges and folds exactly like a v3 head that listed the same entries.
+
+### 14.3 Writing
+
+The writer decides from the planned entries (7.1 step 3) before it builds the pack content:
+
+1. When the v3 body fits (an upper bound of the encoded refs, the carried packs and one new pack, with a 1 KiB margin, at most `max_body_len`), it writes v3 exactly as before.
+2. Else, when the previous head is v4, its table still lists no name the new entries dropped, and the entries that differ from the previous table (by every field, after its `stamp` substitution) encode to at most 16 KiB (about 250 entries), it reuses that table: the same `table_id`, `codec` and `runs`, with `stamp` made concrete (the previous body's landing block when it was 0), and field 7 lists only the differing entries.
+3. Else it writes a new table: every entry with an empty `base` goes into the table and the rest (the fast-forwards of this push, which carry their base, section 8) into field 7, with the table's `stamp` set to 0; when field 7 would still not fit, every entry goes into the table.
+   The table is compressed when that is smaller, cut into 64 KiB pieces and sent from `B_d` before the head tx, with the reuse of issue #26 (a retry names the pieces a refused attempt landed).
+
+- The pack choice of 13.1 (inline when the body plus 16 KiB fits one transaction) counts only the inline entries, so a reusing push of a large device keeps its small pack inline.
+- Moving between v3 and v4 changes `ag.v`, so that patch sets every attribute, as the migrating patch of 13.4 does; every other v4 patch sets only `ag.body` and `ag.h`.
+- A follow-up head (a body that landed late, 7.1) makes its stamps concrete as before, the table's `stamp` included.
+- The 16 KiB bound is a cost trade (DERIVED): 16 KiB of extra entries cost about 0.26M gas per push at 16 gas per calldata byte, while rewriting a 5,000-ref table (about 140 KB after brotli) costs about 2.5M gas, so the table is rewritten after at most about 10 pushes that each carry the maximum difference.
+
+### 14.4 Reading
+
+- Readers accept a v4 row like a v3 row (5.2), then read the table's pieces from calldata with `eth_getTransactionByBlockNumberAndIndex` (the pieces of `B_d` only), check `table_id`, decode under the cap and build the effective refs before the merge.
+  Pieces outlive their 20-block lifetime in block history, exactly as the packs since the snapshot do (11.3), so the table needs no keepalive.
+- Decoded tables are cached in memory by `table_id`, which is safe across devices and repos because the hash names the bytes.
+  The program fold keeps each walked v4 body without its table and each table once, by `table_id`, in `git/arkiv-head-bodies.json`.
+- Cost: a sync that meets a new or changed v4 head reads the table once per process (one parallel round of `tx_at` calls, about three for 5,000 refs); a v3 head costs nothing new.
+  shortcut: the table cache is per process, so a CLI fetch of a changed v4 head re-reads its table; persist it under the repo cache if large devices sync often.
+
+### 14.5 Old clients and migration
+
+- v0.5.0 meets `ag.kind = 'head'` with `ag.v = 4` from a tracked `C_d` as an unknown layout version and stops with `E_UNSUPPORTED_VERSION` (the path of 13.4); it never shows the inline difference as the device's refs.
+- v0.5.0 walking a body chain (section 8) back through a v4 body sees envelope kind code 14, which its calldata reader refuses, and stops with `E_NOT_LIVE` instead of folding partial refs.
+- Nothing migrates eagerly: a device switches to v4 on the first push whose refs no longer fit, and back to v3 when they fit again; repos whose devices stay under the cap never change format, so v0.5.0 keeps reading them.
+
+### 14.6 Security
+
+- Every table byte is covered by `table_id`, which the device signs, so a reader can neither be shown other refs nor have entries dropped.
+- The new kind code and context separate v4 signatures from v3: a v4 body can never be replayed as a v3 body that silently lacks its table.
+- The rollback rule (section 6) is unchanged: table pieces come from `B_d`, which `entityNonce(C_d)` does not count, exactly like bulk pack pieces.
+- A table whose pieces a node no longer serves makes that device's head unreadable (`E_NOT_LIVE`), as a missing pack piece does (11.3).
+
+## 15. Revoking a device (issue #27)
+
+Status: designed and implemented 2026-11-11 on branch `fix/issues-batch-1`.
+Before it, a leaked device seed could sign heads for its identity until the identity itself was replaced (4.1).
+
+### 15.1 Record
+
+```cddl
+RevokeBody = {
+  1: bstr .size 32,   ; rid
+  2: bstr .size 32,   ; d, the revoked device nid
+  3: uint,            ; seq of the last body of d that stays valid (0 when there is none)
+  4: bstr .size 32,   ; h of that body, zero when d never pushed a body that stays valid
+  5: bstr .size 32,   ; tx that carried that body, zero exactly when field 4 is zero
+}
+```
+
+- Signed by the identity key (envelope `signer = N`, envelope kind code 15, context `arkiv-git/revoke/v1`).
+- Stored as `ag.kind = 'anchor'` with `ag.v = 3`, plus `ag.rid`, `ag.nid = N`, `ag.dev = d`, `ag.h = H("revoke", envelope)` and `ag.seq = 2^64 - 1`, created by the identity's control address `C_N` with the maximum lifetime, exactly like the delegation (4.1).
+- Valid when it opens with layout version 3, its signature verifies under N's key, `body.rid = R`, and its creator is one of N's bind control addresses under the P1 creator rule.
+  A device key can therefore never revoke anything: it cannot sign as N, and its addresses are not N's control addresses.
+- The first valid record per device, in creation order, counts; later ones are ignored.
+
+### 15.2 The cut
+
+The record names the device's last valid body by seq, hash and landing tx, instead of a block.
+
+- Readers take that body from the calldata of field 5 (one `eth_getTransactionByHash` with its receipt, the read of the program fold, section 8), check that the tx came from `C_d` and succeeded, that the body is signed by d, and that its hash and seq match fields 3 and 4; anything else is `E_BAD_REFS`.
+- That body is the device's head for the merge, the listing, the packs and the program fold, whatever the head entity says now; the head entity, its rows and `entityNonce(C_d)` are no longer read for a revoked device.
+- So the device's earlier writes stay valid and every later one is dropped: bodies the device signs after the cut, and also bodies that landed between the cut and the revoke.
+- A block cut ("heads created before the revocation block stay valid") would leave two holes, so the record names the body:
+  1. A compromised device racing the revoke lands its forged body before the revoke's block, and that body would stay valid.
+  2. Readers would have to find the last body before the block by walking calldata back from the head entity, which the key holder can patch to a body whose `prev_tx` leads nowhere.
+- The revoker signs the cut from its own fresh view of the device (`chart device revoke` syncs first), so in the common case, with no race, the cut is exactly the last body before the revocation block.
+
+### 15.3 Edge cases
+
+- Revoke racing a push from the revoked device: whichever lands first, the device's state is the body the identity named; a racing body is dropped even if it landed earlier, and the device's own client cannot repair past the cut (its pushes are refused, 15.4).
+- A compromised device revoking the others: impossible, a revoke needs N's signature and a `C_N` creator (15.1).
+- A holder of `keys/` holds N's key anyway, so a lost machine with `keys/` is a lost identity, as before (4.1); revoke handles a lost device seed.
+- Re-delegating after a revoke: a revoked device nid stays revoked for the repo, also if it is delegated again; the machine gets a new device key by removing its `device/seed`, and its next push delegates the new key.
+- The rollback rule (section 6): the record pins the cut body by hash and the record itself is a `C_N` entity under N's completeness check, so neither hiding newer bodies nor hiding the record passes; the bracket is no longer needed for that device.
+- The over-claim residual (section 6): a revoke also ends it, because an over-claiming body after the cut is never read again, and creates from `C_d` no longer fail anyone's check; before revoke records the only remedy was a new identity.
+- A device that never pushed: fields 3 to 5 are zero and the device contributes nothing.
+- The snapshot of the cut body: its chunks and manifest are entities of the revoked device's addresses, which the key holder can delete, so a clone may lose them; another device of the identity pushing afterwards covers every live object again.
+  Pieces are read from block history and cannot be deleted.
+
+### 15.4 Writing and commands
+
+- `chart device list <repo>`: every delegated device of this machine's identity in the repo: nid, its control and bulk addresses, the seq of its head, and `revoked at seq ...` or `this machine`.
+- `chart device revoke <repo> <device>`: needs `keys/` (the identity key); syncs the repo, takes the device's current head as the cut, signs the record and sends it from `C_N`; it refuses this machine's own device (remove `device/seed` first, or revoke from another machine) and a device that is already revoked.
+  When the sync fails closed with `E_CONTROL_NOT_LIVE` (a stolen `C_d` creating outside head txs, section 6), the cut is the device's head this machine last verified (its local mark), found through the recorded landing or the block of the mark; a machine that never verified a head of that device cannot revoke it this way and says so.
+- A push from a revoked device fails with `E_DEVICE_REVOKED` before it sends anything.
+
+### 15.5 Cost
+
+- No read is added for repos without a revoke: the records ride the anchor query that already returns the delegations, and the gate (`speed-and-cost.md` section 7) is unchanged.
+- A revoked device costs one calldata read per sync (the cut body) instead of its head query and nonce read, in the same parallel step.
+- The revoke itself is one transaction from `C_N` with one anchor create (about the cost of a delegation).
+
+### 15.6 Old clients
+
+- v0.5.0 reads every anchor of a tracked `C_N`; a revoke record is an anchor with layout version 3, which it does not know, so it stops with `E_UNSUPPORTED_VERSION` instead of trusting the revoked device's new heads.
+
+### 15.7 Private repos
+
+- In a private repo a device is also an MLS leaf, and since v0.6.0 the leaf names its device: the MLS credential is `nid || device`, and the leaf binding (the member's composite signature in the key package) covers the device too, so a revoke record maps to exactly one leaf.
+- Removing that leaf is an explicit, paid write by an admin, never a side effect of a sync.
+  `chart device revoke` by an admin removes it at once; otherwise an admin runs `chart member sync --repo R`, or confirms the priced "Remove from the group" write that `chart ui` shows on the repo page, and both print or show the cost.
+  An admin's refresh only counts the revoked leaves still in the group, from the revoke records that arrive in its commit query, so finding them costs no query and sends nothing.
+  The removal rotates the epoch key and the id-key generation, as a member removal does; the member keeps its role and its other devices.
+  An admin's own revoked device is removed by its remaining device.
+  Two admins racing make one removal: each leaves its commit pending, and its next refresh merges it only if it is the first valid commit for that epoch, else drops it and applies the other (docs/p2/private-repos.md, "Pending commits").
+- The revoked device's heads after the cut are ignored from the revoke on (15.2), before the leaf removal lands.
+  Until the removal lands it can still decrypt new rows, and `chart device revoke` prints a note saying so, with the command that ends it.
+- A revoke stops a device seed, not an identity: a machine that also held `keys/` holds N's key (15.3), so it can still sign as N, revoke N's other devices and read what N can.
+  `chart device revoke` prints this warning in public and private repos; the recovery is removing the identity and starting a new one (docs/p2/private-repos.md, "Lost or stolen machine").
+- Leaves made before v0.6.0 name no device; `chart member list` marks them, and removing the member and adding its remaining devices again makes them revocable one by one (docs/p2/private-repos.md, "Revoked devices").

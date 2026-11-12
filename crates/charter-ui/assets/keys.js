@@ -1,4 +1,5 @@
-// Keyboard map of docs/p6/ui-design.md section 6, and the theme toggle.
+// Keyboard map of docs/p6/ui-design.md section 6, the theme toggle (saved through
+// POST /settings/theme), copy buttons and popover closing.
 // Every action is also a plain link, so pages read the same with JavaScript off.
 (function () {
   "use strict";
@@ -51,6 +52,8 @@
     if (k === "Escape") {
       var cancel = send && send.querySelector("a.btn");
       if (cancel) { cancel.click(); return; }
+      var pops = d.querySelectorAll("details.pop[open]");
+      if (pops.length) { closePops(null); return; }
       var dlg = d.getElementById("help");
       if (dlg && dlg.open) dlg.close();
       if (t.blur) t.blur();
@@ -85,20 +88,48 @@
     if (t && t.tagName === "DETAILS") t.open = true;
     var nav = d.querySelector(".tabs"), a = nav && nav.querySelector("[aria-current]");
     if (a) nav.scrollLeft = a.offsetLeft - (nav.clientWidth - a.offsetWidth) / 2;
+    if (nav && !nav.dataset.fade) {
+      nav.dataset.fade = "1";
+      nav.addEventListener("scroll", function () { fade(nav); }, { passive: true });
+    }
+    fade(nav);
   }
-  function copyFrom(b) {
-    var src = d.getElementById(b.getAttribute("data-copy-from")), label = b.textContent;
-    if (!src || !navigator.clipboard) return;
-    navigator.clipboard.writeText(src.value).then(function () {
-      b.textContent = "Copied";
-      setTimeout(function () { b.textContent = label; }, 1200);
+  // The tab bar fades its right edge only while more tabs sit past it.
+  function fade(nav) {
+    if (nav) nav.classList.toggle("more", nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 1);
+  }
+  function theme(b) {
+    var next = { "": "light", light: "dark", dark: "" }[root.getAttribute("data-theme") || ""];
+    var name = next || "system";
+    if (next) root.setAttribute("data-theme", next); else root.removeAttribute("data-theme");
+    var use = b.querySelector("use");
+    if (use) use.setAttribute("href", use.getAttribute("href").replace(/#i-.*$/,
+      "#i-" + { system: "circle-half", light: "sun", dark: "moon" }[name]));
+    b.setAttribute("aria-label", "Theme: " + name + ". Change");
+    var radio = d.querySelector("input[name=theme][value=" + name + "]");
+    if (radio) radio.checked = true;
+    var csrf = d.querySelector("meta[name=csrf-token]");
+    fetch("/settings/theme", {
+      method: "POST", credentials: "same-origin",
+      headers: { "x-csrf-token": csrf ? csrf.content : "", "content-type": "application/x-www-form-urlencoded" },
+      body: "theme=" + name
+    }).catch(function () {});
+  }
+  function copyBtn(b) {
+    var t = b.getAttribute("data-copy"), use = b.querySelector("use");
+    if (!t || !navigator.clipboard) return;
+    navigator.clipboard.writeText(t).then(function () {
+      var was = use && use.getAttribute("href");
+      if (use) use.setAttribute("href", was.replace(/#i-.*$/, "#i-check"));
+      b.setAttribute("data-copied", "");
+      setTimeout(function () { if (use) use.setAttribute("href", was); b.removeAttribute("data-copied"); }, 1200);
     });
   }
-
-  function theme() {
-    var next = { "": "light", light: "dark", dark: "" }[root.getAttribute("data-theme") || ""];
-    if (next) root.setAttribute("data-theme", next); else root.removeAttribute("data-theme");
-    d.cookie = "theme=" + (next || "system") + "; Path=/; SameSite=Strict; Max-Age=31536000";
+  // One popover at a time; a click outside closes it.
+  function closePops(keep) {
+    Array.prototype.forEach.call(d.querySelectorAll("details.pop[open]"), function (p) {
+      if (p !== keep && !p.contains(keep)) p.open = false;
+    });
   }
 
   d.addEventListener("keydown", key);
@@ -106,12 +137,13 @@
     var t = e.target, ln = t.closest && t.closest(".blob td.ln");
     if (ln) { location.hash = ln.parentNode.id; return; }
     if (t.closest && t.closest("[data-dismiss]")) { t.closest(".toast").classList.add("gone"); return; }
-    var b = t.closest && t.closest("[data-help], [data-theme-toggle], [data-copy-from]");
+    closePops(t.closest ? t.closest("details.pop") : null);
+    var b = t.closest && t.closest("[data-help], [data-theme-toggle], button[data-copy]");
     if (t.matches && t.matches("input[readonly]")) t.select();
     if (!b) return;
-    if (b.hasAttribute("data-copy-from")) copyFrom(b);
+    if (b.hasAttribute("data-copy")) copyBtn(b);
     else if (b.hasAttribute("data-help")) d.getElementById("help").showModal();
-    else theme();
+    else theme(b);
   });
   // A confirmed toast hides after 6 s unless hovered or focused; a failed one stays.
   function toast() {
@@ -126,6 +158,7 @@
   }
   d.addEventListener("htmx:afterSettle", function () { cur = -1; arrive(); toast(); });
   window.addEventListener("hashchange", arrive);
+  window.addEventListener("resize", function () { fade(d.querySelector(".tabs")); });
   arrive();
   toast();
 })();

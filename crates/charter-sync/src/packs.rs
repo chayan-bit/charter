@@ -133,7 +133,7 @@ pub async fn download<A: Arkiv>(
 ) -> Result<()> {
     let filter = chunk_filter(rid, &m.pack_id, bulk);
     let n = chunk_count(m.size);
-    let mut file = std::fs::File::create(out).map_err(|e| SyncError::io(out.display(), e))?;
+    let mut file = crate::repo::create_owner_only(out)?;
     let starts: Vec<u64> = (0..n).step_by(PAGE as usize).collect();
     for window in starts.chunks(PARALLEL_PAGES) {
         let pages = window.iter().map(|&s| {
@@ -194,7 +194,7 @@ fn decode_in_place(m: &ManifestBody, path: &Path) -> Result<()> {
     if !pack.ends_with(&m.trailer) {
         return Err(bad(m, "trailer does not match the manifest"));
     }
-    std::fs::write(path, &pack).map_err(err)
+    crate::repo::write_owner_only(path, &pack)
 }
 
 /// Reads chunk `i` of a pack file (for uploads; files can be 100 MiB, so no full read).

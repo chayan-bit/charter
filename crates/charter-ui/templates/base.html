@@ -1,42 +1,56 @@
-<!doctype html>
-<html lang="en"{% if !l.theme.is_empty() %} data-theme="{{ l.theme }}"{% endif %}>
+{% import "macros.html" as m %}<!doctype html>
+<html lang="en"{% if !l.theme.is_empty() %} data-theme="{{ l.theme }}"{% endif %}{% if l.sysfont %} class="sysfont"{% endif %}>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyCacheSize":0}'>
 <meta name="csrf-token" content="{{ l.csrf }}">
-<title>{{ l.title }} - charter</title>
+<title>{{ l.title }} - Charter</title>
 <link rel="stylesheet" href="/assets/app.css?v={{ l.v }}">
+<link rel="icon" href="/assets/favicon.svg?v={{ l.v }}" type="image/svg+xml">
 <script src="/assets/htmx.min.js?v={{ l.v }}" defer></script>
 <script src="/assets/keys.js?v={{ l.v }}" defer></script>
 <script src="/assets/live.js?v={{ l.v }}" defer></script>
 </head>
 <body hx-boost="true">
 <a class="skip" href="#main">Skip to content</a>
-<header class="top"><div class="bar">
-<a class="mark" href="/" data-go="h">charter</a>
-<nav class="crumbs" aria-label="Breadcrumb">{% for (href, label) in l.crumbs %}{% if loop.index0 + 2 == l.crumbs.len() && l.crumbs.len() > 2 %}<span class="ell" aria-hidden="true">/ &hellip;</span>{% endif %}<span class="sep{% if loop.index0 + 2 < l.crumbs.len() %} skip-m{% endif %}">/</span>{% if href.is_empty() %}<span aria-current="page">{{ label }}</span>{% else %}<a{% if loop.index0 + 2 < l.crumbs.len() %} class="skip-m"{% endif %} href="{{ href }}">{{ label }}</a>{% endif %}{% endfor %}</nav>
-<span class="grow"></span>
-<button type="button" class="btn js" data-theme-toggle title="Theme: system, light, dark">theme</button>
-<button type="button" class="btn js" data-help title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
+<header class="top"><div class="wrap top-in">
+<a class="mark" href="/" data-go="h" aria-label="Charter, repositories">{{ m::i(l.v, "seal-check") }}Charter</a>
+<nav class="primary" aria-label="Main">
+<a href="/"{% if l.nav == "repos" %} aria-current="page"{% endif %}>Repositories</a>
+<a href="/wallet"{% if l.nav == "wallet" %} aria-current="page"{% endif %}>Wallet</a>
+<a href="/settings"{% if l.nav == "settings" %} aria-current="page"{% endif %}>Settings</a>
+</nav>
+<div class="top-right">
+<span class="sync" role="status" title="{{ l.sync.text }}"><i class="dot {{ l.sync.state }}" aria-hidden="true"></i><span class="txt">{{ l.sync.text }}</span></span>
+<span id="wallet-slot">{% include "wallet_chip_a.html" %}</span>
+<button type="button" class="btn icon-btn js" data-theme-toggle aria-label="Theme: {% match l.theme %}{% when "light" %}light{% when "dark" %}dark{% else %}system{% endmatch %}. Change">{% match l.theme %}{% when "light" %}{{ m::i(l.v, "sun") }}{% when "dark" %}{{ m::i(l.v, "moon") }}{% else %}{{ m::i(l.v, "circle-half") }}{% endmatch %}</button>
+<button type="button" class="btn icon-btn js help-btn" data-help aria-label="Keyboard shortcuts">{{ m::i(l.v, "question") }}</button>
+</div>
 </div></header>
-<main id="main" tabindex="-1"{% if !l.events.is_empty() %} data-events="{{ l.events }}"{% endif %}>
+{% for b in l.banners %}<div class="banner {{ b.kind }}" role="{% if b.kind == "bad" %}alert{% else %}status{% endif %}"><div class="wrap">{{ m::i(l.v, b.icon) }}<p><b>{{ b.lead }}</b> {{ b.text }}</p>{% if let Some((href, label)) = b.link %}<a href="{{ href }}">{{ label }}</a>{% endif %}</div></div>
+{% endfor %}
+<main id="main" class="wrap" tabindex="-1"{% if !l.events.is_empty() %} data-events="{{ l.events }}"{% endif %}>
 {% block main %}{% endblock %}
 </main>
-<dialog id="help" aria-labelledby="help-title">
+<nav class="botnav" aria-label="Main">
+<a href="/"{% if l.nav == "repos" %} aria-current="page"{% endif %}>{{ m::i(l.v, "folder") }}Repositories</a>
+<a href="/wallet"{% if l.nav == "wallet" %} aria-current="page"{% endif %}>{{ m::i(l.v, "wallet") }}Wallet</a>
+<a href="/settings"{% if l.nav == "settings" %} aria-current="page"{% endif %}>{{ m::i(l.v, "gear-six") }}Settings</a>
+</nav>
+<dialog id="help" class="help" aria-labelledby="help-title">
 <h2 id="help-title">Keyboard shortcuts</h2>
 <table class="keys">
-<tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>repo list</td></tr>
-<tr><td><kbd>g</kbd> <kbd>c</kbd> <kbd>l</kbd> <kbd>i</kbd> <kbd>p</kbd> <kbd>r</kbd> <kbd>v</kbd></td><td>then one of: code, log, issues, patches, releases, verification</td></tr>
-<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>move down, up</td></tr>
-<tr><td><kbd>Enter</kbd> <kbd>o</kbd></td><td>open the row</td></tr>
-<tr><td><kbd>u</kbd></td><td>up one level</td></tr>
-<tr><td><kbd>/</kbd></td><td>filter the list</td></tr>
-<tr><td><kbd>y</kbd></td><td>copy hash or path</td></tr>
-<tr><td><kbd>v</kbd></td><td>toggle verification</td></tr>
-<tr><td><kbd>x</kbd></td><td>collapse or expand a diff file</td></tr>
-<tr><td><kbd>Esc</kbd></td><td>close, blur</td></tr>
-<tr><td><kbd>?</kbd></td><td>this help</td></tr>
+<tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>Repositories</td></tr>
+<tr><td><kbd>g</kbd> then <kbd>c</kbd> <kbd>l</kbd> <kbd>i</kbd> <kbd>p</kbd> <kbd>r</kbd></td><td>Code, Commits, Issues, Patches, Releases</td></tr>
+<tr><td><kbd>g</kbd> <kbd>v</kbd></td><td>What was verified</td></tr>
+<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>Move down, up a list</td></tr>
+<tr><td><kbd>Enter</kbd> <kbd>o</kbd></td><td>Open the row</td></tr>
+<tr><td><kbd>u</kbd></td><td>Up one folder</td></tr>
+<tr><td><kbd>y</kbd></td><td>Copy the hash or path</td></tr>
+<tr><td><kbd>x</kbd></td><td>Fold or unfold a file in a diff</td></tr>
+<tr><td><kbd>Esc</kbd></td><td>Close</td></tr>
+<tr><td><kbd>?</kbd></td><td>This help</td></tr>
 </table>
 <form method="dialog"><button class="btn">Close</button></form>
 </dialog>

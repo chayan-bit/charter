@@ -53,7 +53,9 @@ impl Envelope {
         if body.len() > max {
             let len = body.len();
             return Err(match kind {
-                Kind::Refs | Kind::Head | Kind::HeadV3 => FormatError::RefsTooLarge { len, max },
+                Kind::Refs | Kind::Head | Kind::HeadV3 | Kind::HeadV4 => {
+                    FormatError::RefsTooLarge { len, max }
+                }
                 _ => FormatError::BodyTooLarge { len, max },
             });
         }

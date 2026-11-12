@@ -1,18 +1,19 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
 <div id="live" data-live="push">
 {% if let Some(u) = up %}<a class="up" rel="up" href="{{ u }}" hidden>Up</a>{% endif %}
-<div class="box">
-{% if let Some(c) = last %}<div class="last"><a href="/r/{{ r.hex }}/commit/{{ c.oid }}"><code>{{ self.short(c.oid.as_str()) }}</code></a> <span>{{ c.subject }}</span> <span class="dim">{{ c.author }}</span></div>{% endif %}
-{% if entries.is_empty() && up.is_none() %}<p class="empty pad">Empty directory.</p>{% else %}
-<table class="list tree" data-list>
-<tbody>
-{% if let Some(u) = up %}<tr class="upr"><td class="ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"><path d="M1.75 3.75h4.5l1.5 1.75h6.5v7.5h-12.5z"/></svg></td><td colspan="4"><a href="{{ u }}"><code>..</code></a> <span class="dim">parent directory</span></td></tr>{% endif %}
-{% include "entries.html" %}
-</tbody>
-</table>
-{% endif %}
+<div class="pathbar">
+<h2>{% for (href, label) in l.crumbs %}{% if loop.first %}<a href="{{ href }}">{{ r.name }}</a>{% else if href.is_empty() && !path.is_empty() %} / {{ label }}{% else if loop.index0 > 1 %} / <a href="{{ href }}">{{ label }}</a>{% endif %}{% endfor %}</h2>
+<div class="acts">{% let small = true %}{% include "picker.html" %}{% if !path.is_empty() %}<button class="btn btn-sm js" type="button" data-copy="{{ path }}">{{ m::i(l.v, "copy") }}Copy path</button>{% endif %}<a class="btn btn-sm" href="/r/{{ r.hex }}/log/{{ rev }}">History</a></div>
 </div>
+{% include "lastc.html" %}
+{% if entries.is_empty() && up.is_none() %}<section class="empty"><p>Empty folder.</p></section>{% else %}
+<ul class="files" data-list>
+{% if let Some(u) = up %}<li>{{ m::i(l.v, "folder") }}<a class="name" href="{{ u }}">..</a><span class="msg">parent folder</span><span></span><span class="sz"></span></li>{% endif %}
+{% include "entries.html" %}
+</ul>
+{% endif %}
 </div>
 {% endblock %}

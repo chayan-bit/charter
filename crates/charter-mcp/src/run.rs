@@ -12,6 +12,8 @@ pub struct Runner {
     pub bin: PathBuf,
     /// Extra variables for every child, on top of this process's environment.
     pub env: Vec<(String, String)>,
+    /// The working area: every path a tool takes must stay inside it (`confine`).
+    pub work: PathBuf,
 }
 
 /// A failed child as the tool error: `{code, message, exit}`, `code` one of the `E_*`
@@ -54,7 +56,13 @@ impl Runner {
             .map(PathBuf::from)
             .or(sibling)
             .unwrap_or_else(|| PathBuf::from("chart"));
-        Self { bin, env: vec![] }
+        // An unknown working directory leaves an empty path, which confines nothing in.
+        let work = std::env::current_dir().unwrap_or_default();
+        Self {
+            bin,
+            env: vec![],
+            work,
+        }
     }
 
     fn command(&self, program: &Path, dir: Option<&Path>) -> tokio::process::Command {

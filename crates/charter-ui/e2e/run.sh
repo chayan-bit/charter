@@ -24,7 +24,7 @@ mkdir -p "$work"
 server_pid=""
 cleanup() {
   [[ -n "$server_pid" ]] && kill "$server_pid" 2>/dev/null || true
-  [[ -z "$keep" && -d "$work" ]] && rm -rf -- "$work"
+  [[ -z "$keep" && -d "$work" ]] && rm -rf -- "$work" || true
 }
 trap cleanup EXIT
 
@@ -36,10 +36,11 @@ fi
 source "$work/fx/env.sh"
 export PATH="$CHART_BIN_DIR:$PATH"
 
-now() { if [[ -n "${EPOCHREALTIME:-}" ]]; then echo "${EPOCHREALTIME/,/.}"; else python3 -c 'import time; print(time.time())'; fi; }
 out="${E2E_OUT:-$here/out}"
 mkdir -p "$out"; rm -f "$out/first-page.json"
-t0="$(now)"
+# The clock every timing in e2e.py uses: monotonic, like the server's pacing, and system-wide
+# on macOS and Linux, so e2e.py can subtract it from its own.
+t0="$(python3 -c 'import time; print(time.monotonic())')"
 # Slow receipt polls so the e2e sees a write in its sent state before the fake mines it.
 CHARTER_MEM_POLL_MS=1500 chart ui "$RID" >"$work/server.out" 2>"$work/server.err" &
 server_pid=$!

@@ -21,9 +21,13 @@ pub enum Kind {
     Head,
     /// Format v3: the same head with compact piece runs and pack codecs (head-model 13).
     HeadV3,
+    /// Format v4: a v3 head whose refs overflow into a ref table (head-model 14).
+    HeadV4,
+    /// An identity's revoke record of one device (head-model 15).
+    Revoke,
 }
 
-const ALL: [Kind; 13] = [
+const ALL: [Kind; 15] = [
     Kind::Peer,
     Kind::Bind,
     Kind::Id,
@@ -37,6 +41,8 @@ const ALL: [Kind; 13] = [
     Kind::Device,
     Kind::Head,
     Kind::HeadV3,
+    Kind::HeadV4,
+    Kind::Revoke,
 ];
 
 impl Kind {
@@ -55,6 +61,8 @@ impl Kind {
             Kind::Device => 11,
             Kind::Head => 12,
             Kind::HeadV3 => 13,
+            Kind::HeadV4 => 14,
+            Kind::Revoke => 15,
         }
     }
 
@@ -75,6 +83,9 @@ impl Kind {
             Kind::Head => "head",
             // The content-hash tag; the entity is still stored as `ag.kind = 'head'`.
             Kind::HeadV3 => "head3",
+            Kind::HeadV4 => "head4",
+            // The content-hash tag; the record is stored as `ag.kind = 'anchor'`.
+            Kind::Revoke => "revoke",
         }
     }
 
@@ -96,6 +107,8 @@ impl Kind {
             Kind::Device => b"arkiv-git/device/v1",
             Kind::Head => b"arkiv-git/head/v1",
             Kind::HeadV3 => b"arkiv-git/head/v3",
+            Kind::HeadV4 => b"arkiv-git/head/v4",
+            Kind::Revoke => b"arkiv-git/revoke/v1",
         }
     }
 

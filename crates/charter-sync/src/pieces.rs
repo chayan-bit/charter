@@ -108,7 +108,7 @@ pub async fn head_landing<A: Arkiv>(
 const PARALLEL_TXS: usize = 8;
 
 /// The piece bodies of `rid` in `mined`, in op order, if a device address of `dev` sent it.
-fn bodies<A: Arkiv>(
+pub(crate) fn bodies<A: Arkiv>(
     a: &A,
     rid: &Rid,
     senders: &BTreeSet<Address>,
@@ -146,7 +146,7 @@ pub async fn download_pieces<A: Arkiv>(
     }
     let bytes = charter_core::codec::decode(pack.codec, &stored, MAX_PACK_SIZE)
         .map_err(|e| bad_pack(&pack.pack_id, &e.to_string()))?;
-    std::fs::write(out, &bytes).map_err(|e| SyncError::io(out.display(), e))
+    crate::repo::write_owner_only(out, &bytes)
 }
 
 async fn v2_bytes<A: Arkiv>(
@@ -195,7 +195,7 @@ pub fn positions(runs: &[PieceRun], here: &LandingJson) -> Vec<(u64, u32)> {
         .collect()
 }
 
-async fn run_bytes<A: Arkiv>(
+pub(crate) async fn run_bytes<A: Arkiv>(
     a: &A,
     rid: &Rid,
     senders: &BTreeSet<Address>,
@@ -360,6 +360,7 @@ mod tests {
             to: Some(charter_store::ARKIV_ADDRESS),
             block: 9,
             index: 0,
+            nonce: 0,
             input: charter_store::execute_calldata(&[op]),
         };
         let rows = crate::observe::to_observed(

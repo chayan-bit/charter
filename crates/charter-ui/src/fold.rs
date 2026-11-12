@@ -46,6 +46,8 @@ pub struct Thread {
     /// Patch heads in order: the create op's `head`, then each `revise` / `update`.
     pub revisions: Vec<String>,
     pub reviews: Vec<Entry>,
+    /// Shown merged because the default branch contains its head, with no merge op.
+    pub inferred: bool,
 }
 
 impl Thread {
@@ -161,6 +163,7 @@ fn new_thread(o: &VerifiedOp, p: &Value, view: Option<&RepoView>) -> Thread {
         entries: vec![entry(o, p, view)],
         revisions: p["head"].as_str().map(str::to_owned).into_iter().collect(),
         reviews: vec![],
+        inferred: false,
     }
 }
 

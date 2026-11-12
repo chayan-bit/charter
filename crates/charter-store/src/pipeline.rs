@@ -224,6 +224,14 @@ const HEAD_WAIT: Duration = Duration::from_millis(2_500);
 const SEND_ATTEMPTS: u32 = 3;
 /// A head and base fee seen this recently are reused instead of read again.
 const FEE_FRESH: Duration = Duration::from_secs(2);
+/// Times a top-up is signed at a freshly read wallet nonce after another sender of the
+/// wallet (another device of the identity) took the one it read (issue #28).
+const TOP_UP_SIGNS: usize = 4;
+
+/// The node refused a tx because another tx of the sender holds its nonce in the pool.
+fn nonce_held(e: &StoreError) -> bool {
+    matches!(e, StoreError::Rpc(m) if m.contains("replacement transaction underpriced"))
+}
 
 /// Sends jobs (each one `execute(ops)` tx) from one key. See the module docs.
 pub struct TxPipeline<'a, A: Arkiv> {
@@ -262,7 +270,13 @@ pub struct TxPipeline<'a, A: Arkiv> {
     /// A tx could not be sent or landed: send nothing more, let what is in flight land
     /// (gaps below it plugged), then fail with this.
     abort: Option<StoreError>,
+    /// Called with each tx of this sender right before it is first sent ([`TxPipeline::on_send`]).
+    on_send: Option<std::sync::Mutex<OnSend<'a>>>,
 }
+
+/// See [`TxPipeline::on_send`].
+type OnSend<'a> =
+    Box<dyn FnMut(&[Operation], &SignedTx, u64) -> Result<(), StoreError> + Send + 'a>;
 
 impl<'a, A: Arkiv> TxPipeline<'a, A> {
     pub fn new(arkiv: &'a A, signer: PrivateKeySigner, chain_id: u64, cfg: PipelineConfig) -> Self {
@@ -285,7 +299,22 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             reread: false,
             pinned: false,
             abort: None,
+            on_send: None,
         }
+    }
+
+    /// Calls `f` with the ops, the signed tx and a head read before it was signed (so the
+    /// tx can only be mined in a later block) of every tx this sender signs, right before
+    /// its first send: a split job's parts, a reverted job's resend at a new nonce, a plain
+    /// transfer and a gap-plugging transfer (no ops) included; a resend of the same bytes
+    /// keeps its hash. An error sends nothing of that window (or that plug) and fails the
+    /// run. For a caller that must record which tx takes a nonce before it can land.
+    pub fn on_send(
+        mut self,
+        f: impl FnMut(&[Operation], &SignedTx, u64) -> Result<(), StoreError> + Send + 'a,
+    ) -> Self {
+        self.on_send = Some(std::sync::Mutex::new(Box::new(f)));
+        self
     }
 
     /// Signs the first tx at exactly `nonce`, and fails with `NonceTooLow` instead of
@@ -666,6 +695,15 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             signed.push((job, body, p.gas, p.reused, tx));
         }
         self.nonce = Some(nonce);
+        if let Some(f) = &self.on_send {
+            let mut f = f.lock().unwrap_or_else(|p| p.into_inner());
+            for (_, body, .., tx) in &signed {
+                match body {
+                    Job::Execute(ops) => f(ops, tx, sent_at)?,
+                    Job::Transfer(..) => f(&[], tx, sent_at)?,
+                }
+            }
+        }
         let results = futures_util::future::join_all(
             signed.iter().map(|(.., tx)| send_retrying(self.arkiv, tx)),
         )
@@ -697,6 +735,8 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 Err(StoreError::Rpc(m)) if self.pinned && m.contains("underpriced") => {
                     stolen.push(f)
                 }
+                // Another sender of this key (a device sharing the wallet) took it.
+                Err(e) if nonce_held(&e) => stolen.push(f),
                 Err(e) => lost.push((f, e)),
             }
         }
@@ -785,7 +825,10 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
 
     /// Moves `amount` from the funder to the sender, or only `min` when the funder cannot
     /// spare `amount`, waits for it to land and returns what moved; fails with
-    /// `E_INSUFFICIENT_FUNDS` naming the funder when it cannot cover even `min`.
+    /// `E_INSUFFICIENT_FUNDS` naming the funder when it cannot cover even `min`. Another
+    /// device of the identity may top up from the same wallet at the same moment: a nonce
+    /// it took, from a transfer of ours the node never accepted, is read again and signed
+    /// anew, so nothing is sent twice and no nonce is left open.
     async fn top_up(&self, amount: U256, min: U256, base_fee: u128) -> Result<U256, StoreError> {
         let Some(funder) = &self.funder else {
             return Ok(U256::ZERO);
@@ -804,28 +847,46 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 have,
             });
         }
-        let params = TxParams {
-            nonce: self.arkiv.tx_count(funder.address()).await?,
-            to: self.address(),
-            value: amount,
-            input: Bytes::new(),
-            gas_limit: TRANSFER_GAS,
-            max_fee_per_gas: max_fee,
-            max_priority_fee_per_gas: self.cfg.tip,
-        };
-        let tx = SignedTx::sign(funder, self.chain_id, params)?;
+        let mut attempt = 1;
+        loop {
+            let params = TxParams {
+                nonce: self.arkiv.tx_count(funder.address()).await?,
+                to: self.address(),
+                value: amount,
+                input: Bytes::new(),
+                gas_limit: TRANSFER_GAS,
+                max_fee_per_gas: max_fee,
+                max_priority_fee_per_gas: self.cfg.tip,
+            };
+            let tx = SignedTx::sign(funder, self.chain_id, params)?;
+            match self.land_top_up(&tx).await {
+                Ok(true) => return Ok(amount),
+                Ok(false) => {
+                    return Err(StoreError::Reverted {
+                        tx: Some(tx.hash()),
+                        reason: "top-up transfer failed".into(),
+                    });
+                }
+                Err(e) if attempt < TOP_UP_SIGNS && self.taken(&tx, &e).await? => attempt += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Whether `e` says another sender took the nonce of `tx`, which never went out.
+    async fn taken(&self, tx: &SignedTx, e: &StoreError) -> Result<bool, StoreError> {
+        let nonce_gone = matches!(e, StoreError::NonceTooLow(_)) || nonce_held(e);
+        Ok(nonce_gone && !self.known(tx).await?)
+    }
+
+    /// Sends a signed top-up and waits for its receipt; whether it succeeded.
+    async fn land_top_up(&self, tx: &SignedTx) -> Result<bool, StoreError> {
         self.arkiv.send(tx.clone()).await?;
         let (mut sent_at, mut resends) = (self.arkiv.head().await?, 0);
         loop {
             tokio::time::sleep(self.cfg.poll).await;
             if let Some(r) = self.arkiv.receipt(tx.hash()).await? {
-                return match r.success {
-                    true => Ok(amount),
-                    false => Err(StoreError::Reverted {
-                        tx: Some(tx.hash()),
-                        reason: "top-up transfer failed".into(),
-                    }),
-                };
+                return Ok(r.success);
             }
             let head = self.arkiv.head().await?;
             if head >= sent_at + self.cfg.resend_after_blocks {
@@ -834,7 +895,9 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
                 }
                 (sent_at, resends) = (head, resends + 1);
                 match self.arkiv.send(tx.clone()).await {
-                    Ok(_) | Err(StoreError::NonceTooLow(_)) => {}
+                    Ok(_) => {}
+                    // Mined (its receipt not visible yet) or taken by another sender.
+                    Err(StoreError::NonceTooLow(_)) if self.known(tx).await? => {}
                     Err(e) => return Err(e),
                 }
             }
@@ -942,6 +1005,9 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             max_priority_fee_per_gas: tip,
         };
         let tx = SignedTx::sign(&self.signer, self.chain_id, params)?;
+        if let Some(f) = &self.on_send {
+            f.lock().unwrap_or_else(|p| p.into_inner())(&[], &tx, sent_at)?;
+        }
         match send_retrying(self.arkiv, &tx).await {
             Ok(()) => Ok(Some(InFlight {
                 job: PLUG,
@@ -1017,7 +1083,8 @@ async fn send_retrying<A: Arkiv>(a: &A, tx: &SignedTx) -> Result<(), StoreError>
     loop {
         match a.send(tx.clone()).await {
             Ok(_) => return Ok(()),
-            Err(StoreError::Rpc(_)) if attempt < SEND_ATTEMPTS => {
+            // A nonce another tx holds stays held until that tx lands: no point resending.
+            Err(e @ StoreError::Rpc(_)) if attempt < SEND_ATTEMPTS && !nonce_held(&e) => {
                 tokio::time::sleep(Duration::from_millis(200 << attempt)).await;
                 attempt += 1;
             }

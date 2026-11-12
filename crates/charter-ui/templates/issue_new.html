@@ -1,13 +1,14 @@
 {% extends "base.html" %}
+{% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
-<h2>New issue</h2>
+<h2 class="h2 sec">New issue</h2>
 {% if l.writes %}
 <form method="post" action="/r/{{ r.hex }}/write" class="fm">
 <input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="issue"><input type="hidden" name="back" value="/r/{{ r.hex }}/issues">
 <label for="i-title">Title</label><input id="i-title" name="title" required maxlength="256" autocomplete="off">
-<label for="i-body">Description <span class="dim">markdown</span></label><textarea id="i-body" name="body" rows="8"></textarea>
-<div class="acts"><a class="btn" href="/r/{{ r.hex }}/issues">Cancel</a><button class="btn primary" type="submit">Open issue</button></div>
+<label for="i-body">Description <span class="dim">Markdown supported</span></label><textarea id="i-body" name="body" rows="8"></textarea>
+<div class="acts"><a class="btn" href="/r/{{ r.hex }}/issues">Cancel</a><button class="btn btn-ink" type="submit">Open issue</button></div>
 </form>
 {% else %}<p class="off">{{ l.off() }}</p>{% endif %}
 {% endblock %}

@@ -7,7 +7,7 @@
 
 pub mod run;
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -114,33 +114,71 @@ pub struct ArkivGit {
     tool_router: ToolRouter<Self>,
 }
 
-fn url(repo: &str) -> String {
-    if repo.starts_with("arkiv::") {
-        repo.to_owned()
-    } else {
-        format!("arkiv::{repo}")
-    }
-}
-
 fn err(v: Value) -> String {
     v.to_string()
 }
 
-fn op_args(cmd: &str, repo: &str, ty: &str, action: &str, object: &Option<String>) -> Vec<String> {
-    let mut a: Vec<String> = ["op", cmd, "--repo", repo, "--type", ty, "--action", action]
-        .map(String::from)
-        .into();
-    if let Some(o) = object {
-        a.extend(["--object".into(), o.clone()]);
+/// A refused tool argument, shaped like a CLI usage failure.
+fn usage(msg: String) -> String {
+    err(serde_json::json!({"code": "usage", "message": msg, "exit": null, "stdout": ""}))
+}
+
+/// `arkiv::<rid>` for a bare or prefixed rid (`z` plus base58btc), else a usage error: the
+/// url reaches `git` as an argument.
+fn url(repo: &str) -> Result<String, String> {
+    let rid = repo.strip_prefix("arkiv::").unwrap_or(repo);
+    let b58 = |c: char| c.is_ascii_alphanumeric() && !"0OIl".contains(c);
+    match rid.len() > 1 && rid.starts_with('z') && rid.chars().all(b58) {
+        true => Ok(format!("arkiv::{rid}")),
+        false => Err(usage(format!("{repo:?} is not a repo url `arkiv::z...`"))),
     }
+}
+
+/// `p` as an absolute path inside the working area `work`. Tool arguments come from an agent
+/// that may be prompt-injected, so a path that starts with `-` (git would read an option),
+/// climbs with `..`, or resolves through symlinks outside the working area is refused.
+pub fn confine(work: &Path, p: &Path) -> Result<PathBuf, String> {
+    let bad = |why: &str| usage(format!("{}: {why}", p.display()));
+    if p.as_os_str().is_empty() || p.to_string_lossy().starts_with('-') {
+        return Err(bad("not a path"));
+    }
+    if p.components().any(|c| c == Component::ParentDir) {
+        return Err(bad("`..` is not allowed"));
+    }
+    let root = work
+        .canonicalize()
+        .map_err(|e| bad(&format!("working area {}: {e}", work.display())))?;
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    };
+    let real = abs
+        .ancestors()
+        .find(|a| a.exists())
+        .and_then(|a| a.canonicalize().ok())
+        .ok_or_else(|| bad("cannot be resolved"))?;
+    match real.starts_with(&root) {
+        true => Ok(abs),
+        false => Err(bad(&format!("outside the working area {}", root.display()))),
+    }
+}
+
+/// `--name=value`: a value can never be read as another option.
+fn opt(name: &str, value: &str) -> String {
+    format!("--{name}={value}")
+}
+
+fn op_args(cmd: &str, repo: &str, ty: &str, action: &str, object: &Option<String>) -> Vec<String> {
+    let mut a = vec!["op".into(), cmd.into(), opt("repo", repo), opt("type", ty)];
+    a.push(opt("action", action));
+    a.extend(object.iter().map(|o| opt("object", o)));
     a
 }
 
 fn with_payload(mut a: Vec<String>, parents: &[String], payload: &Value) -> Vec<String> {
-    for p in parents {
-        a.extend(["--parent".into(), p.clone()]);
-    }
-    a.extend(["--payload-json".into(), payload.to_string()]);
+    a.extend(parents.iter().map(|p| opt("parent", p)));
+    a.push(opt("payload-json", &payload.to_string()));
     a
 }
 
@@ -166,10 +204,12 @@ impl ArkivGit {
 
     #[tool(description = "Clone a Charter repo into a new local directory with git.")]
     pub async fn repo_clone(&self, Parameters(a): Parameters<CloneArgs>) -> ToolResult {
-        let parent = a.dir.parent().filter(|p| !p.as_os_str().is_empty());
-        let cwd = parent.map_or_else(|| PathBuf::from("."), PathBuf::from);
-        let args = ["clone", "-q", &url(&a.repo), &a.dir.to_string_lossy()].map(String::from);
-        self.runner.git(&cwd, &args).await.map_err(err)?;
+        let (url, dir) = (url(&a.repo)?, confine(&self.runner.work, &a.dir)?);
+        let args = ["clone", "-q", "--", &url, &dir.to_string_lossy()].map(String::from);
+        self.runner
+            .git(&self.runner.work, &args)
+            .await
+            .map_err(err)?;
         Ok(serde_json::json!({ "dir": a.dir }).to_string())
     }
 
@@ -178,9 +218,10 @@ impl ArkivGit {
         refs/heads/<branch> of the repo under this identity; returns {head} (the full commit sha)."
     )]
     pub async fn git_push(&self, Parameters(a): Parameters<PushArgs>) -> ToolResult {
+        let (url, dir) = (url(&a.repo)?, confine(&self.runner.work, &a.dir)?);
         let git = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
-            let dir = a.dir.clone();
+            let dir = dir.clone();
             async move { self.runner.git(&dir, &args).await.map_err(err) }
         };
         if let Some(m) = &a.message {
@@ -188,7 +229,7 @@ impl ArkivGit {
             git(&["commit", "-q", "-m", m]).await?;
         }
         let refspec = format!("HEAD:refs/heads/{}", a.branch);
-        git(&["push", "-q", &url(&a.repo), &refspec]).await?;
+        git(&["push", "-q", "--", &url, &refspec]).await?;
         let head = git(&["rev-parse", "HEAD"]).await?;
         Ok(serde_json::json!({ "head": head.trim() }).to_string())
     }
@@ -199,15 +240,10 @@ impl ArkivGit {
         type, action, parents, ts_ms, block, payload}. Filter by type, action and object."
     )]
     pub async fn op_list(&self, Parameters(a): Parameters<ListArgs>) -> ToolResult {
-        let mut args: Vec<String> = ["op", "list", "--json", "--repo", &url(&a.repo)]
-            .map(String::from)
-            .into();
-        if let Some(t) = &a.type_name {
-            args.extend(["--type".into(), t.clone()]);
-        }
-        if let Some(o) = &a.object {
-            args.extend(["--object".into(), o.clone()]);
-        }
+        let mut args = vec!["op".into(), "list".into(), "--json".into()];
+        args.push(opt("repo", &url(&a.repo)?));
+        args.extend(a.type_name.iter().map(|t| opt("type", t)));
+        args.extend(a.object.iter().map(|o| opt("object", o)));
         let out = self.runner.arkiv(&args).await.map_err(err)?;
         let ops: Vec<Value> = serde_json::from_str(&out).map_err(|e| e.to_string())?;
         let keep = |o: &Value| a.action.as_deref().is_none_or(|x| o["action"] == x);
@@ -216,7 +252,7 @@ impl ArkivGit {
 
     #[tool(description = "Sign and post one op as this agent's identity; returns {id}.")]
     pub async fn op_post(&self, Parameters(a): Parameters<PostArgs>) -> ToolResult {
-        let base = op_args("post", &url(&a.repo), &a.type_name, &a.action, &a.object);
+        let base = op_args("post", &url(&a.repo)?, &a.type_name, &a.action, &a.object);
         let out = self
             .runner
             .arkiv(&with_payload(base, &a.parents, &a.payload))
@@ -233,10 +269,14 @@ impl ArkivGit {
     pub async fn attach_proof(&self, Parameters(a): Parameters<AttachArgs>) -> ToolResult {
         let ty = a.type_name.as_deref().unwrap_or("xyz.arkiv.patch");
         let action = a.action.as_deref().unwrap_or("create");
-        let base = op_args("attach-proof", &url(&a.repo), ty, action, &a.object);
+        let base = op_args("attach-proof", &url(&a.repo)?, ty, action, &a.object);
+        let (receipt, public) = (
+            confine(&self.runner.work, &a.receipt)?,
+            confine(&self.runner.work, &a.public)?,
+        );
         let mut args = with_payload(base, &a.parents, &a.payload);
-        args.extend(["--receipt".into(), a.receipt.to_string_lossy().into()]);
-        args.extend(["--public".into(), a.public.to_string_lossy().into()]);
+        args.push(opt("receipt", &receipt.to_string_lossy()));
+        args.push(opt("public", &public.to_string_lossy()));
         let out = self.runner.arkiv(&args).await.map_err(err)?;
         Ok(id_json(&out))
     }
@@ -246,7 +286,11 @@ impl ArkivGit {
         rejected ops with reasons), accepted heads, rejected pushes and obligations."
     )]
     pub async fn program_status(&self, Parameters(a): Parameters<RepoArg>) -> ToolResult {
-        let args = ["program", "status", "--repo", &url(&a.repo)].map(String::from);
+        let args = [
+            "program".into(),
+            "status".into(),
+            opt("repo", &url(&a.repo)?),
+        ];
         self.runner.arkiv(&args).await.map_err(err)
     }
 
@@ -255,7 +299,7 @@ impl ArkivGit {
         and FLAG lines; a flagged ledger is a tool error with code `flagged`."
     )]
     pub async fn escrow_status(&self, Parameters(a): Parameters<RepoArg>) -> ToolResult {
-        let args = ["escrow", "audit", "--repo", &url(&a.repo)].map(String::from);
+        let args = ["escrow".into(), "audit".into(), opt("repo", &url(&a.repo)?)];
         self.runner.arkiv(&args).await.map_err(err)
     }
 }

@@ -97,6 +97,7 @@ impl Pred {
 pub enum OrderType {
     U64,
     Str,
+    Bytes32,
 }
 
 /// `ORDER BY field:type [DESC]`.
@@ -146,6 +147,7 @@ impl Query {
             let ty = match o.ty {
                 OrderType::U64 => "u64",
                 OrderType::Str => "str",
+                OrderType::Bytes32 => "bytes32",
             };
             let dir = if o.desc { "DESC" } else { "ASC" };
             let _ = write!(out, " ORDER BY {}:{ty} {dir}", field(&o.field)?);

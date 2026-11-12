@@ -4,10 +4,12 @@ mod anchor;
 mod cob;
 mod head;
 mod head_v3;
+mod head_v4;
 mod id;
 mod pack;
 mod peer;
 mod refs;
+mod revoke;
 
 pub use anchor::{AnchorBody, ManifestBody, Require};
 pub use cob::{CREATE, CobOpBody, MAX_ACTION, MAX_PAYLOAD, MAX_TYPE_NAME};
@@ -19,10 +21,15 @@ pub use head_v3::{
     HEAD_V3_LAYOUT_VERSION, HeadBodyV3, PackV3, PieceRun, head_patch_attributes,
     open_head_calldata, runs,
 };
+pub use head_v4::{
+    HEAD_V4_LAYOUT_VERSION, HeadBodyV4, MAX_TABLE_PIECES, MAX_TABLE_SIZE, RefTable, decode_table,
+    effective_refs, encode_table,
+};
 pub use id::{IdBody, ProgramPin};
 pub use pack::{Pack, PackPieces};
 pub use peer::{BindBody, IdAccBody, PeerBody};
 pub use refs::{RefEntry, RefsBody};
+pub use revoke::{REVOKE_LAYOUT_VERSION, RevokeBody};
 
 use crate::attrs::Attribute;
 use crate::types::{Hash32, Nid};
