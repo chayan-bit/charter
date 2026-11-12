@@ -574,8 +574,13 @@ pub async fn publish_epoch_keys<A: Arkiv>(
     rid: &Rid,
     epochs: std::ops::RangeInclusive<u64>,
 ) -> Result<Vec<Grant>> {
-    let _held = lock(&cfg.home).await?;
+    let held = lock(&cfg.home).await?;
     let (mut mls, ring) = member_ring_in(a, cfg, keys, rid).await?;
+    // The lock is kept for the sends only while a commit is pending, the one case a grant is
+    // recorded (`mls` saved); otherwise this run never saves, and a grant that takes a
+    // commit's nonce meanwhile is still found on chain ([`ready`]).
+    let group = hex::encode(&ring.group);
+    let _held = mls.pending.contains_key(&group).then_some(held);
     ring.require(&keys.nid(), Role::Admin)?;
     let roots = root_rows(a, &ring).await?.map(|r| r.0).unwrap_or_default();
     if !roots.contains(&keys.nid()) {
@@ -601,7 +606,6 @@ pub async fn publish_epoch_keys<A: Arkiv>(
         return Ok(grants);
     }
     // A grant at a pending commit's nonce is recorded, so its receipt settles the commit.
-    let group = hex::encode(&ring.group);
     let record = |_: &[charter_store::Operation], tx: &charter_store::SignedTx, _| {
         let Some(p) = mls.pending.get(&group).filter(|p| p.nonce == tx.nonce()) else {
             return Ok(());
