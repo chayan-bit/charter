@@ -61,8 +61,8 @@ def first_page():
     t0 = float(os.environ["E2E_T0"])
     cookie, *_ = session_cookie()
     t_cookie = time.time() - t0
-    deadline = time.time() + 30
-    while time.time() < deadline:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
         s, _, body, _ = get("/", cookie)
         m = re.search(rb"/r/([0-9a-f]{64})", body)
         if s == 200 and m:
@@ -397,8 +397,12 @@ def comment_to_confirm(page, issue_url, text):
 
 
 def comment_lands(cookie, issue_path, text, scope):
-    deadline = time.time() + 30
-    while time.time() < deadline and text.encode() not in get(issue_path, cookie)[2]:
+    # The server paces sync rounds on the monotonic clock, which stops while the machine sleeps.
+    # A wall-clock deadline would count those sleeps (lid-closed maintenance sleep, about 6.5 s
+    # in every 14 s) as waiting and fail a round that ran on time; Playwright timeouts already
+    # run on the monotonic clock.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and text.encode() not in get(issue_path, cookie)[2]:
         time.sleep(0.25)
     rec("the comment shows on the issue after a sync round", scope, text.encode() in get(issue_path, cookie)[2], text)
 
