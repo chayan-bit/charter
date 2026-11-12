@@ -52,6 +52,9 @@ pub enum Cmd {
     /// Collaborative-object ops: post one, list verified ones.
     #[command(subcommand)]
     Op(crate::op::OpCmd),
+    /// Git signing keys: claim an SSH key as this identity's, check a commit's signature.
+    #[command(subcommand)]
+    SigningKey(crate::signing::SigningCmd),
     /// Signed release records: publish one, verify one against the pinned program.
     #[command(subcommand)]
     Release(crate::release::ReleaseCmd),
@@ -546,6 +549,10 @@ pub fn run(cli: &Cli) -> Result<()> {
             Cmd::Ui(u) => ui_cmd(a, cfg, u).await,
             Cmd::Op(o) => {
                 crate::op::run(&backend::for_repo(&a, &cfg, &o.rid()?).await?, &cfg, o).await
+            }
+            Cmd::SigningKey(s) => {
+                let b = backend::for_repo(&a, &cfg, &s.rid()?).await?;
+                crate::signing::run(&b, &cfg, s).await
             }
             Cmd::Release(r) => {
                 let b = backend::for_repo(&a, &cfg, &r.rid()?).await?;

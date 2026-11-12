@@ -90,6 +90,22 @@ It walks the entities in Arkiv creation order and drops, never errors on, any op
 - `chart op list --repo <rid> [--object <id>] [--type <t>] [--json]` prints the verified ops in order, one line each, or one JSON array.
 - In JSON output, byte strings show as `{"$bytes": "<hex>"}`, non-text map keys as their JSON text, and integers outside the i64 and u64 ranges as decimal strings.
 
+## Signing keys and signed commits (issue #61)
+
+Git commits signed with an SSH Ed25519 key (`gpg.format = ssh`) are checked in process, from the commit object in the local cache, with no `ssh-keygen` or `gpg` on the read path.
+A signing-key claim names the Charter identity behind a key: an `xyz.arkiv.signing-key` create op with payload `{ key, sig }`.
+`key` is the `ssh-ed25519 <base64> [comment]` line, and `sig` is an armored SSH signature (OpenSSH `PROTOCOL.sshsig`) by that key under the namespace `charter-signing-key` over `charter signing key for <author nid hex>` and a newline.
+The op's composite signature says who claims, and `sig` proves the claimer holds the private key, so nobody can claim another person's key or replay someone else's proof.
+The first valid claim of a key in Arkiv order wins; a later claim of the same key is ignored, and a `revoke` op by the claimer on the claim object frees the key.
+Claims are per repo, like every op, and in a private repo they are sealed like any other op.
+A commit then shows one of: verified and signed by the claimer, a valid signature by an unclaimed key, a bad signature, not checked (OpenPGP, X.509 or an SSH key type other than Ed25519), or unsigned.
+OpenPGP is not checked because an in-process verifier (`pgp`, rPGP) would add a large dependency tree; `ssh-key` was not used because its stable release depends on another `ed25519-dalek` major version, so the SSHSIG check is about 80 lines on the `ed25519-dalek` and `sha2` already in the tree.
+
+- `chart signing-key claim --repo <rid> --key <private key file>` signs the claim with `ssh-keygen -Y sign`, checks it as every reader will, and posts it; it prints the op id.
+- `chart signing-key verify --repo <rid> <commit>` checks a cached commit and prints who signed it; a bad signature exits with `E_BAD_SIG`.
+- The UI commit page shows the result in its "Git signature" row, with the key's `SHA256:` fingerprint; it reads the repo's ops only for a signed commit.
+- Cost: a claim is one op (one transaction); checking a commit costs no query, because claims come from the ops the last sync verified.
+
 ## Not in this version
 
 - Keepalive does not extend `cob` entities yet, so ops expire after the control lifetime unless someone extends them.

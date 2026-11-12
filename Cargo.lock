@@ -2055,6 +2055,7 @@ name = "charter-sync"
 version = "0.5.0"
 dependencies = [
  "alloy-signer-local",
+ "base64 0.22.1",
  "bs58",
  "charter-core",
  "charter-crypto",

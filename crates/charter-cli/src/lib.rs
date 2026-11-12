@@ -9,6 +9,7 @@ pub mod member;
 pub mod op;
 pub mod program;
 pub mod release;
+pub mod signing;
 pub mod timelock;
 pub use charter_sync::units;
 pub mod zk;
