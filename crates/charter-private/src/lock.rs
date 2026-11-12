@@ -11,7 +11,11 @@ use charter_sync::{Result, SyncError};
 /// Held while it lives; the OS releases it if the process dies.
 pub(crate) struct HomeLock(#[allow(dead_code)] File);
 
-/// Waits for `$CHARTER_HOME/private/lock`. Polls instead of blocking, so two tasks of one
+/// How long a wait stays silent before it says why the command is not moving.
+const QUIET: Duration = Duration::from_secs(1);
+
+/// Waits for `$CHARTER_HOME/private/lock`, saying so on stderr once it has waited [`QUIET`]
+/// (so a `git fetch` does not hang silently). Polls instead of blocking, so two tasks of one
 /// runtime (the UI's round and a write) never block each other's thread. Not re-entrant:
 /// only the public entry points take it, and nothing they call takes it again.
 pub(crate) async fn lock(home: &Path) -> Result<HomeLock> {
@@ -24,10 +28,17 @@ pub(crate) async fn lock(home: &Path) -> Result<HomeLock> {
         .write(true)
         .open(dir.join("lock"))
         .map_err(io)?;
+    let (started, mut told) = (std::time::Instant::now(), false);
     loop {
         match f.try_lock() {
             Ok(()) => return Ok(HomeLock(f)),
-            Err(TryLockError::WouldBlock) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Err(TryLockError::WouldBlock) => {
+                if !told && started.elapsed() >= QUIET {
+                    told = true;
+                    eprintln!("waiting for another charter command on this home...");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
             Err(TryLockError::Error(e)) => return Err(io(e)),
         }
     }
