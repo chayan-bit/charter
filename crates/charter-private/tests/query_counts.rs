@@ -121,3 +121,51 @@ fn private_push_clone_fetch_and_sync_need_no_more_queries() {
         }
     });
 }
+
+/// The first refresh after a membership change costs what a steady refresh does: the
+/// admin's own commit needs no key lookup, and a removal's new id-key generation is read in
+/// the same query, so the change's cost does not move into the next refresh.
+#[test]
+fn the_first_refresh_after_an_add_or_a_removal_costs_a_steady_refresh() {
+    run(async {
+        let net = Net::new();
+        let [alice, bob, carol] = [1, 2, 3].map(|s| Peer::new(&net, s));
+        let rid = charter_private::init(&net, &alice.cfg, &alice.keys, &meta("counted"))
+            .await
+            .expect("init");
+        ring(&net, &alice, &rid).await;
+        net.take_queries();
+        ring(&net, &alice, &rid).await;
+        let steady = net.take_queries().len();
+
+        let kp = charter_private::publish_key_package(&net, &bob.cfg, &bob.keys)
+            .await
+            .expect("kp");
+        charter_private::add_member(&net, &alice.cfg, &alice.keys, &rid, &kp, Role::Write)
+            .await
+            .expect("add");
+        net.take_queries();
+        ring(&net, &alice, &rid).await;
+        let after_add = net.take_queries();
+
+        let kp = charter_private::publish_key_package(&net, &carol.cfg, &carol.keys)
+            .await
+            .expect("kp");
+        charter_private::add_member(&net, &alice.cfg, &alice.keys, &rid, &kp, Role::Read)
+            .await
+            .expect("add carol");
+        ring(&net, &alice, &rid).await;
+        charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &bob.keys.nid())
+            .await
+            .expect("remove");
+        net.take_queries();
+        ring(&net, &alice, &rid).await;
+        let after_remove = net.take_queries();
+        assert_eq!(after_add.len(), steady, "after an add: {after_add:#?}");
+        assert_eq!(
+            after_remove.len(),
+            steady,
+            "after a removal: {after_remove:#?}"
+        );
+    });
+}
