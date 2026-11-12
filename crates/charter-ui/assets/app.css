@@ -303,19 +303,19 @@ details.tech > summary { cursor: pointer; font-size: var(--t-sm); font-weight: 6
 .diff .ac > summary::-webkit-details-marker { display: none; }
 .diff tr:hover .ac > summary, .diff .ac > summary:focus-visible, .diff .ac[open] > summary { opacity: 1; }
 @media (hover: none) { .diff .ac > summary { opacity: .35; } }
-.diff .acbox { display: grid; gap: 6px; max-width: 72ch; padding: 6px 0 10px; white-space: normal; }
+.diff .acbox { position: sticky; left: calc(var(--gw) * 2 + 2ch); display: grid; gap: 6px; max-width: min(72ch, calc(100vw - var(--gw) * 2 - 2ch - 48px)); padding: 6px 0 10px; white-space: normal; }
 .diff .acbox textarea { width: 100%; min-height: 0; padding: 6px 10px; border: 1px solid var(--rule-2); border-radius: var(--r-ctl); background: var(--raised); font: 400 14px/1.5 var(--f-ui); color: var(--ink); resize: vertical; }
 .diff .acbox textarea.mono { font: 13px/1.6 var(--f-mono); }
 .diff tr.ic > td { padding: 10px 16px 12px calc(var(--gw) * 2 + 2ch); background: var(--raised); border-block: 1px solid var(--rule); white-space: normal; }
-.note { max-width: 80ch; font: 400 14px/1.6 var(--f-ui); }
-.note + .note { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--rule); }
-.note .who { color: var(--ink-2); }
-.note .who b { color: var(--ink); font-weight: 650; }
-.note .md { margin-top: 4px; }
-.note:target { outline: 2px solid var(--warn); outline-offset: 4px; border-radius: 2px; }
-.note .sgh { margin-top: 8px; font-size: var(--t-sm); font-weight: 600; color: var(--ink-2); }
-.note .sug { margin-top: 4px; border: 1px solid var(--rule); border-radius: var(--r-ctl); overflow: hidden; }
-.note .sug tr td { padding-block: 0; } .note .sug .lc { padding-right: 12px; white-space: pre-wrap; }
+.inote { max-width: 80ch; font: 400 14px/1.6 var(--f-ui); }
+.inote + .inote { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.inote .who { color: var(--ink-2); }
+.inote .who b { color: var(--ink); font-weight: 650; }
+.inote .md { margin-top: 4px; }
+.inote:target { outline: 2px solid var(--warn); outline-offset: 4px; border-radius: 2px; }
+.inote .sgh { margin-top: 8px; font-size: var(--t-sm); font-weight: 600; color: var(--ink-2); }
+.inote .sug { margin-top: 4px; border: 1px solid var(--rule); border-radius: var(--r-ctl); overflow: hidden; }
+.inote .sug tr td { padding-block: 0; } .inote .sug .lc { padding-right: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 details.outdated { margin: 4px 0 20px; padding: 10px 14px; border-radius: var(--r-ctl); background: var(--tone); }
 details.outdated > summary { cursor: pointer; font-size: 14px; font-weight: 600; color: var(--ink-2); }
 details.outdated[open] > summary { margin-bottom: 10px; }
@@ -501,6 +501,7 @@ dialog.help form { margin-top: 14px; text-align: right; }
   .help-btn { display: none !important; }
   .repo-head { grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .rh-side { justify-content: space-between; }
+  .rh-side .manage { width: 36px; padding: 0; margin-left: auto; } .rh-side .manage span { display: none; }
   .seal > summary { padding-left: 0; }
   .rh-side .popover { right: auto; left: 0; }
   .rh-side .pop:last-child .popover { left: auto; right: 0; }
@@ -538,6 +539,8 @@ dialog.help form { margin-top: 14px; text-align: right; }
   .cfacts { gap: 10px 16px; }
   .toast { bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
   .acts .btn { flex: 1; }
+  .diff tr.ic > td { padding-left: 16px; }
+  .diff tr.ic .inote { position: sticky; left: 16px; max-width: calc(100vw - 64px); }
   .fm input:not([type=radio]):not([type=checkbox]), .fm textarea, .input { font-size: 16px; }
   .sub { margin-left: 0; }
 }
