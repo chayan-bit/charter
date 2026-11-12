@@ -27,7 +27,9 @@ patch names yet), clone with repo_clone, edit files in the clone, commit and pus
 git_push, then attach_proof to post the patch with its receipt. program_status shows \
 what the repo's pinned program decided; escrow_status audits payouts. Triage an issue or \
 patch with op_post actions label and unlabel ({labels: [..]}), assign and unassign \
-({assignees: [peer hex]}) and milestone ({milestone: name or null}). Errors carry the \
+({assignees: [peer hex]}) and milestone ({milestone: name or null}). Review a patch line by \
+line with an xyz.arkiv.review comment or approve op carrying head and comments: [{path, \
+line, side (new or old), end_line?, body, suggestion?}], at most 32. Errors carry the \
 stable Charter code (E_*).";
 
 #[derive(Debug, Deserialize, JsonSchema)]
