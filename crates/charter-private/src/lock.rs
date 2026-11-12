@@ -14,11 +14,19 @@ pub(crate) struct HomeLock(#[allow(dead_code)] File);
 /// How long a wait stays silent before it says why the command is not moving.
 const QUIET: Duration = Duration::from_secs(1);
 
+/// How long a command waits for the lock before it gives up with `E_CONCURRENT_PUSH`.
+const MAX_WAIT: Duration = Duration::from_secs(600);
+
 /// Waits for `$CHARTER_HOME/private/lock`, saying so on stderr once it has waited [`QUIET`]
 /// (so a `git fetch` does not hang silently). Polls instead of blocking, so two tasks of one
 /// runtime (the UI's round and a write) never block each other's thread. Not re-entrant:
-/// only the public entry points take it, and nothing they call takes it again.
+/// only the public entry points take it, and nothing they call takes it again. Gives up
+/// after [`MAX_WAIT`], so a stuck holder never hangs a command forever.
 pub(crate) async fn lock(home: &Path) -> Result<HomeLock> {
+    lock_within(home, MAX_WAIT).await
+}
+
+async fn lock_within(home: &Path, max: Duration) -> Result<HomeLock> {
     let dir = home.join("private");
     let io = |e| SyncError::io(dir.join("lock").display(), e);
     std::fs::create_dir_all(&dir).map_err(io)?;
@@ -32,6 +40,16 @@ pub(crate) async fn lock(home: &Path) -> Result<HomeLock> {
     loop {
         match f.try_lock() {
             Ok(()) => return Ok(HomeLock(f)),
+            Err(TryLockError::WouldBlock) if started.elapsed() >= max => {
+                return Err(SyncError::coded(
+                    charter_core::ErrorCode::ConcurrentPush,
+                    format!(
+                        "another charter command on this home held {} for over {max:?}; \
+                         try again once it ends",
+                        dir.join("lock").display()
+                    ),
+                ));
+            }
             Err(TryLockError::WouldBlock) => {
                 if !told && started.elapsed() >= QUIET {
                     told = true;
@@ -57,5 +75,16 @@ mod tests {
         drop(first);
         let again = tokio::time::timeout(Duration::from_secs(5), lock(home.path())).await;
         assert!(again.is_ok_and(|l| l.is_ok()));
+    }
+
+    #[tokio::test]
+    async fn a_wait_for_a_held_lock_gives_up_with_a_coded_error() {
+        let home = tempfile::tempdir().expect("tmp");
+        let _first = lock(home.path()).await.expect("first");
+        let e = lock_within(home.path(), Duration::from_millis(50))
+            .await
+            .err()
+            .expect("gave up");
+        assert_eq!(e.code(), charter_core::ErrorCode::ConcurrentPush, "{e}");
     }
 }
