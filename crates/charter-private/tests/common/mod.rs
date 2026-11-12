@@ -345,5 +345,12 @@ pub fn run<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
         .enable_all()
         .build()
         .expect("runtime");
-    rt.block_on(rt.spawn(f)).expect("test task");
+    // A test that hangs fails instead of holding the whole run.
+    let task = rt.spawn(f);
+    rt.block_on(async { tokio::time::timeout(TEST_DEADLINE, task).await })
+        .unwrap_or_else(|_| panic!("the test did not finish within {TEST_DEADLINE:?}"))
+        .expect("test task");
 }
+
+/// The longest any one test may run.
+const TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
