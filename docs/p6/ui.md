@@ -75,7 +75,10 @@ The UI must never make a push wait on it, so:
 - Interval: a round runs only when a one-query probe (newest `ag.rid` entity and the count) changed, since Rabdi bills an `arkiv_query` 10 units of a per-IP 10,000 (`docs/p0/arkiv-limits.md`); the repo on screen is probed every 10 s (with a `newHeads` socket, at the first block after that), other repos every 5 min while any page is open, and nothing with no page open (`crates/charter-ui/src/pace.rs`).
   Anyone can write rows that carry a repo's `ag.rid` and a late `ag.dev`, and 100 of them fill the probe's tail, which would hide a head patch (a refs-only push).
   The probe sees when its tail holds no row without `ag.dev`; from then on every other check is one query for the heads the last round accepted, filtered by their devices' control addresses, which nobody else can write (`crates/charter-ui/src/head_watch.rs`).
-  Each check stays one query (365 an hour on screen, 17 idle, as before); under such rows a create is seen at most one interval later.
+  Each check stays one query (365 an hour on screen, 17 idle, as before).
+  What is guaranteed under such rows: a head patch or expiry of a device the last round accepted is seen within two checks, and so is any create or expiry that changes the count.
+  What is not: the first rows of a new device or a new peer (a first bind, anchor or head, or a cob op from a new wallet) show only in the count, so a writer who deletes one of its own junk rows in the same block hides that create until the next change the probe or the watch sees.
+  Closing this would need those writers' addresses in the watch query, and a new device's or peer's address is not known before its first row, so no single query can name it.
   A single query cannot do both: the count must include rows from any wallet (issues and binds from new peers), and every order the node offers (user attributes, `$creator`, `$key`, `$expiresAt`, which a patch keeps) lets their writer place 100 rows after the real heads.
 - Quota: the RPC client keeps the latest `RateLimit` and `Arkiv-Quota-Used-Percent` headers; the loop slows from 50 % used, pauses at 80 % or on a 429 until the reset, never sleeps out a `Retry-After` inside a round, and the pages show "paused: RPC quota".
 
@@ -105,6 +108,8 @@ Each fact links to the block or entity it came from.
 - Every write shows its cost first (the existing `push_send::Cost` estimate, in tGLM) and needs one confirm click; nothing is signed on page load.
 - After a write, the page shows "sent" at once and "confirmed in block N" when the receipt lands.
 - In a private repo where a revoked device still holds an MLS leaf, an admin's repo page offers "Remove from the group": a priced write like the others, which removes every revoked leaf in one commit; the sync loop only counts such leaves and never sends the removal itself (docs/p2/private-repos.md, "Revoked devices").
+  It always shows the cost dialog, even under the small-write setting, since it changes who can read the repo and not only money.
+- The funds check takes each source on its own: the wallet must cover what only the wallet sends (an escrow deposit for "Fund bounty", top-ups of the repo's paying address, and their fees), and the wallet with the paying address must cover the whole; a confirm the price showed cannot be paid is refused and sends nothing.
 
 ### 4.5 Live updates (slice 3)
 

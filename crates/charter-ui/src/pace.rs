@@ -23,7 +23,9 @@
 //! sees when its tail holds no row without `ag.dev` ([`Probe::saturated`]); from then on
 //! every other check is one query for the heads the last round accepted, filtered by their
 //! devices' control addresses ([`Watch`]), which no one else can write. The query count
-//! stays one per check; a create waits at most one more interval.
+//! stays one per check. While saturated, a new device's or new peer's first row shows only
+//! in the count, so a writer deleting one of its own rows in the same block hides it until
+//! the next change the probe or the watch sees (docs/p6/ui.md 4.2).
 
 use std::collections::BTreeMap;
 use std::path::Path;
