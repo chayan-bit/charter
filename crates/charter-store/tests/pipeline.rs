@@ -574,6 +574,70 @@ async fn jobs_over_the_byte_cap_are_split() {
     assert_eq!(fake.entity_nonce(key.address()).await.expect("n"), 3);
 }
 
+/// `on_send` sees each tx before it goes out (an error sends nothing): every part of a split
+/// job at its own nonce, and a reverted job's resend at the next nonce with a new hash.
+#[tokio::test(start_paused = true)]
+async fn on_send_names_each_tx_and_its_ops_before_it_goes_out() {
+    let (fake, key) = setup();
+    let last = blob(60_000, DAY, 2);
+    let seen = std::sync::Mutex::new(vec![]);
+    let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default()).on_send(
+        |ops, tx| {
+            seen.lock()
+                .expect("seen")
+                .push((tx.nonce(), tx.hash(), ops.contains(&last)));
+            Ok(())
+        },
+    );
+    let job = vec![blob(60_000, DAY, 0), blob(60_000, DAY, 1), last.clone()];
+    let landed = with_miner(fake.clone(), p.run(vec![job]))
+        .await
+        .expect("run");
+    drop(p);
+    let seen = std::mem::take(&mut *seen.lock().expect("seen"));
+    assert_eq!(seen.len(), landed.len(), "one call per tx of the split job");
+    let carrier = seen
+        .iter()
+        .find(|s| s.2)
+        .expect("the last op's tx was named");
+    let mined = landed
+        .iter()
+        .find(|l| l.receipt.tx_hash == carrier.1)
+        .expect("it landed");
+    assert!(seen.iter().filter(|s| s.2).count() == 1 && mined.receipt.success);
+    assert!(
+        carrier.0 > seen[0].0,
+        "the op rode a later part, at its own nonce"
+    );
+
+    fake.revert_next_at(0);
+    let calls = std::sync::Mutex::new(vec![]);
+    let mut p =
+        TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default()).on_send(|_, tx| {
+            calls.lock().expect("calls").push((tx.nonce(), tx.hash()));
+            Ok(())
+        });
+    let landed = with_miner(fake.clone(), p.run(vec![vec![small("r", 0, 0)]]))
+        .await
+        .expect("resent");
+    drop(p);
+    let calls = std::mem::take(&mut *calls.lock().expect("calls"));
+    assert_eq!(calls.len(), 2, "the resend is named too: {calls:?}");
+    assert_eq!(calls[1].0, calls[0].0 + 1, "at the next nonce");
+    assert_eq!(landed[0].receipt.tx_hash, calls[1].1);
+
+    let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default())
+        .on_send(|_, _| Err(StoreError::InvalidOp("not recorded".into())));
+    let before = fake.tx_count(key.address()).await.expect("count");
+    let err = with_miner(fake.clone(), p.run(vec![vec![small("r", 1, 1)]])).await;
+    assert!(matches!(err, Err(StoreError::InvalidOp(_))), "{err:?}");
+    assert_eq!(
+        fake.tx_count(key.address()).await.expect("count"),
+        before,
+        "nothing sent"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn jobs_over_the_gas_cap_are_split_and_single_ops_fail() {
     let (fake, key) = setup();
