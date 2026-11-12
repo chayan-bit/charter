@@ -8,7 +8,6 @@
 </div>
 <div class="rh-side">
 {% include "verify.html" %}
-{% if r.maintains() %}<a class="btn manage" href="/r/{{ r.hex }}/manage" aria-label="Manage" title="Manage">{{ m::i(l.v, "gear-six") }}<span>Manage</span></a>{% endif %}
 <details class="pop">
 <summary class="btn">{{ m::i(l.v, "terminal-window") }}Clone{{ m::i(l.v, "caret-down") }}</summary>
 <div class="popover">

@@ -109,7 +109,7 @@ Each fact links to the block or entity it came from.
 - After a write, the page shows "sent" at once and "confirmed in block N" when the receipt lands.
 - In a private repo where a revoked device still holds an MLS leaf, an admin's repo page offers "Remove from the group": a priced write like the others, which removes every revoked leaf in one commit; the sync loop only counts such leaves and never sends the removal itself (docs/p2/private-repos.md, "Revoked devices").
   It always shows the cost dialog, even under the small-write setting, since it changes who can read the repo and not only money.
-- A maintainer's Manage page (`/r/<rid>/manage`) renames the repo, hands it to another peer or archives it, as one priced identity revision (`chart id propose`'s code; issue #63).
+- A maintainer's Manage page (`/r/<rid>/manage`, linked from the Maintainers panel of the repo home and from the archived banner) renames the repo, hands it to another peer or archives it, as one priced identity revision (`chart id propose`'s code; issue #63).
   An archived repo shows an "Archived" chip and banner, and every write form is hidden until a maintainer unarchives it.
 - The funds check takes each source on its own: the wallet must cover what only the wallet sends (an escrow deposit for "Fund bounty", top-ups of the repo's paying address, and their fees), and the wallet with the paying address must cover the whole; a confirm the price showed cannot be paid is refused and sends nothing.
 

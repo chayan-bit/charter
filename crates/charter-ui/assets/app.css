@@ -218,6 +218,7 @@ details.tech > summary { cursor: pointer; font-size: var(--t-sm); font-weight: 6
 .side { border-left: 1px solid var(--rule); padding-left: 28px; display: grid; gap: 28px; align-content: start; font-size: 14px; }
 .side h2 { font-size: var(--t-sm); font-weight: 650; color: var(--ink); margin-bottom: 8px; }
 .side p { color: var(--ink-2); }
+.side .manage { margin-top: 12px; }
 .people li { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
 .people small { color: var(--ink-3); font-size: var(--t-xs); }
 .big { font-variant-numeric: normal; font-size: var(--t-xl); font-weight: 700; letter-spacing: -.03em; line-height: 1.1; color: var(--ink); }
@@ -501,7 +502,6 @@ dialog.help form { margin-top: 14px; text-align: right; }
   .help-btn { display: none !important; }
   .repo-head { grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .rh-side { justify-content: space-between; }
-  .rh-side .manage { width: 36px; padding: 0; margin-left: auto; } .rh-side .manage span { display: none; }
   .seal > summary { padding-left: 0; }
   .rh-side .popover { right: auto; left: 0; }
   .rh-side .pop:last-child .popover { left: auto; right: 0; }
