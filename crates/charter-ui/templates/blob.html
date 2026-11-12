@@ -7,6 +7,7 @@
 <h2>{% for (href, label) in l.crumbs %}{% if loop.first %}<a href="{{ href }}">{{ r.name }}</a>{% else if href.is_empty() %} / {{ label }}{% else if loop.index0 > 1 %} / <a href="{{ href }}">{{ label }}</a>{% endif %}{% endfor %}</h2>
 <div class="acts">{% let small = true %}{% include "picker.html" %}<button class="btn btn-sm js" type="button" data-copy="{{ path }}">{{ m::i(l.v, "copy") }}Copy path</button><a class="btn btn-sm" href="/r/{{ r.hex }}/log/{{ rev }}">History</a><a class="btn btn-sm" href="/r/{{ r.hex }}/raw/{{ rev }}/{{ path }}" hx-boost="false">Raw</a></div>
 </div>
+{% if !owners.is_empty() %}<p class="owners">Code owners {% for o in owners %}<b>{{ r.who(o) }}</b>{% if !loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
 <div class="codebox">
 {% include "lastc.html" %}
 {% if binary %}

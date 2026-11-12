@@ -254,6 +254,8 @@ details.tech > summary { cursor: pointer; font-size: var(--t-sm); font-weight: 6
 .pathbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 28px 0 14px; }
 .pathbar h2 { font: 500 var(--t-md) var(--f-mono); letter-spacing: 0; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .pathbar h2 a { color: var(--ink-3); }
+.owners { margin: -6px 0 14px; font-size: var(--t-sm); color: var(--ink-3); }
+.owners b { font-weight: 600; color: var(--ink-2); }
 .pathbar .acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 
 /* Markdown (README, comments, notes) */

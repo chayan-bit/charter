@@ -1,5 +1,5 @@
 //! Parity batch 3 pages on their own fixture, so the shared one keeps its exact shape:
-//! signed commits (#61), labels, assignees and milestones (#40).
+//! signed commits (#61), labels, assignees and milestones (#40), code owners (#53).
 
 mod common;
 
@@ -87,7 +87,13 @@ async fn build() -> Fx {
     let rid = init(&net, &alice, "parity").await;
     let dir = tempfile::tempdir().expect("work");
     let work = work_repo(dir.path(), "w");
-    let plain = commit(&work, &[("README.md", b"# Parity\n")], "feat: plain");
+    let me = hex32(&alice.keys.nid());
+    let owners = format!("*.txt {me}\n");
+    let files: [(&str, &[u8]); 2] = [
+        ("README.md", b"# Parity\n"),
+        ("CODEOWNERS", owners.as_bytes()),
+    ];
+    let plain = commit(&work, &files, "feat: plain");
     let (key, other) = (ssh_key(dir.path(), "k"), ssh_key(dir.path(), "o"));
     let claimed = signed(&work, &key, "a.txt");
     let unclaimed = signed(&work, &other, "b.txt");
@@ -98,7 +104,6 @@ async fn build() -> Fx {
     let sig = ssh_sign(&key, &claim_message(&alice.keys.nid()));
     let p = json!({"key": line.trim(), "sig": sig});
     post(&net, &alice, &rid, CLAIM_TYPE, "create", ZERO, p).await;
-    let me = hex32(&alice.keys.nid());
     let iss = json!({"title": "Triage me", "labels": ["bug"], "milestone": "v1"});
     let issue = post(&net, &alice, &rid, "xyz.arkiv.issue", "create", ZERO, iss).await;
     let label = json!({"labels": ["docs"]});
@@ -286,5 +291,20 @@ async fn the_triage_form_signs_one_op_per_change() {
     assert_eq!(
         (last.body.action.as_str(), last.object()),
         ("label", charter_sync::ids::unhex32(&f.issue).expect("id"))
+    );
+}
+
+#[tokio::test]
+async fn blob_pages_name_the_code_owners_of_the_file() {
+    let f = fx();
+    let page = html(&format!("/r/{}/blob/main/a.txt", f.hex)).await;
+    assert!(
+        page.contains(r#"<p class="owners">Code owners <b>alice</b></p>"#),
+        "{page}"
+    );
+    let page = html(&format!("/r/{}/blob/main/README.md", f.hex)).await;
+    assert!(
+        !page.contains(r#"class="owners""#),
+        "an unowned file has no line"
     );
 }
