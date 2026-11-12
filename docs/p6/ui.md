@@ -73,7 +73,10 @@ The UI must never make a push wait on it, so:
 - Page handlers never take the lock; they only read `git/` (safe for concurrent readers) and the JSON files, which are replaced atomically.
 - The sync loop opens the repo with a new non-blocking `Repo::try_open`, runs one round (`sync` plus a `cob::list` from the last block seen), writes the files, and drops the lock; if the lock is busy it skips the round.
 - Interval: a round runs only when a one-query probe (newest `ag.rid` entity and the count) changed, since Rabdi bills an `arkiv_query` 10 units of a per-IP 10,000 (`docs/p0/arkiv-limits.md`); the repo on screen is probed every 10 s (with a `newHeads` socket, at the first block after that), other repos every 5 min while any page is open, and nothing with no page open (`crates/charter-ui/src/pace.rs`).
-  Anyone can write rows that carry a repo's `ag.rid` and so hide a change from the probe, so a repo with a page open also gets a full round at least every 30 min (`BACKSTOP_EVERY`), which adds 4 queries an hour to the on-screen repo (365 to 369) and to an idle one (17 to 21).
+  Anyone can write rows that carry a repo's `ag.rid` and a late `ag.dev`, and 100 of them fill the probe's tail, which would hide a head patch (a refs-only push).
+  The probe sees when its tail holds no row without `ag.dev`; from then on every other check is one query for the heads the last round accepted, filtered by their devices' control addresses, which nobody else can write (`crates/charter-ui/src/head_watch.rs`).
+  Each check stays one query (365 an hour on screen, 17 idle, as before); under such rows a create is seen at most one interval later.
+  A single query cannot do both: the count must include rows from any wallet (issues and binds from new peers), and every order the node offers (user attributes, `$creator`, `$key`, `$expiresAt`, which a patch keeps) lets their writer place 100 rows after the real heads.
 - Quota: the RPC client keeps the latest `RateLimit` and `Arkiv-Quota-Used-Percent` headers; the loop slows from 50 % used, pauses at 80 % or on a 429 until the reset, never sleeps out a `Retry-After` inside a round, and the pages show "paused: RPC quota".
 
 Additions to `charter-sync` (both small, both tested): `Repo::try_open`, and `cob::list_since(rid, from_block)` so the loop reads only new ops.
