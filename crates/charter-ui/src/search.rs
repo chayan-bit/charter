@@ -278,6 +278,7 @@ mod tests {
             license: None,
             nonce: None,
             program: None,
+            archived: None,
         };
         Hit {
             rid: [7; 32],
