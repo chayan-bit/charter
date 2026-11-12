@@ -53,8 +53,7 @@ pub enum UiError {
 pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
     use axum::routing::post;
     use pages::{
-        cobs, code, forms, history, live, program, repos, review, search, settings, wallet,
-        write,
+        cobs, code, forms, history, live, program, repos, review, search, settings, wallet, write,
     };
     Router::new()
         .route("/", get(repos::index))
