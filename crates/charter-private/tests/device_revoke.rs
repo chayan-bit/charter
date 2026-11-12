@@ -11,7 +11,7 @@
 mod common;
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use charter_core::{Nid, Rid};
 use charter_private::{Role, Sealed};
@@ -471,11 +471,17 @@ fn a_removal_whose_tx_was_dropped_is_replaced_at_its_nonce_and_the_retry_goes_th
 /// `Net` behind a flaky edge: sends from one address after the first `pass` are kept back
 /// instead of reaching the node; once armed, the next `tx_count_mined` first hands them to
 /// the node and mines a block, so a commit lands between a retry's refresh and its nonce read.
+/// The next `lag` receipt lookups answer "not found" (a node behind the one that answered
+/// the nonce), and while `fail_estimates` is set every estimate fails.
 struct Edge<'a> {
     net: &'a Net,
     hold: Mutex<Option<(Address, usize)>>,
     held: Mutex<Vec<SignedTx>>,
     armed: AtomicBool,
+    lag: AtomicUsize,
+    fail_estimates: AtomicBool,
+    /// Every send that reached the node through this edge.
+    sent: Mutex<Vec<SignedTx>>,
 }
 
 impl<'a> Edge<'a> {
@@ -485,7 +491,20 @@ impl<'a> Edge<'a> {
             hold: Mutex::new(None),
             held: Mutex::new(vec![]),
             armed: AtomicBool::new(false),
+            lag: AtomicUsize::new(0),
+            fail_estimates: AtomicBool::new(false),
+            sent: Mutex::new(vec![]),
         }
+    }
+
+    fn lagging(self, lag: usize) -> Self {
+        self.lag.store(lag, Ordering::SeqCst);
+        self
+    }
+
+    fn sent_from(&self, from: Address) -> usize {
+        let sent = self.sent.lock().expect("sent");
+        sent.iter().filter(|t| t.from() == from).count()
     }
 
     fn holding(self, from: Address, pass: usize) -> Self {
@@ -560,6 +579,9 @@ impl Arkiv for Edge<'_> {
         self.net.block_txs(n).await
     }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
+        if self.fail_estimates.load(Ordering::SeqCst) {
+            return Err(StoreError::Rpc("estimate refused".into()));
+        }
         self.net.estimate(from, ops).await
     }
     async fn send(&self, tx: SignedTx) -> Result<TxHash, StoreError> {
@@ -575,6 +597,7 @@ impl Arkiv for Edge<'_> {
             }
         };
         if !kept {
+            self.sent.lock().expect("sent").push(tx.clone());
             return self.net.send(tx).await;
         }
         let mut held = self.held.lock().expect("held");
@@ -584,6 +607,13 @@ impl Arkiv for Edge<'_> {
         Ok(tx.hash())
     }
     async fn receipt(&self, h: TxHash) -> Result<Option<Receipt>, StoreError> {
+        let lagging = self
+            .lag
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        if lagging {
+            return Ok(None);
+        }
         self.net.receipt(h).await
     }
 }
@@ -736,5 +766,98 @@ fn a_priced_removal_counts_the_transfer_that_retires_a_pending_commit() {
         let (_, plugs) = priced().await.expect("price").expect("a removal");
         assert_eq!(plugs, 1, "the pending commit's nonce is still free");
         assert_eq!(net.mem.pending(), 1, "pricing sent nothing");
+    });
+}
+
+/// The interrupted commit lands between the retry's refresh and its nonce read, and the
+/// node answering receipts lags `lag` lookups behind the one that answered the nonce.
+async fn lagging_receipt(lag: usize) {
+    let (net, [alice, carol, bob, dan], rid) = group().await;
+    let e0 = current(&ring(&net, &alice, &rid).await.expect("alice"));
+    net.hold_mining(true);
+    let bob = bob.keys.nid();
+    let first = charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &bob);
+    tokio::select! {
+        r = first => panic!("finished while mining is held: {r:?}"),
+        () = pool_holds(&net, 1) => {} // Ctrl-C after the broadcast
+    }
+    net.hold_mining(false);
+    let edge = Edge::new(&net).lagging(lag);
+    edge.arm();
+    let dan = dan.keys.nid();
+    let e = charter_private::remove_member(&edge, &alice.cfg, &alice.keys, &rid, &dan)
+        .await
+        .expect_err("refused while its earlier commit landed or may have");
+    assert_eq!(e.code(), charter_core::ErrorCode::ConcurrentPush, "{e}");
+    one_epoch(&net, &alice, &carol, &rid, e0 + 1).await;
+}
+
+#[test]
+fn a_lagging_receipt_for_the_landed_commit_is_refused_not_forked() {
+    run(lagging_receipt(1));
+}
+
+#[test]
+fn an_up_to_date_receipt_for_the_landed_commit_is_refused_not_forked() {
+    run(lagging_receipt(0));
+}
+
+/// A tx of the control address waits in the pool at the nonce a plug would take (a push of
+/// this device, or the old commit): the retry refuses without sending, as a plug priced
+/// above it would replace it on a real node.
+#[test]
+fn a_plug_is_never_sent_over_a_pool_tx_of_the_same_address() {
+    run(async {
+        let (net, [alice, _carol, bob, dan], rid) = group().await;
+        net.hold_mining(true);
+        let bob = bob.keys.nid();
+        let first = charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &bob);
+        tokio::select! {
+            r = first => panic!("finished while mining is held: {r:?}"),
+            () = pool_holds(&net, 1) => {}
+        }
+        let edge = Edge::new(&net);
+        let dan = dan.keys.nid();
+        let e = charter_private::remove_member(&edge, &alice.cfg, &alice.keys, &rid, &dan)
+            .await
+            .expect_err("refused while a tx of the address is in the pool");
+        assert_eq!(e.code(), charter_core::ErrorCode::ConcurrentPush, "{e}");
+        let control = alice.keys.control_address(&rid);
+        assert_eq!(edge.sent_from(control), 0, "no plug was sent");
+        assert_eq!(net.mem.pending(), 1, "the pool tx is untouched");
+    });
+}
+
+/// The commit's tx was lost, the retry's plug took its nonce, and that retry then failed
+/// before its own commit went out: the plug is recorded, so the next retry proves the old
+/// commit can never land instead of waiting on a receipt that will never come.
+#[test]
+fn a_plug_that_landed_before_a_failed_retry_settles_the_old_commit() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let e0 = current(&ring(&net, &alice, &rid).await.expect("alice"));
+        let control = alice.keys.control_address(&rid);
+        net.drop_sends_from(control, 0);
+        let bob = bob.keys.nid();
+        let first = charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &bob);
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), first).await;
+        assert!(
+            !matches!(first, Ok(Ok(()))),
+            "the lost commit did not land: {first:?}"
+        );
+        net.heal();
+
+        let edge = Edge::new(&net);
+        edge.fail_estimates.store(true, Ordering::SeqCst);
+        let dan = dan.keys.nid();
+        charter_private::remove_member(&edge, &alice.cfg, &alice.keys, &rid, &dan)
+            .await
+            .expect_err("the commit cannot be priced");
+        assert_eq!(edge.sent_from(control), 1, "only the plug went out");
+
+        charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &dan)
+            .await
+            .expect("the plug proves the old commit can never land");
+        one_epoch(&net, &alice, &carol, &rid, e0 + 1).await;
     });
 }

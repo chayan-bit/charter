@@ -67,25 +67,40 @@ pub struct Mls {
     pub pending: BTreeMap<String, Pending>,
 }
 
-/// The control-address nonce of the tx carrying a pending commit and the hash of every tx
-/// signed at it with the commit; none recorded means no such tx was ever sent.
+/// The control-address nonce of the tx carrying a pending commit, the hash of every tx
+/// signed at it with the commit, and of every other tx this home signed at it (a plug);
+/// none recorded means no tx carrying the commit was ever sent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
     pub nonce: u64,
     pub txs: Vec<charter_store::TxHash>,
+    #[serde(default)]
+    pub others: Vec<charter_store::TxHash>,
 }
 
 impl Pending {
     /// `self` after the commit's tx `hash` at `nonce` is signed: a new nonce (a reverted
     /// tx resent) starts over, the same one adds a hash.
     pub fn signed(&self, nonce: u64, hash: charter_store::TxHash) -> Self {
-        let mut txs = if nonce == self.nonce {
-            self.txs.clone()
-        } else {
-            vec![]
+        let (mut txs, others) = match nonce == self.nonce {
+            true => (self.txs.clone(), self.others.clone()),
+            false => (vec![], vec![]),
         };
         txs.push(hash);
-        Self { nonce, txs }
+        Self { nonce, txs, others }
+    }
+
+    /// `self` after another tx `hash` (no commit in it) is signed at `nonce`: recorded only
+    /// at the commit's nonce, the one this record decides.
+    pub fn other(&self, nonce: u64, hash: charter_store::TxHash) -> Self {
+        let mut others = self.others.clone();
+        if nonce == self.nonce {
+            others.push(hash);
+        }
+        Self {
+            others,
+            ..self.clone()
+        }
     }
 }
 

@@ -133,7 +133,7 @@ async fn removal<A: Arkiv>(
     a: &A,
     cfg: &Config,
     keys: &Keys,
-    mls: &Mls,
+    mls: &mut Mls,
     ring: &Keyring,
     rows: &[EntityData],
     send: bool,
@@ -183,10 +183,10 @@ pub async fn removal_ops<A: Arkiv>(
     rid: &charter_core::Rid,
 ) -> Result<Option<(Vec<Operation>, u64)>> {
     let _held = lock(&cfg.home).await?;
-    let (mls, ring, rows) = refresh_in(a, cfg, keys, rid).await?;
+    let (mut mls, ring, rows) = refresh_in(a, cfg, keys, rid).await?;
     let ring = ring.ok_or_else(|| not_member(rid))?;
     let Some((next, pre, commit, _, plugs)) =
-        Box::pin(removal(a, cfg, keys, &mls, &ring, &rows, false)).await?
+        Box::pin(removal(a, cfg, keys, &mut mls, &ring, &rows, false)).await?
     else {
         return Ok(None);
     };

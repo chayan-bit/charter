@@ -126,21 +126,25 @@ pub(crate) async fn member_ring_in<A: Arkiv>(
 }
 
 /// `ring`'s group, ready for a new commit. A pending commit of this member that the refresh
-/// before did not settle (its row is not on chain) can still land, so it is dropped only
-/// when it provably cannot: no tx carrying it was ever sent, or another tx took the nonce
-/// recorded for it ([`finish`]): none of its recorded txs is mined, or the one mined
-/// reverted. If one of them landed (mined after that refresh read the chain, or not yet
-/// indexed), the change is refused with `E_CONCURRENT_PUSH` and the next refresh merges it:
-/// a new commit now would fork this home off the group. While the nonce is still free,
-/// `send` first sends a zero-value transfer at every free nonce up to it: once that is mined
-/// the old commit cannot land; if the node refuses one, a tx of this address is still
-/// waiting in the pool and the change is refused with `E_CONCURRENT_PUSH`. Returns the group
-/// and how many of those transfers it sent; pricing (`send` = `None`) sends nothing and
-/// returns how many it would send. Costs one nonce read while a commit is pending, plus one
-/// receipt read per recorded tx once its nonce is used.
+/// before did not settle (its row is not on chain) can still land, so it is dropped only on
+/// proof that it cannot: no tx carrying it was ever sent, or the nonce recorded for it
+/// ([`finish`]) was taken by a tx that is not it (one of its txs mined and reverted, or a
+/// recorded plug mined). If one of its txs landed (mined after that refresh read the chain,
+/// or not yet indexed), the change is refused with `E_CONCURRENT_PUSH` and the next refresh
+/// merges it: a new commit now would fork this home off the group. A used nonce with none
+/// of the recorded receipts found is unknown, not proof, and is refused the same way.
+///
+/// While the nonce is still free, `send` first sends a zero-value transfer at every free
+/// nonce up to it (recording the one at the commit's nonce before it goes out), so the old
+/// commit can never land; but only when the node holds no tx of this address in its pool,
+/// since a plug priced above a pool tx would replace it (the old commit itself, or a push
+/// of this device's): then the change is refused with `E_CONCURRENT_PUSH` instead. Returns
+/// the group and how many transfers it sent; pricing (`send` = `None`) sends nothing and
+/// returns how many it would send. Costs one nonce read while a commit is pending; the
+/// receipt reads, the pool read and the transfers only after an interrupted send.
 pub(crate) async fn ready<A: Arkiv>(
     a: &A,
-    mls: &Mls,
+    mls: &mut Mls,
     ring: &Keyring,
     keys: &Keys,
     send: Option<&Config>,
@@ -149,41 +153,64 @@ pub(crate) async fn ready<A: Arkiv>(
     let Some((epoch, ..)) = mls.pending_keys(&g, &ring.rid)? else {
         return Ok((g, 0));
     };
-    let Some(p) = mls.pending.get(&hex::encode(&ring.group)) else {
+    let group = hex::encode(&ring.group);
+    let Some(p) = mls.pending.get(&group).cloned() else {
         mls.clear_pending(&mut g)?;
         return Ok((g, 0));
     };
     let control = keys.control(&ring.rid);
     let mined = a.tx_count_mined(control.address()).await?;
     let plugs = (p.nonce + 1).saturating_sub(mined);
+    let refused = |what: &str| {
+        SyncError::coded(
+            ErrorCode::ConcurrentPush,
+            format!("this machine's earlier membership change (epoch {epoch}) {what}"),
+        )
+    };
     if mined > p.nonce {
-        for h in &p.txs {
-            if a.receipt(*h).await?.is_some_and(|r| r.success) {
-                return Err(SyncError::coded(
-                    ErrorCode::ConcurrentPush,
-                    format!(
-                        "this machine's earlier membership change (epoch {epoch}) was just \
-                         mined; run the command again to make this change after it"
-                    ),
+        // Exactly one tx at that nonce is mined, and every tx this home signs there from
+        // this address is recorded before it goes out (the commit's txs, and plugs: this
+        // function's and the pipeline's own), so its receipt shows once the node serving
+        // receipts catches up with the one that reported the nonce: the refusal below ends.
+        // shortcut: a tx another home sharing this device seed sent at that nonce is never
+        // recorded, so its change stays refused here; upgrade with a tx-by-sender-and-nonce lookup.
+        match taken_by(a, &p).await? {
+            Taken::Commit => return Err(refused("was just mined; run the command again")),
+            Taken::Unknown => {
+                return Err(refused(
+                    "may still be landing (its nonce is used but no receipt is found yet); \
+                     try again shortly",
                 ));
             }
+            Taken::Other => {}
         }
     } else if let Some(cfg) = send {
+        if a.tx_count(control.address()).await? > mined {
+            return Err(refused(
+                "or another tx of this device is still waiting to be mined; try again in a minute",
+            ));
+        }
         let chain_id = a.chain_id().await?;
-        let mut plug =
+        let record = |_: &[charter_store::Operation], tx: &charter_store::SignedTx| {
+            let q = mls.pending.get(&group).cloned().unwrap_or_default();
+            mls.pending
+                .insert(group.clone(), q.other(tx.nonce(), tx.hash()));
+            mls.save()
+                .map_err(|e| charter_store::StoreError::InvalidOp(format!("recording a plug: {e}")))
+        };
+        let to = (mined..=p.nonce).map(|_| (control.address(), charter_store::U256::ZERO));
+        let sent =
             charter_store::TxPipeline::new(a, control.clone(), chain_id, cfg.pipeline.clone())
                 .funded_by(keys.wallet())
-                .at_nonce(mined);
-        let to = (mined..=p.nonce).map(|_| (control.address(), charter_store::U256::ZERO));
-        match plug.transfers(to.collect()).await {
+                .at_nonce(mined)
+                .on_send(record)
+                .transfers(to.collect())
+                .await;
+        match sent {
             Ok(_) => {}
             Err(charter_store::StoreError::NonceTooLow(_)) => {
-                return Err(SyncError::coded(
-                    ErrorCode::ConcurrentPush,
-                    format!(
-                        "this machine's earlier membership change (epoch {epoch}) is still \
-                         waiting to be mined; try again in a minute"
-                    ),
+                return Err(refused(
+                    "is still waiting to be mined; try again in a minute",
                 ));
             }
             Err(e) => return Err(e.into()),
@@ -191,6 +218,34 @@ pub(crate) async fn ready<A: Arkiv>(
     }
     mls.clear_pending(&mut g)?;
     Ok((g, plugs))
+}
+
+/// What took a pending commit's recorded nonce, by the recorded txs' receipts.
+enum Taken {
+    /// One of the commit's txs landed.
+    Commit,
+    /// A tx that cannot carry it: one of its own that reverted, or a recorded plug.
+    Other,
+    /// No recorded receipt is found yet.
+    Unknown,
+}
+
+async fn taken_by<A: Arkiv>(a: &A, p: &crate::mls::Pending) -> Result<Taken> {
+    let mut other = false;
+    for h in &p.txs {
+        match a.receipt(*h).await? {
+            Some(r) if r.success => return Ok(Taken::Commit),
+            Some(_) => other = true,
+            None => {}
+        }
+    }
+    for h in &p.others {
+        if other {
+            break;
+        }
+        other = a.receipt(*h).await?.is_some();
+    }
+    Ok(if other { Taken::Other } else { Taken::Unknown })
 }
 
 /// The current epoch and every member with its role, number of MLS leaves (devices), and
@@ -282,7 +337,7 @@ async fn add<A: Arkiv>(
         (None, None) => return Err(not_member(rid)),
         _ => {}
     }
-    let (mut g, _) = ready(a, &mls, &ring, keys, Some(cfg)).await?;
+    let (mut g, _) = ready(a, &mut mls, &ring, keys, Some(cfg)).await?;
     let pre = prepare(a, cfg, keys, &ring).await?;
     let (commit, welcome, _) = mls.add(&mut g, kp)?;
     if let Some(role) = role {
@@ -307,7 +362,7 @@ pub async fn remove_member<A: Arkiv>(
     let _held = lock(&cfg.home).await?;
     let (mut mls, mut ring) = member_ring_in(a, cfg, keys, rid).await?;
     ring.require(&keys.nid(), Role::Admin)?;
-    let (mut g, _) = ready(a, &mls, &ring, keys, Some(cfg)).await?;
+    let (mut g, _) = ready(a, &mut mls, &ring, keys, Some(cfg)).await?;
     let pre = prepare(a, cfg, keys, &ring).await?;
     let commit = mls.remove(&mut g, nid)?;
     ring.roles.remove(&hex::encode(nid));
@@ -408,12 +463,13 @@ pub(crate) async fn finish<A: Arkiv>(
     // Saved with the pending commit only right before the row's tx goes out: until then the
     // disk keeps the state before this change, which needs nothing settled.
     let record = |ops: &[charter_store::Operation], tx: &charter_store::SignedTx| {
-        if !ops.contains(&row) {
-            return Ok(());
-        }
-        let p = mls.pending.get(&group).cloned().unwrap_or_default();
-        mls.pending
-            .insert(group.clone(), p.signed(tx.nonce(), tx.hash()));
+        let p = match (ops.contains(&row), mls.pending.get(&group)) {
+            (true, p) => p.cloned().unwrap_or_default().signed(tx.nonce(), tx.hash()),
+            // A plug or part at the commit's nonce: proof the commit is not there, if mined.
+            (false, Some(p)) if p.nonce == tx.nonce() => p.other(tx.nonce(), tx.hash()),
+            (false, _) => return Ok(()),
+        };
+        mls.pending.insert(group.clone(), p);
         mls.save().map_err(|e| {
             charter_store::StoreError::InvalidOp(format!("recording the commit tx: {e}"))
         })
