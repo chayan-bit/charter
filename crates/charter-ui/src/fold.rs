@@ -128,6 +128,23 @@ fn apply(t: &mut Thread, o: &VerifiedOp, p: &Value) {
     }
 }
 
+/// `(id, title, block)` of each issue or patch of `type_name`, oldest first, without
+/// rendering any markdown (search reads every repo's ops).
+pub fn titles(ops: &[VerifiedOp], type_name: &str) -> Vec<(String, String, u64)> {
+    let created = ops
+        .iter()
+        .filter(|o| o.body.type_name == type_name && o.body.is_create());
+    created
+        .map(|o| {
+            let title = payload(o)["title"]
+                .as_str()
+                .unwrap_or("(untitled)")
+                .to_owned();
+            (hex32(&o.id), title, o.arkiv_order.block)
+        })
+        .collect()
+}
+
 /// Threads of `type_name`, newest first, with reviews attached to patches.
 pub fn threads(ops: &[VerifiedOp], type_name: &str, view: Option<&RepoView>) -> Vec<Thread> {
     let mut by_obj: BTreeMap<[u8; 32], Thread> = BTreeMap::new();

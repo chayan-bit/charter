@@ -45,6 +45,13 @@
 <label class="choice"><input type="radio" name="times" value="both"{% if self.is("times", "both") %} checked{% endif %}><b>Block time and the author's clock</b><small>Adds the time the author's computer signed, which they control.</small></label>
 </fieldset>
 </section>
+<section class="setting" aria-labelledby="s-search">
+<div><h2 id="s-search">Search scope</h2><p>Search always reads the repos on this computer. It can also ask Arkiv for repos you have not fetched.</p></div>
+<fieldset class="choices"><legend class="vh">Search scope</legend>
+<label class="choice"><input type="radio" name="search" value="local"{% if self.is("search", "local") %} checked{% endif %}><b>Local only<span class="tag">default</span></b><small>Instant, and nothing leaves this computer. Finds what is already here.</small></label>
+<label class="choice"><input type="radio" name="search" value="arkiv"{% if self.is("search", "arkiv") %} checked{% endif %}><b>Local + Arkiv</b><small>Also asks Arkiv for repos by name, once when you press Enter or Search, never while you type. Reading costs no tGLM but uses RPC quota: up to 31 queries (310 units) and 1 to 3 s a search. Stops early if the quota is 60 percent used.</small></label>
+</fieldset>
+</section>
 <section class="setting" aria-labelledby="s-theme">
 <div><h2 id="s-theme">Theme</h2><p>The button in the header changes this too.</p></div>
 <fieldset class="choices"><legend class="vh">Theme</legend>

@@ -19,6 +19,7 @@ pub mod markdown;
 pub mod pace;
 mod pages;
 pub mod prefs;
+pub mod search;
 pub mod security;
 pub mod spend;
 pub mod sync_loop;
@@ -49,12 +50,16 @@ pub enum UiError {
 /// The router with every page, the assets and the guard.
 pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
     use axum::routing::post;
-    use pages::{cobs, code, forms, history, live, program, repos, settings, wallet, write};
+    use pages::{
+        cobs, code, forms, history, live, program, repos, search, settings, wallet, write,
+    };
     Router::new()
         .route("/", get(repos::index))
         .route("/wallet", get(wallet::page))
         .route("/wallet/chip", get(wallet::chip_part))
         .route("/wallet/refresh", post(wallet::refresh))
+        .route("/search", get(search::page))
+        .route("/search/fetch", post(search::fetch))
         .route("/settings", get(settings::page).post(settings::save))
         .route("/settings/theme", post(settings::theme_toggle))
         .route("/r/{rid}", get(repos::home))
@@ -122,7 +127,9 @@ pub async fn serve<A: Arkiv + 'static>(
         shared.want(rid);
         shared.focus(rid);
     }
-    let mut app = App::new(cfg.home.clone(), shared.clone(), auth.csrf.clone());
+    // Submitted searches read through the sync loop's twin, which bails on a 429.
+    let mut app = App::new(cfg.home.clone(), shared.clone(), auth.csrf.clone())
+        .with_arkiv(search::arkiv(reads.clone()));
     // Keys stay in this process; without them every write form says why it is missing.
     if let Some(keys) = charter_sync::Keys::load(&cfg.home)? {
         app = app.with_writer(writes::spawn(a.clone(), cfg.clone(), keys));

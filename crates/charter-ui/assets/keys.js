@@ -1,4 +1,5 @@
-// Keyboard map of docs/p6/ui-design.md section 6, the theme toggle (saved through
+// Keyboard map of docs/p6/ui-design.md section 6 (`/` jumps to the search box, or to /search
+// where the header has no room for it), the theme toggle (saved through
 // POST /settings/theme), copy buttons and popover closing.
 // Every action is also a plain link, so pages read the same with JavaScript off.
 (function () {
@@ -72,7 +73,12 @@
       case "k": mark(cur - 1); break;
       case "Enter": case "o": if (!row()) return; go(row().querySelector("a")); break;
       case "u": go(d.querySelector("a[rel=up]")); break;
-      case "/": var f = d.querySelector("input[type=search]"); if (!f) return; f.focus(); break;
+      case "/":
+        var f = d.querySelector("input[type=search]");
+        if (f && f.offsetParent) { f.focus(); f.select(); break; }
+        var s = d.querySelector("a[data-search]");
+        if (!s || !s.offsetParent) return;
+        go(s); break;
       case "y": copy(); break;
       case "v": toggle("#verify"); break;
       case "x": toggle(file()); break;

@@ -520,3 +520,48 @@ dialog.help form { margin-top: 14px; text-align: right; }
 html.has-js .cd-foot .js { display: inline !important; }
 /* Touch screens have no Esc or Cmd Enter to offer. */
 @media (pointer: coarse) { html.has-js .cd-foot .js { display: none !important; } }
+
+/* Search and the Jump to box (docs/p6/ui-v2.md 7.1) */
+.jump { position: relative; flex: 1 1 200px; max-width: 280px; margin-left: 4px; display: flex; align-items: center; }
+.jump > .i { position: absolute; left: 10px; width: 16px; height: 16px; color: var(--ink-3); pointer-events: none; vertical-align: 0; }
+.jump input { width: 100%; height: 36px; padding: 0 34px 0 32px; border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--raised); }
+.jump input::placeholder { color: var(--ink-3); }
+.jump input:hover { border-color: var(--rule-2); }
+.jump kbd { position: absolute; right: 8px; pointer-events: none; }
+html.has-js .jump:focus-within kbd.js { display: none !important; }
+.jump input::-webkit-search-cancel-button { appearance: none; }
+.sform input::-webkit-search-cancel-button { appearance: none; }
+.icon-btn { flex: none; }
+.jump-link { display: none !important; }
+.sform { display: flex; gap: 10px; }
+.sform .input { height: 44px; flex: 1; font-size: var(--t-md); }
+.sform .btn { height: 44px; padding: 0 18px; }
+.sform .btn .i { width: 16px; height: 16px; vertical-align: 0; }
+.scope { margin-top: 10px; }
+.scope a { color: var(--ink-2); }
+.sform + .scope + .notice, .scope + .notice { margin-top: 18px; }
+.hits { border-top: 1px solid var(--ink); }
+.hits > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 14px; align-items: baseline; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+.hits > li.cur { box-shadow: inset 2px 0 0 var(--ink); background: var(--tone); }
+.hits .t { font-weight: 600; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
+a.t:hover { text-decoration: underline; text-decoration-color: var(--rule-2); }
+.hits .t.mono { font-weight: 500; }
+.hits .dir { color: var(--ink-3); }
+.hits .desc { grid-column: 1; color: var(--ink-2); font-size: 14px; overflow-wrap: anywhere; }
+.hits .meta { grid-column: 1; display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: var(--t-sm); color: var(--ink-3); }
+.hits .act { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+.sec > h2 .n { font: 500 var(--t-xs) var(--f-mono); color: var(--ink-3); margin-left: 6px; letter-spacing: 0; }
+.more, .lead { font-size: var(--t-sm); color: var(--ink-3); }
+.more { padding-top: 10px; }
+.sec > .lead { margin: -6px 0 12px; }
+.arkiv .notice { margin-bottom: 12px; }
+.wait { display: flex; gap: 10px; align-items: center; color: var(--ink-2); }
+.wait .i { color: var(--ink-3); animation: spin 1.2s linear infinite; }
+@media (max-width: 900px) {
+  .jump { display: none; }
+  .jump-link { display: inline-flex !important; }
+}
+@media (max-width: 640px) {
+  .wallet { min-width: 0; }
+  .wallet .num { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+}

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyCacheSize":0}'>
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyCacheSize":0,"attributesToSettle":["class","width","height"]}'>
 <meta name="csrf-token" content="{{ l.csrf }}">
 <title>{{ l.title }} - Charter</title>
 <link rel="stylesheet" href="/assets/app.css?v={{ l.v }}">
@@ -21,6 +21,8 @@
 <a href="/wallet"{% if l.nav == "wallet" %} aria-current="page"{% endif %}>Wallet</a>
 <a href="/settings"{% if l.nav == "settings" %} aria-current="page"{% endif %}>Settings</a>
 </nav>
+{% if l.nav != "search" %}<form class="jump" role="search" action="/search" method="get"><label class="vh" for="jump">Jump to</label>{{ m::i(l.v, "magnifying-glass") }}<input id="jump" type="search" name="q" placeholder="Jump to" autocomplete="off" maxlength="100"><kbd class="js" aria-hidden="true">/</kbd></form>
+<a class="btn icon-btn jump-link" href="/search" data-search aria-label="Search">{{ m::i(l.v, "magnifying-glass") }}</a>{% endif %}
 <div class="top-right">
 <span class="sync" role="status" title="{{ l.sync.text }}"><i class="dot {{ l.sync.state }}" aria-hidden="true"></i><span class="txt">{{ l.sync.text }}</span></span>
 <span id="wallet-slot">{% include "wallet_chip_a.html" %}</span>
@@ -44,6 +46,7 @@
 <tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>Repositories</td></tr>
 <tr><td><kbd>g</kbd> then <kbd>c</kbd> <kbd>l</kbd> <kbd>i</kbd> <kbd>p</kbd> <kbd>r</kbd></td><td>Code, Commits, Issues, Patches, Releases</td></tr>
 <tr><td><kbd>g</kbd> <kbd>v</kbd></td><td>What was verified</td></tr>
+<tr><td><kbd>/</kbd></td><td>Jump to: search repos, issues, patches, commits, files</td></tr>
 <tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>Move down, up a list</td></tr>
 <tr><td><kbd>Enter</kbd> <kbd>o</kbd></td><td>Open the row</td></tr>
 <tr><td><kbd>u</kbd></td><td>Up one folder</td></tr>
