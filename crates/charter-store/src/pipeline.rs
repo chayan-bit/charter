@@ -36,6 +36,8 @@ pub struct PipelineConfig {
     /// Above this base fee the pacing budget halves.
     pub high_base_fee: u128,
     pub poll: Duration,
+    /// A head and base fee seen this recently are reused instead of read again.
+    pub fee_fresh: Duration,
     /// Blocks without a receipt before a tx is resent.
     pub resend_after_blocks: u64,
     pub max_resends: u32,
@@ -64,6 +66,7 @@ impl Default for PipelineConfig {
             max_raw_bytes: MAX_RAW_TX_BYTES,
             high_base_fee: 2_000_000_000,
             poll: Duration::from_millis(250),
+            fee_fresh: Duration::from_secs(2),
             resend_after_blocks: 30,
             max_resends: 3,
             reuse_estimates: true,
@@ -222,8 +225,6 @@ struct Priced {
 const HEAD_WAIT: Duration = Duration::from_millis(2_500);
 /// Attempts at sending one signed tx; resending the same bytes can never double-spend.
 const SEND_ATTEMPTS: u32 = 3;
-/// A head and base fee seen this recently are reused instead of read again.
-const FEE_FRESH: Duration = Duration::from_secs(2);
 /// Times a top-up is signed at a freshly read wallet nonce after another sender of the
 /// wallet (another device of the identity) took the one it read (issue #28).
 const TOP_UP_SIGNS: usize = 4;
@@ -489,7 +490,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             self.seen = Some(tip);
         }
         if let Some((head, fee, at)) = self.seen
-            && at.elapsed() < FEE_FRESH
+            && at.elapsed() < self.cfg.fee_fresh
         {
             return Ok((head, fee));
         }
