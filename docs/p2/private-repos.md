@@ -102,6 +102,7 @@ Every verified welcome continues the canonical record, so verified welcomes at d
 A welcome that is not for an unused key package of the joiner is skipped; any other failure to stage it is an error, not a silent skip.
 A removed member that is added again on the same home rejoins: the new welcome replaces its old MLS state of the group (N7).
 Until then its keyring keeps the old epochs, so it can still read history, but no role, so nothing acts on the role it held before the removal.
+If its fetch finds a peer's entries incomplete (`E_CONTROL_NOT_LIVE`), it is told plainly that it was removed from this private repo, under the same code.
 
 ### Late writes and role checks (F3)
 
@@ -158,11 +159,16 @@ This costs no query: the refresh reads the commit rows anyway.
 A pending commit that the refresh did not settle is dropped only when it provably can never land: no tx carrying it was sent, or another tx took the recorded nonce.
 A block count alone is not used, because a tx that timed out can still sit in the pool and land late.
 A used nonce alone is not enough either: the commit's own tx may have taken it, mined after the refresh read the chain or not yet in the node's query index.
-So once the nonce is used, the receipts of the recorded hashes are read; if one of them landed, the change is refused with `E_CONCURRENT_PUSH` and the next refresh merges that commit, and only if none did (none is mined, or the one mined reverted) is it dropped.
-While the nonce is still free, the next membership change first sends a zero-value transfer from the control address at every free nonce up to it.
-If the node refuses one, a tx of that address (the old commit) is still waiting in the pool, and the change is refused with `E_CONCURRENT_PUSH` until it is mined; the next refresh then merges it.
+So once the nonce is used, the receipts of the recorded hashes are read, and the pending commit is dropped only on proof that it is not there: one of its own txs mined and reverted, or a recorded plug (below) mined.
+If one of its txs landed, the change is refused with `E_CONCURRENT_PUSH` and the next refresh merges that commit.
+If no recorded receipt is found, that is unknown, not proof (a node behind the one that reported the nonce), so the change is refused the same way, as possibly still landing.
+That always ends: exactly one tx at the used nonce is mined, and every tx this home signs there from the control address is recorded before it goes out, so its receipt shows once the node catches up.
+The one exception is a tx sent at that nonce by another home sharing this device seed, which is never recorded; that change stays refused until a lookup of the tx by sender and nonce exists.
+While the nonce is still free, the next membership change first checks that the node holds no tx of the control address in its pool, since a transfer priced above a pool tx at the same nonce would replace it (the old commit itself, or a concurrent push from this device); if one is there, the change is refused with `E_CONCURRENT_PUSH` until it is mined.
+Otherwise it sends a zero-value transfer from the control address at every free nonce up to the commit's, recording the one at the commit's nonce first.
+If the node refuses one, a tx of that address arrived meanwhile, and the change is refused the same way.
 If the transfers are mined, the old commit can never land, so it is dropped and the new change is sent after it.
-Those transfers are paid only after an interrupted or lost send, and the receipt reads happen only on that abnormal path; the normal path costs nothing extra (the nonce read replaces the one the send made anyway).
+Those transfers are paid only after an interrupted or lost send, and the receipt and pool reads happen only on that abnormal path; the normal path costs nothing extra (the nonce read replaces the one the send made anyway).
 Pricing a removal in `chart ui` sends nothing and counts those transfers when they would be needed, so the dialog shows the most it can cost.
 
 ### Key package claims (F5)
