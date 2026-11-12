@@ -39,6 +39,30 @@
   var gTo = { h: "[data-go=h]", c: "[data-go=c]", l: "[data-go=l]", i: "[data-go=i]",
     p: "[data-go=p]", r: "[data-go=r]" };
 
+  // The shortcut list lives here, not in every page: only a script opens it.
+  function help() {
+    var h = d.getElementById("help");
+    if (!h) {
+      h = d.createElement("dialog");
+      h.id = "help"; h.className = "help"; h.setAttribute("aria-labelledby", "help-title");
+      h.innerHTML = '<h2 id="help-title">Keyboard shortcuts</h2><table class="keys">' +
+                '<tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>Repositories</td></tr>' +
+        '<tr><td><kbd>g</kbd> then <kbd>c</kbd> <kbd>l</kbd> <kbd>i</kbd> <kbd>p</kbd> <kbd>r</kbd></td><td>Code, Commits, Issues, Patches, Releases</td></tr>' +
+        '<tr><td><kbd>g</kbd> <kbd>v</kbd></td><td>What was verified</td></tr>' +
+        '<tr><td><kbd>/</kbd></td><td>Jump to: search repos, issues, patches, commits, files</td></tr>' +
+        '<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>Move down, up a list</td></tr>' +
+        '<tr><td><kbd>Enter</kbd> <kbd>o</kbd></td><td>Open the row</td></tr>' +
+        '<tr><td><kbd>u</kbd></td><td>Up one folder</td></tr>' +
+        '<tr><td><kbd>y</kbd></td><td>Copy the hash or path</td></tr>' +
+        '<tr><td><kbd>x</kbd></td><td>Fold or unfold a file in a diff</td></tr>' +
+        '<tr><td><kbd>Esc</kbd></td><td>Close</td></tr>' +
+        '<tr><td><kbd>?</kbd></td><td>This help</td></tr>' +
+        '</table><form method="dialog"><button class="btn">Close</button></form>';
+      d.body.appendChild(h);
+    }
+    h.showModal();
+  }
+
   function key(e) {
     var t = e.target, k = e.key;
     var send = d.querySelector("form[data-confirm]");
@@ -82,7 +106,7 @@
       case "y": copy(); break;
       case "v": toggle("#verify"); break;
       case "x": toggle(file()); break;
-      case "?": var h = d.getElementById("help"); if (h) h.showModal(); break;
+      case "?": help(); break;
       default: return;
     }
     e.preventDefault();
@@ -148,7 +172,7 @@
     if (t.matches && t.matches("input[readonly]")) t.select();
     if (!b) return;
     if (b.hasAttribute("data-copy")) copyBtn(b);
-    else if (b.hasAttribute("data-help")) d.getElementById("help").showModal();
+    else if (b.hasAttribute("data-help")) help();
     else theme(b);
   });
   // A confirmed toast hides after 6 s unless hovered or focused; a failed one stays.

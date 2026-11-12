@@ -42,22 +42,5 @@
 <a href="/settings"{% if l.nav == "settings" %} aria-current="page"{% endif %}>{{ m::i(l.v, "gear-six") }}Settings</a>
 <a href="/search" hx-boost="false"{% if l.nav == "search" %} aria-current="page"{% endif %}>{{ m::i(l.v, "magnifying-glass") }}Search</a>
 </nav>
-<dialog id="help" class="help" aria-labelledby="help-title">
-<h2 id="help-title">Keyboard shortcuts</h2>
-<table class="keys">
-<tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>Repositories</td></tr>
-<tr><td><kbd>g</kbd> then <kbd>c</kbd> <kbd>l</kbd> <kbd>i</kbd> <kbd>p</kbd> <kbd>r</kbd></td><td>Code, Commits, Issues, Patches, Releases</td></tr>
-<tr><td><kbd>g</kbd> <kbd>v</kbd></td><td>What was verified</td></tr>
-<tr><td><kbd>/</kbd></td><td>Jump to: search repos, issues, patches, commits, files</td></tr>
-<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>Move down, up a list</td></tr>
-<tr><td><kbd>Enter</kbd> <kbd>o</kbd></td><td>Open the row</td></tr>
-<tr><td><kbd>u</kbd></td><td>Up one folder</td></tr>
-<tr><td><kbd>y</kbd></td><td>Copy the hash or path</td></tr>
-<tr><td><kbd>x</kbd></td><td>Fold or unfold a file in a diff</td></tr>
-<tr><td><kbd>Esc</kbd></td><td>Close</td></tr>
-<tr><td><kbd>?</kbd></td><td>This help</td></tr>
-</table>
-<form method="dialog"><button class="btn">Close</button></form>
-</dialog>
 </body>
 </html>
