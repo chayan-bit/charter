@@ -3,7 +3,9 @@
 //! the leaf out, so the device cannot open the next epoch while the member's other devices
 //! can; two admins racing make one removal, and two removals or refreshes at once from one
 //! admin home leave it in the group; the device's writes after the cut are refused before
-//! the removal lands; and a revoke a stolen device makes removes nothing on its own.
+//! the removal lands; a revoke a stolen device makes removes nothing on its own; and a
+//! membership change interrupted after its tx went out is never dropped while that tx can
+//! still land, so a retry cannot fork the admin off the group.
 
 mod common;
 
@@ -328,5 +330,133 @@ fn a_revoke_from_a_stolen_device_removes_nothing_until_an_admin_acts() {
         invite(net, &w.alice, &eve, rid, Role::Read).await;
         let b = ring(net, &w.bob, rid).await.expect("bob");
         assert!(b.epochs.contains_key(&(e0 + 1)), "the main device reads on");
+    });
+}
+
+/// Waits (bounded) until the pool holds `n` txs.
+async fn pool_holds(net: &Net, n: usize) {
+    for _ in 0..250 {
+        if net.mem.pending() >= n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the pool never held {n} txs");
+}
+
+#[test]
+fn an_interrupted_removal_retried_before_it_lands_forks_the_admin() {
+    run(async {
+        let net = Net::new();
+        let [alice, carol, bob, dan] = [1, 3, 2, 4].map(|s| Peer::new(&net, s));
+        let rid = charter_private::init(&net, &alice.cfg, &alice.keys, &meta("secret"))
+            .await
+            .expect("init");
+        invite(&net, &alice, &carol, &rid, Role::Admin).await;
+        invite(&net, &alice, &bob, &rid, Role::Write).await;
+        invite(&net, &alice, &dan, &rid, Role::Read).await;
+        for p in [&carol, &bob, &dan] {
+            ring(&net, p, &rid).await.expect("join");
+        }
+        net.mine(100);
+        let e0 = current(&ring(&net, &alice, &rid).await.expect("alice"));
+
+        net.hold_mining(true);
+        let bob_nid = bob.keys.nid();
+        let first = charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &bob_nid);
+        tokio::select! {
+            r = first => panic!("finished while mining is held: {r:?}"),
+            () = pool_holds(&net, 1) => {} // the user hits Ctrl-C: the future is dropped
+        }
+        assert_eq!(net.mem.pending(), 1, "the first removal is in the pool");
+
+        let dan_nid = dan.keys.nid();
+        let retry = charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &dan_nid);
+        let retry = tokio::time::timeout(std::time::Duration::from_secs(5), retry).await;
+        let e = retry
+            .expect("answers at once")
+            .expect_err("refused while the first can still land");
+        assert_eq!(e.code(), charter_core::ErrorCode::ConcurrentPush, "{e}");
+        assert_eq!(net.mem.pending(), 1, "the refused retry sent nothing");
+
+        net.hold_mining(false);
+        net.mine(1);
+        let c = ring(&net, &carol, &rid).await.expect("carol");
+        let a = ring(&net, &alice, &rid).await.expect("alice");
+        assert_eq!(current(&c), e0 + 1, "the group took the first removal");
+        assert_eq!(current(&a), current(&c), "alice is on the group's epoch");
+        assert_eq!(
+            a.epochs.get(&(e0 + 1)),
+            c.epochs.get(&(e0 + 1)),
+            "alice holds the group's key"
+        );
+
+        // The retry now goes through on top, and everyone stays on one epoch.
+        charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &dan_nid)
+            .await
+            .expect("retry");
+        let (a, c) = (
+            ring(&net, &alice, &rid).await.expect("alice"),
+            ring(&net, &carol, &rid).await.expect("carol"),
+        );
+        assert_eq!((current(&a), current(&c)), (e0 + 2, e0 + 2));
+        assert_eq!(a.epochs.get(&(e0 + 2)), c.epochs.get(&(e0 + 2)));
+    });
+}
+
+#[test]
+fn a_removal_whose_tx_was_dropped_is_replaced_at_its_nonce_and_the_retry_goes_through() {
+    run(async {
+        let net = Net::new();
+        let [alice, carol, bob, dan] = [1, 3, 2, 4].map(|s| Peer::new(&net, s));
+        let rid = charter_private::init(&net, &alice.cfg, &alice.keys, &meta("secret"))
+            .await
+            .expect("init");
+        invite(&net, &alice, &carol, &rid, Role::Admin).await;
+        invite(&net, &alice, &bob, &rid, Role::Write).await;
+        invite(&net, &alice, &dan, &rid, Role::Read).await;
+        for p in [&carol, &bob, &dan] {
+            ring(&net, p, &rid).await.expect("join");
+        }
+        let e0 = current(&ring(&net, &alice, &rid).await.expect("alice"));
+        let control = alice.keys.control_address(&rid);
+        let n0 = net.tx_count_mined(control).await.expect("nonce");
+
+        // The commit tx is accepted but never mined (evicted from the pool).
+        net.drop_sends_from(control, 0);
+        let bob_nid = bob.keys.nid();
+        let first = charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &bob_nid);
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), first).await;
+        assert!(
+            !matches!(first, Ok(Ok(()))),
+            "the dropped removal did not land: {first:?}"
+        );
+        net.heal();
+
+        charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &dan.keys.nid())
+            .await
+            .expect("the retry replaces the lost tx at its nonce, then goes through");
+        assert!(net.tx_count_mined(control).await.expect("nonce") >= n0 + 2);
+        let (a, c) = (
+            ring(&net, &alice, &rid).await.expect("alice"),
+            ring(&net, &carol, &rid).await.expect("carol"),
+        );
+        assert_eq!(
+            (current(&a), current(&c)),
+            (e0 + 1, e0 + 1),
+            "one removal: dan's"
+        );
+        assert_eq!(a.epochs.get(&(e0 + 1)), c.epochs.get(&(e0 + 1)));
+        let (_, list) = charter_private::members(&net, &carol.cfg, &carol.keys, &rid)
+            .await
+            .expect("members");
+        assert!(
+            list.iter().any(|m| m.0 == bob.keys.nid()),
+            "bob is still in: {list:?}"
+        );
+        assert!(
+            !list.iter().any(|m| m.0 == dan.keys.nid()),
+            "dan is out: {list:?}"
+        );
     });
 }

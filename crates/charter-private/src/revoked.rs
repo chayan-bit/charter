@@ -117,7 +117,7 @@ pub(crate) async fn remove<A: Arkiv>(
     ring: &Keyring,
     rows: &[EntityData],
 ) -> Result<usize> {
-    let Some((next, pre, commit, n)) = removal(a, cfg, keys, mls, ring, rows).await? else {
+    let Some((next, pre, commit, n)) = removal(a, cfg, keys, mls, ring, rows, true).await? else {
         return Ok(0);
     };
     finish(a, cfg, keys, mls, next, pre, commit, None).await?;
@@ -126,7 +126,8 @@ pub(crate) async fn remove<A: Arkiv>(
 
 /// The removal commit [`remove`] would send, with the keyring after it; `None` when there is
 /// nothing to remove or this identity is not an admin. Leaves the commit pending in `mls`
-/// (in memory only: [`finish`] saves it).
+/// (in memory only: [`finish`] saves it). Only with `send` may it send a tx first
+/// ([`crate::group::ready`]).
 async fn removal<A: Arkiv>(
     a: &A,
     cfg: &Config,
@@ -134,11 +135,12 @@ async fn removal<A: Arkiv>(
     mls: &Mls,
     ring: &Keyring,
     rows: &[EntityData],
+    send: bool,
 ) -> Result<Option<(Keyring, Pre, Vec<u8>, usize)>> {
     if rows.is_empty() || ring.role(&keys.nid()) != Some(Role::Admin) {
         return Ok(None);
     }
-    let mut g = ready(a, mls, ring).await?;
+    let mut g = ready(a, mls, ring, keys, send.then_some(cfg)).await?;
     let leaves = pending(a, ring, &g, rows).await?;
     if leaves.is_empty() {
         return Ok(None);
@@ -180,7 +182,8 @@ pub async fn removal_ops<A: Arkiv>(
     let _held = lock(&cfg.home).await?;
     let (mls, ring, rows) = refresh_in(a, cfg, keys, rid).await?;
     let ring = ring.ok_or_else(|| not_member(rid))?;
-    let Some((next, pre, commit, _)) = Box::pin(removal(a, cfg, keys, &mls, &ring, &rows)).await?
+    let Some((next, pre, commit, _)) =
+        Box::pin(removal(a, cfg, keys, &mls, &ring, &rows, false)).await?
     else {
         return Ok(None);
     };

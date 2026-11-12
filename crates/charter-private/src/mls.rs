@@ -61,9 +61,9 @@ pub struct Mls {
     nid: Nid,
     path: PathBuf,
     pub kps: Vec<Hash32>,
-    /// Hex group id to the block this member's pending commit there landed in (or the head
-    /// when its send failed): [`crate::group`] discards a pending commit that never showed
-    /// up on chain only well after it.
+    /// Hex group id to the control-address nonce the tx of this member's pending commit
+    /// there takes: [`crate::group::ready`] discards a pending commit that never showed up on
+    /// chain only once another tx has taken that nonce.
     pub pending: BTreeMap<String, u64>,
 }
 
