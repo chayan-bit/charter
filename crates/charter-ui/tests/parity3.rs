@@ -308,3 +308,112 @@ async fn blob_pages_name_the_code_owners_of_the_file() {
         "an unowned file has no line"
     );
 }
+
+/// Prices `kv` on `app` for `rid`, confirms it and waits for its block; the confirm page.
+async fn write_on(app: &axum::Router, hex: &str, kv: &[(&str, &str)]) -> String {
+    let r = send(app.clone(), form(&format!("/r/{hex}/write"), kv)).await;
+    let page = r.text();
+    assert_eq!(r.status, StatusCode::OK, "{page}");
+    let at = page.find("/write/").expect("confirm form") + 7;
+    let id = &page[at..at + 64];
+    let r = send(app.clone(), form(&format!("/r/{hex}/write/{id}"), &[])).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.text());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let part = send(app.clone(), req(&format!("/r/{hex}/write/{id}?part=1")))
+            .await
+            .text();
+        if part.contains("confirmed") {
+            return page;
+        }
+        assert!(
+            !part.contains("failed") && Instant::now() < deadline,
+            "{part}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_maintainer_archives_and_renames_from_the_manage_page() {
+    let net = Arc::new(Net::new());
+    let alice = Peer::new(&net, 4);
+    let rid = init(&net, &alice, "shelf").await;
+    let hex = hex32(&rid);
+    let keys = charter_sync::Keys::from_seed(charter_crypto::MasterSeed::from_bytes([4; 32]));
+    let w = writes::spawn(net.clone(), alice.cfg.clone(), keys);
+    let app = App::new(
+        alice.home.path().to_path_buf(),
+        Arc::new(Shared::default()),
+        CSRF.into(),
+    );
+    let app = router(
+        Arc::new(app.with_writer(w)),
+        Arc::new(Auth::with(PORT, TOKEN.into(), CSRF.into())),
+    );
+    let round = || async {
+        let r = sync_loop::round(&*net, &alice.cfg, &rid)
+            .await
+            .expect("round");
+        assert!(matches!(r, sync_loop::Outcome::Synced(_)), "{r:?}");
+    };
+    round().await;
+    let get = |p: String| {
+        let app = app.clone();
+        async move {
+            let r = send(app, req(&p)).await;
+            assert_eq!(r.status, StatusCode::OK, "{p}");
+            r.text()
+        }
+    };
+    let home = get(format!("/r/{hex}")).await;
+    assert!(
+        home.contains(&format!(r#"href="/r/{hex}/manage""#)),
+        "{home}"
+    );
+    let page = get(format!("/r/{hex}/manage")).await;
+    assert!(page.contains(r#"name="name" value="shelf""#), "{page}");
+
+    let base = [
+        ("kind", "identity"),
+        ("cur_name", "shelf"),
+        ("back", &format!("/r/{hex}")),
+    ];
+    let kv = [&base[..], &[("name", "shelved"), ("archived", "1")]].concat();
+    let confirm = write_on(&app, &hex, &kv).await;
+    assert!(
+        confirm.contains("Update repository?")
+            && confirm.contains("Renamed to shelved; archived, so it is read only"),
+        "{confirm}"
+    );
+    round().await;
+    let home = get(format!("/r/{hex}")).await;
+    assert!(
+        home.contains("shelved") && home.contains("Archived."),
+        "{home}"
+    );
+    assert!(home.contains(r#"class="arch""#), "header chip: {home}");
+    let list = get("/".to_owned()).await;
+    assert!(
+        list.contains("</svg>Archived</span>"),
+        "repo list chip: {list}"
+    );
+    let new = get(format!("/r/{hex}/issues/new")).await;
+    assert!(
+        new.contains("This repository is archived, so it is read only."),
+        "{new}"
+    );
+    assert!(!new.contains(r#"value="issue""#), "no write form");
+
+    let kv = [
+        ("kind", "identity"),
+        ("cur_name", "shelved"),
+        ("name", "shelved"),
+        ("cur_archived", "1"),
+        ("archived", "0"),
+    ];
+    write_on(&app, &hex, &kv).await;
+    round().await;
+    let home = get(format!("/r/{hex}")).await;
+    assert!(!home.contains("Archived."), "{home}");
+}

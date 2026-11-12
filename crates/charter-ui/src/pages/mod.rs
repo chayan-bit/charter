@@ -156,8 +156,10 @@ pub struct Layout {
     pub theme: &'static str,
     /// System fonts instead of the embedded ones (Settings).
     pub sysfont: bool,
-    /// Write forms are shown (keys are loaded).
+    /// Write forms are shown (keys are loaded and the repo is not archived).
     pub writes: bool,
+    /// The repo is archived, which is why write forms are hidden.
+    pub archived: bool,
     /// Which main destination this page is under: `repos`, `wallet` or `settings`.
     pub nav: &'static str,
     pub sync: SyncChip,
@@ -185,6 +187,7 @@ impl Layout {
             theme: pref.0.theme.attr(),
             sysfont: pref.0.fonts == Fonts::System,
             writes: app.writer.is_some(),
+            archived: false,
             nav: "repos",
             sync: SyncChip::of(&app.shared),
             wallet: app.writer.as_deref().map(wallet::chip),
@@ -196,9 +199,14 @@ impl Layout {
 
     /// Why write forms are missing.
     pub fn off(&self) -> &'static str {
-        write::WRITES_OFF
+        match self.archived {
+            true => ARCHIVED_OFF,
+            false => write::WRITES_OFF,
+        }
     }
 }
+
+pub const ARCHIVED_OFF: &str = "This repository is archived, so it is read only.";
 
 /// Seven hex digits, as every hash is shown.
 pub fn short(h: &str) -> String {
@@ -323,6 +331,8 @@ pub struct Head {
     pub people: People,
     /// The newest signed head: `(block, peer)`, the last push.
     pub pushed: Option<(u64, String)>,
+    /// Archived: read only (issue #63).
+    pub archived: bool,
 }
 
 /// The newest signed head of a view: `(block, peer)`.
@@ -355,8 +365,15 @@ impl Head {
             addr: to_text(&r.rid),
             clock: Clock::of(v),
             pushed: last_push(v),
+            archived: v.is_some_and(|v| v.archived),
             people,
         }
+    }
+
+    /// This computer's identity is one of the repo's maintainers.
+    pub fn maintains(&self) -> bool {
+        let you = self.people.you.as_ref();
+        you.is_some_and(|y| self.verify.delegates.contains(y))
     }
 
     /// A peer's name (alias, nickname or short id, per Settings).
@@ -410,6 +427,21 @@ pub fn frame(app: &App, pref: &Pref, r: &Repo, tab: &'static str, title: &str) -
                    Don't merge or release until a maintainer explains."
                 .into(),
             link: Some((format!("/r/{}#verify", head.hex), "See details".into())),
+        });
+    }
+    if head.archived {
+        // Archive is a convention honest clients keep: the helper refuses pushes, the UI writes.
+        (l.writes, l.archived) = (false, true);
+        l.banners.push(Banner {
+            kind: "off",
+            icon: "archive",
+            lead: "Archived.".into(),
+            text: "This repository is read only: its maintainers stopped taking pushes, \
+                   issues and patches."
+                .into(),
+            link: head
+                .maintains()
+                .then(|| (format!("/r/{}/manage", head.hex), "Manage".into())),
         });
     }
     (l, head)

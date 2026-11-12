@@ -91,6 +91,7 @@ pub const REMOVE_REVOKED: &str = "Remove revoked devices";
 fn steps(rid: &Rid, f: &Fields) -> Result<(String, Vec<Step>), String> {
     Ok(match get(f, "kind") {
         "remove-revoked" => (REMOVE_REVOKED.into(), vec![Step::RemoveRevoked]),
+        "identity" => identity(f)?,
         "issue" => {
             let p = json!({"title": title(f)?, "body": get(f, "body")});
             ("Open issue".into(), vec![op(ISSUE, "create", Obj::New, p)])
@@ -273,6 +274,30 @@ fn fund(f: &Fields) -> Result<(String, Vec<Step>), String> {
     Ok(("Fund bounty".into(), vec![create, pledge, deposit]))
 }
 
+/// A rename, hand-over or archive change as one identity revision; only what differs from
+/// the `cur_*` values the form was drawn with is changed. The body's own rules (name
+/// characters, delegate count) are checked when the revision is built.
+fn identity(f: &Fields) -> Result<(String, Vec<Step>), String> {
+    let name = get(f, "name");
+    let hand_to = match get(f, "hand_to") {
+        "" => None,
+        v => Some(
+            charter_sync::ids::parse_id(v)
+                .map_err(|_| "hand over to: not a peer id (z... or 64 hex digits)")?,
+        ),
+    };
+    let archived = get(f, "archived") == "1";
+    let c = super::IdChange {
+        name: (!name.is_empty() && name != get(f, "cur_name")).then(|| name.to_owned()),
+        hand_to,
+        archived: (archived != (get(f, "cur_archived") == "1")).then_some(archived),
+    };
+    if c == super::IdChange::default() {
+        return Err("nothing changed".into());
+    }
+    Ok(("Update repository".into(), vec![Step::Identity(c)]))
+}
+
 /// The draft a write form describes.
 pub fn draft(rid: &Rid, f: &Fields) -> Result<Draft, String> {
     let (label, steps) = steps(rid, f)?;
@@ -314,6 +339,50 @@ mod tests {
         );
         let want = op(REVIEW, "approve", Obj::Prev, json!({"patch": p, "head": h}));
         assert_eq!(d.steps[1], want);
+    }
+
+    #[test]
+    fn an_identity_form_changes_only_what_differs() {
+        let to = "ab".repeat(32);
+        let base = [("kind", "identity"), ("cur_name", "demo"), ("name", "demo")];
+        let d = draft(&RID, &fields(&[&base[..], &[("archived", "1")]].concat())).expect("draft");
+        let want = super::super::IdChange {
+            archived: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(d.steps, [Step::Identity(want)]);
+        assert_eq!(d.label, "Update repository");
+        let kv = [
+            &base[..],
+            &[("hand_to", to.as_str()), ("cur_archived", "1")],
+        ]
+        .concat();
+        let Step::Identity(c) = &draft(&RID, &fields(&kv)).expect("draft").steps[0] else {
+            panic!("identity step");
+        };
+        assert_eq!((c.archived, c.hand_to), (Some(false), Some([0xab; 32])));
+        assert!(draft(&RID, &fields(&base)).is_err(), "nothing changed");
+        let bad = [&base[..], &[("hand_to", "nope")]].concat();
+        assert!(draft(&RID, &fields(&bad)).is_err());
+        let me = [1; 32];
+        let id = charter_core::IdBody {
+            rid: Some(RID),
+            rev: 1,
+            parent: [2; 32],
+            name: "demo".into(),
+            description: String::new(),
+            default_branch: "main".into(),
+            delegates: vec![me],
+            threshold: 1,
+            visibility: 0,
+            lang: None,
+            license: None,
+            nonce: None,
+            program: None,
+            archived: Some(true),
+        };
+        let moved = c.apply(&id, &me);
+        assert_eq!((moved.delegates, moved.archived), (vec![[0xab; 32]], None));
     }
 
     #[test]

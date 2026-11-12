@@ -106,6 +106,12 @@ fn publishes(d: &Draft) -> String {
     if let Some(t) = triage_summary(d) {
         return t;
     }
+    if let Some(c) = d.steps.iter().find_map(|s| match s {
+        Step::Identity(c) => Some(c),
+        _ => None,
+    }) {
+        return c.summary();
+    }
     if removes(d) {
         return "A new group key that every revoked device is left out of".into();
     }
@@ -201,6 +207,7 @@ fn signed_ops(d: &Draft) -> Vec<(String, String)> {
                 ),
             ],
             Step::Release(_) => vec![],
+            Step::Identity(c) => vec![("identity revision".into(), c.summary())],
             Step::RemoveRevoked => vec![(
                 "MLS commit removing every revoked device's leaf (a new epoch key)".into(),
                 String::new(),

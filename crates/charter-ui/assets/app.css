@@ -172,6 +172,8 @@ main { padding-block: 36px 96px; }
 .repo-name { font-size: var(--t-2xl); font-weight: 700; letter-spacing: -.035em; line-height: 1.05; overflow-wrap: anywhere; }
 .repo-name a { text-decoration: none; }
 .repo-desc { color: var(--ink-2); font-size: var(--t-md); margin-top: 8px; overflow-wrap: anywhere; }
+.repo-name .arch { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border: 1px solid var(--rule-2); border-radius: 999px; font: 600 var(--t-xs)/1 var(--f-ui); letter-spacing: 0; color: var(--ink-2); vertical-align: middle; white-space: nowrap; }
+.repo-name .arch .i { width: 14px; height: 14px; }
 .perm { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: var(--t-sm); color: var(--ink-3); }
 .perm > span { display: inline-flex; gap: 6px; align-items: center; }
 .perm .i { width: 16px; height: 16px; vertical-align: 0; }

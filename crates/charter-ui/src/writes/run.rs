@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use charter_core::{CobOpBody, Hash32, Rid, ZERO};
+use charter_core::{CobOpBody, Hash32, IdBody, Rid, ZERO};
 use charter_crypto::MasterSeed;
 use charter_escrow::ledger;
 use charter_escrow::ops::{self as escrow, DEPOSIT, DepositPayload};
@@ -15,12 +15,14 @@ use charter_store::{
     StoreError, TxHash, TxInfo, TxPipeline, U256,
 };
 use charter_sync::cob::{self, json};
+use charter_sync::identity;
 use charter_sync::push_send::first_write_ops;
 use charter_sync::release::{self, RELEASE_TYPE};
+use charter_sync::state::State;
 use charter_sync::write::{entity_op, price, sign};
 use charter_sync::{Config, Keys, view};
 
-use super::{Balance, Draft, Estimate, Obj, Shared, Status, Step};
+use super::{Balance, Draft, Estimate, IdChange, Obj, Shared, Status, Step};
 
 /// Gas of a plain value transfer.
 const TRANSFER_GAS: u64 = 21_000;
@@ -146,6 +148,33 @@ impl<A: Arkiv> Ctx<A> {
         Ok((gas, ops.len()))
     }
 
+    /// Gas of the identity revision `c` would sign now, signed with `tmp` (same size).
+    async fn identity_gas<B: Arkiv>(
+        &self,
+        b: &B,
+        tmp: &Keys,
+        d: &Draft,
+        c: &IdChange,
+        bind: &mut bool,
+    ) -> Result<(u64, usize), String> {
+        let chain = identity::show(b, &d.rid, &State::default())
+            .await
+            .map_err(err)?;
+        let me = self.keys.nid();
+        let body = identity::next_revision(&chain, &d.rid, |h| c.apply(h, &me)).map_err(err)?;
+        let s = sign(tmp.sk(), &body).map_err(err)?;
+        let mut ops: Vec<Operation> = match std::mem::take(bind) {
+            true => first_write_ops(tmp, &d.rid, &self.cfg).map_err(err)?,
+            false => vec![],
+        };
+        ops.push(entity_op::<IdBody>(&s.bytes, self.cfg.control_lifetime).map_err(err)?);
+        let gas = b
+            .estimate(self.keys.control_address(&d.rid), &ops)
+            .await
+            .map_err(err)?;
+        Ok((gas, ops.len()))
+    }
+
     /// The backend that sends to `rid`: sealed under the keys current now for a private repo.
     async fn for_repo<'b, B: Arkiv>(
         &self,
@@ -188,6 +217,13 @@ impl<A: Arkiv> Ctx<A> {
                     self.control_tx(&mut e, &mut have, TRANSFER_GAS, base_fee);
                 }
                 self.control_tx(&mut e, &mut have, gas, base_fee);
+                steps.push(step);
+                continue;
+            }
+            if let Step::Identity(c) = &step {
+                let (gas, n) = self.identity_gas(&b, &tmp, &d, c, &mut bind).await?;
+                self.control_tx(&mut e, &mut have, gas, base_fee);
+                e.entities += n;
                 steps.push(step);
                 continue;
             }
@@ -276,6 +312,14 @@ impl<A: Arkiv> Ctx<A> {
                     }
                     forget_revoked(&cfg.home, &d.rid);
                     continue;
+                }
+                Step::Identity(c) => {
+                    let me = keys.nid();
+                    identity::propose(tap, cfg, keys, &d.rid, &State::default(), |h| {
+                        c.apply(h, &me)
+                    })
+                    .await
+                    .map_err(err)?
                 }
                 op => {
                     let b = body(&d.rid, op, prev)?;

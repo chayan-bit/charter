@@ -74,6 +74,7 @@ pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
             post(write::confirm).get(write::status),
         )
         .route("/r/{rid}/issues/new", get(forms::new_issue))
+        .route("/r/{rid}/manage", get(forms::manage))
         .route("/r/{rid}/releases/new", get(forms::new_release))
         .route("/r/{rid}/issues", get(cobs::issues))
         .route("/r/{rid}/issues/{id}", get(cobs::issue))

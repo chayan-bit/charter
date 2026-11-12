@@ -220,6 +220,9 @@ pub struct RepoView {
     /// group, which the repo page offers to remove as a priced write. Zero otherwise.
     #[serde(default)]
     pub revoked_leaves: usize,
+    /// The identity head is archived (issue #63); left out of the file when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
 }
 
 impl Cobs {
@@ -265,6 +268,7 @@ impl RepoView {
             issues: 0,
             patches: 0,
             revoked_leaves: 0,
+            archived: id.is_archived(),
         }
     }
 }
