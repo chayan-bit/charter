@@ -346,6 +346,32 @@ async fn bob_app(
     (app, w, hex32(&rid), bob.home)
 }
 
+/// The dialog's figures add up: what is held after is what is held now less the most it costs.
+fn after_is_now_less_most(html: &str) {
+    let (now, most) = (
+        exact(html, "Funds now</dt><dd>"),
+        exact(html, "class=\"amt\""),
+    );
+    assert!(now > most && most > 0, "a non-trivial price: {now} {most}");
+    assert_eq!(
+        exact(html, "After, at least</dt><dd>"),
+        now - most,
+        "{html}"
+    );
+}
+
+/// The exact wei of the first `title="<n> tGLM"` after `at` in `html`.
+fn exact(html: &str, at: &str) -> u128 {
+    let rest = &html[html.find(at).expect(at)..];
+    let n = rest
+        .split("title=\"")
+        .nth(1)
+        .and_then(|r| r.split_once(" tGLM"));
+    let n = n.map(|(n, _)| n).expect("an exact amount");
+    let (int, frac) = n.split_once('.').unwrap_or((n, ""));
+    format!("{int}{frac:0<18}").parse().expect("wei")
+}
+
 async fn confirmed(w: &writes::Writer, id: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -391,7 +417,7 @@ async fn a_write_under_the_small_write_limit_skips_the_dialog_and_is_in_the_ledg
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_dialog_shows_wallet_now_and_after_and_a_confirmed_write_is_in_the_ledger() {
+async fn the_dialog_shows_funds_now_and_after_and_a_confirmed_write_is_in_the_ledger() {
     let (app, w, hex, home) = bob_app(41, 42, None).await;
     let kv = [("kind", "issue"), ("title", "asked")];
     let r = send(app.clone(), form(&format!("/r/{hex}/write"), &kv)).await;
@@ -401,7 +427,7 @@ async fn the_dialog_shows_wallet_now_and_after_and_a_confirmed_write_is_in_the_l
         "What you publish",
         "asked",
         "Most you can pay",
-        "Wallet now",
+        "Funds now",
         "After, at least",
         "Kept for",
         "Public and permanent",
@@ -409,11 +435,18 @@ async fn the_dialog_shows_wallet_now_and_after_and_a_confirmed_write_is_in_the_l
         assert!(html.contains(want), "{want}: {html}");
     }
     assert!(!html.contains("type=\"submit\" disabled"), "{html}");
+    after_is_now_less_most(&html);
     let at = html.find("/write/").expect("form") + 7;
     let id = html[at..at + 64].to_owned();
     let r = send(app.clone(), form(&format!("/r/{hex}/write/{id}"), &[])).await;
     assert_eq!(r.status, StatusCode::SEE_OTHER);
     confirmed(&w, &id).await;
+    // The first write left change at the repo's paying address: this one needs no top-up.
+    let html = send(app.clone(), form(&format!("/r/{hex}/write"), &kv))
+        .await
+        .text();
+    assert!(html.contains("none needed"), "{html}");
+    after_is_now_less_most(&html);
     let t = send(app.clone(), req(&format!("/r/{hex}/write/{id}")))
         .await
         .text();

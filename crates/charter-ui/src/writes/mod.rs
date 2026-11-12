@@ -74,10 +74,6 @@ pub struct Estimate {
     pub value: U256,
     /// What the wallet and the repo's control address hold now.
     pub balance: U256,
-    /// What the wallet alone holds now.
-    pub wallet: U256,
-    /// At most this leaves the wallet itself: top-ups, escrow deposits and their fees.
-    pub from_wallet: U256,
     /// Blocks the written records are kept before they need a renewal.
     pub lifetime: u64,
 }

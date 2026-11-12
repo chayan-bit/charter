@@ -219,7 +219,7 @@ This publishes your approval on Arkiv. Anyone can read it. It cannot be edited o
  Most you can pay                              0.0044 tGLM
  Test tokens, no real value
 
- Wallet now     12.4780 tGLM        Takes      about 10 s
+ Funds now      12.4780 tGLM        Takes      about 10 s
  After          about 12.4736       Kept for   about 6 months, then it needs a renewal
 
  > Breakdown and what will be signed   (technical: records, transactions, top-ups, fee, payload)
@@ -481,7 +481,8 @@ Folio replaced the Geist-based look of section 3.5 and the mockup of section 6: 
 - Slice 2: peer aliases (section 10.4), wall-clock times from block numbers (section 10.5), the Verified popover in plain sentences, "Maintainers", "Rules and CI" (`/r/{rid}/rules`, `/program` kept), and the red conflict banner on every repo page and the repo list.
   Block numbers, entity keys, sequence numbers and ML-DSA details stay inside Technical details disclosures and tooltips.
 - Slice 3: the cost dialog v2 (what is published, the most it can cost, wallet now and after, how long it takes and how long it is kept, a breakdown and what will be signed), the three-step status card (signed, in a block, visible here) that shows the actual fee from the receipts, the `/wallet` page with Refresh and the spend ledger (`ui/spend.json`, newest first, never overwritten when unreadable), the low-balance warning, and Send disabled when the balance cannot cover the worst case or an RPC quota pause is on.
-  The dialog's "Wallet now" is the wallet alone, the same number as the header chip; "After, at least" subtracts only what leaves the wallet (top-ups, escrow deposits and their fees), since the repo's paying address pays the op fees.
+  The dialog's "Funds now" is the wallet plus the repo's paying address, the same pool the not-enough-funds check uses, so it can be above the header chip.
+  "After, at least" is "Funds now" less the most it can cost: top-ups only move tokens between the two, and fees and escrow deposits leave the pool.
 - Also fixed while there: `just now` instead of `0 s ago`, ordered-list markers and large amounts no longer spaced out by tabular figures, the issue-list state column aligned, table cells no longer touching, the status card no longer re-animating on every one-second poll, the author's clock no longer broken mid-phrase in the timeline margin, op fields as phrases ("Bounty: 0.5 tGLM", "Closed as fixed"), "Markdown supported" as the composer hint, and `refs/heads/` dropped from ref names outside Technical details.
 
 ### 10.4 Peer aliases

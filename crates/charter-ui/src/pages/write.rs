@@ -40,8 +40,8 @@ pub struct Confirm {
     pub publish: String,
     /// Most you can pay, rounded up.
     pub most: Amount,
-    pub wallet_now: Amount,
-    pub wallet_after: Amount,
+    pub funds_now: Amount,
+    pub funds_after: Amount,
     /// `about 6 s`.
     pub takes: String,
     /// `about 6 months`.
@@ -226,9 +226,9 @@ fn dialog(app: &App, l: Layout, head: Head, id: String, d: &Draft, e: &Estimate)
         button: format!("{verb} for up to {most}"),
         ask: q,
         publish: publishes(d),
-        // The wallet alone, as the header chip shows it; the repo's paying address pays the rest.
-        wallet_now: amount(e.wallet, false),
-        wallet_after: amount(e.wallet.saturating_sub(e.from_wallet), false),
+        // The wallet plus the repo's paying address: top-ups only move tokens between the two.
+        funds_now: amount(e.balance, false),
+        funds_after: amount(e.balance.saturating_sub(need), false),
         takes: format!("about {} s", 2 * e.txs + 2),
         kept: kept_for(d, e.lifetime),
         most,

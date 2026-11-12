@@ -15,8 +15,8 @@
 {% if let Some(q) = quota %}<div class="notice warn" role="status">{{ m::i(l.v, "pause") }}<p><b>Arkiv is rate limiting this computer.</b> {{ q }}. Nothing was spent.</p></div>{% endif %}
 <div class="price"><span class="label">Most you can pay<small>Test tokens, no real value</small></span><span class="amt" title="{{ most.exact }}">{{ most.num }} <small>{{ most.unit }}</small></span></div>
 <dl class="cfacts">
-<div><dt>Wallet now</dt><dd>{{ m::amt(wallet_now) }}</dd></div>
-<div><dt>After, at least</dt><dd>{{ m::amt(wallet_after) }}</dd></div>
+<div><dt>Funds now</dt><dd>{{ m::amt(funds_now) }}</dd></div>
+<div><dt>After, at least</dt><dd>{{ m::amt(funds_after) }}</dd></div>
 <div><dt>Takes</dt><dd class="tx">{{ takes }}</dd></div>
 <div><dt>Kept for</dt><dd class="tx">{{ kept }}</dd></div>
 </dl>
