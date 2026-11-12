@@ -126,6 +126,27 @@ OpenPGP is not checked because an in-process verifier (`pgp`, rPGP) would add a 
 - The UI commit page shows the result in its "Git signature" row, with the key's `SHA256:` fingerprint; it reads the repo's ops only for a signed commit.
 - Cost: a claim is one op (one transaction); checking a commit costs no query, because claims come from the ops the last sync verified.
 
+## Inline review comments (issue #38)
+
+A review `comment` or `approve` op may carry `comments`, each anchored to one line, or a range of lines, of the patch diff at the op's `head`:
+
+```text
+{ patch, head, body?, comments: [ { path, line, side?, end_line?, body, suggestion? } ] }
+```
+
+- `side` is `new` (the default: a line of the patch head) or `old` (a line of the base); `line` and `end_line` are 1-based, `end_line` defaults to `line` and may be at most 199 lines past it.
+- `suggestion` is replacement text for those lines of the head, so it exists only on the new side; the UI shows it as a small diff of the lines it replaces.
+- All comments of one review go in its one op, so a review with ten comments is still one transaction.
+- Readers check every comment from the chain: at most 32 per op, a path of 1 to 1,024 bytes that is relative and has no control characters, line numbers from 1 to 10,000,000, a body and a suggestion of at most 8,000 characters, and a body or a suggestion present; a bad comment is dropped and the rest of the op still counts.
+- A comment shows under its line when it was made at the patch's current head and the diff shows that line; otherwise it is listed as outdated.
+  Charter does not move comments across versions, since that needs a line mapping every client would have to compute the same way.
+- The diff is the patch head against its merge base with the create op's `base`, else with the default branch; a patch already merged shows its head commit's own diff.
+- Old readers show such an op as an ordinary review with its body and ignore `comments`, so the change is safe for them; no format version changes.
+- The UI's files page (`/r/<rid>/patches/<id>/files`) shows the diff with the comments, and a "+" on any line opens a box for a comment and, on the new side, a suggestion; every box filled in goes out with the review form at the bottom, in one op.
+  The conversation page lists each review's comments, linked to their lines.
+- `chart op post` and the MCP `op_post` tool write them with the payload above.
+- Cost: a review stays two ops (its create and its verdict), whatever the number of comments; the files page reads only the local git cache and the ops the last sync verified.
+
 ## Not in this version
 
 - Keepalive does not extend `cob` entities yet, so ops expire after the control lifetime unless someone extends them.
