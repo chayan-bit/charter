@@ -87,3 +87,59 @@ fn a_claimed_ssh_key_shows_who_signed_a_commit() {
         "refs are refused"
     );
 }
+
+/// An approval of `patch` at `head` by `u`.
+fn approve(u: &User, url: &str, patch: &str, head: &str) {
+    let review = post(
+        u,
+        url,
+        "xyz.arkiv.review",
+        "create",
+        None,
+        &format!(r#"{{"patch":"{patch}"}}"#),
+    );
+    let body = format!(r#"{{"patch":"{patch}","head":"{head}"}}"#);
+    post(u, url, "xyz.arkiv.review", "approve", Some(&review), &body);
+}
+
+#[test]
+fn the_codeowners_program_needs_an_owner_approval_per_changed_path() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root, log) = (tmp.path(), tmp.path().join("chain.log"));
+    let (alice, bob) = (user(root, "alice", &log), user(root, "bob", &log));
+    let (url, work, _) = repo_with_main(&alice, root, "owned");
+    let bob_nid = field(&bob.arkiv(&["keys", "show"]), "nid:").to_owned();
+    write(&work, "CODEOWNERS", format!("*.rs {bob_nid}\n").as_bytes());
+    alice.git(&work, &["add", "-A"]);
+    alice.git(&work, &["commit", "-qm", "chore: owners"]);
+    alice.git(&work, &["push", "-q", &url, "main"]);
+    let file = program("codeowners");
+    let pinned = alice.arkiv(&["program", "pin", "--repo", &url, "--file", &file]);
+    assert!(pinned.contains("program:        rhai/2"), "{pinned}");
+
+    write(&work, "lib.rs", b"fn f() {}\n");
+    alice.git(&work, &["add", "-A"]);
+    alice.git(&work, &["commit", "-qm", "feat: lib"]);
+    let c1 = alice.git(&work, &["rev-parse", "HEAD"]);
+    let patch = post(
+        &alice,
+        &url,
+        "xyz.arkiv.patch",
+        "create",
+        None,
+        &format!(r#"{{"title":"lib","head":"{c1}"}}"#),
+    );
+    approve(&alice, &url, &patch, &c1);
+    let refused = alice.run("git", &work, &["push", &url, "main"]);
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        err.contains("E_PROGRAM_REJECTED: lib.rs needs an approval from one of its owners"),
+        "a delegate is not an owner: {err}"
+    );
+    approve(&bob, &url, &patch, &c1);
+    alice.git(&work, &["push", "-q", &url, "main"]);
+    let carol = User::new(root, "carol", &log);
+    let dest = root.join("carol");
+    carol.git(root, &["clone", "-q", &url, &dest.to_string_lossy()]);
+    assert_eq!(carol.git(&dest, &["rev-parse", "HEAD"]), c1);
+}

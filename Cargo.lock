@@ -2017,7 +2017,9 @@ dependencies = [
 name = "charter-program"
 version = "0.5.0"
 dependencies = [
+ "bs58",
  "charter-crypto",
+ "gix-glob",
  "hex",
  "minicbor",
  "rhai",

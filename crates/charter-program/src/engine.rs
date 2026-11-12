@@ -7,6 +7,7 @@ use std::rc::Rc;
 use rhai::{AST, Blob, CallFnOptions, Dynamic, Engine, EvalAltResult, FuncArgs, Scope};
 
 use crate::ProgramError;
+use crate::host::{self, Calls};
 
 /// Operation budget for one whole fold.
 pub(crate) const FOLD_FUEL: u64 = 5_000_000;
@@ -20,7 +21,7 @@ fn sha256_hex(x: &[u8]) -> String {
 }
 
 /// A fresh engine with every determinism and resource limit set.
-fn hardened(logs: &Logs, spent: &Rc<Cell<u64>>) -> Engine {
+fn hardened(logs: &Logs, spent: &Rc<Cell<u64>>, calls: Option<&Rc<Calls>>) -> Engine {
     let mut e = Engine::new();
     e.disable_symbol("eval");
     e.set_max_operations(CALL_FUEL)
@@ -39,12 +40,15 @@ fn hardened(logs: &Logs, spent: &Rc<Cell<u64>>) -> Engine {
     });
     e.register_fn("sha256_hex", |s: &str| sha256_hex(s.as_bytes()));
     e.register_fn("sha256_hex", |b: Blob| sha256_hex(&b));
+    if let Some(c) = calls {
+        host::register(&mut e, c);
+    }
     e
 }
 
 pub(crate) fn compile(source: &str) -> Result<AST, ProgramError> {
     let (logs, spent) = (Logs::default(), Rc::default());
-    hardened(&logs, &spent)
+    hardened(&logs, &spent, None)
         .compile(source)
         .map_err(|e| ProgramError::Compile(e.to_string()))
 }
@@ -55,21 +59,29 @@ pub(crate) struct Runtime {
     pub(crate) logs: Logs,
     /// Operations spent so far in this fold (a resumed fold starts where it paused).
     pub(crate) spent: Rc<Cell<u64>>,
+    /// The git host of an rhai/2 program; `None` on rhai/1, which has no host functions.
+    pub(crate) calls: Option<Rc<Calls>>,
 }
 
 impl Runtime {
-    pub(crate) fn new() -> Self {
-        Self::resumed(vec![], 0)
+    pub(crate) fn new(calls: Option<Rc<Calls>>) -> Self {
+        Self::resumed(vec![], 0, calls)
     }
 
     /// A runtime that continues a paused fold: its log so far and the fuel it spent.
-    pub(crate) fn resumed(logs: Vec<String>, spent: u64) -> Self {
+    pub(crate) fn resumed(logs: Vec<String>, spent: u64, calls: Option<Rc<Calls>>) -> Self {
         let (logs, spent) = (Rc::new(RefCell::new(logs)), Rc::new(Cell::new(spent)));
         Self {
-            engine: hardened(&logs, &spent),
+            engine: hardened(&logs, &spent, calls.as_ref()),
             logs,
             spent,
+            calls,
         }
+    }
+
+    /// A host question had no answer (objects missing).
+    pub(crate) fn undecided(&self) -> bool {
+        self.calls.as_ref().is_some_and(|c| c.undecided.get())
     }
 
     /// Calls script function `name`; the top level of the script is never re-run.
