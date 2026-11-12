@@ -117,17 +117,18 @@ pub(crate) async fn remove<A: Arkiv>(
     ring: &Keyring,
     rows: &[EntityData],
 ) -> Result<usize> {
-    let Some((next, pre, commit, n)) = removal(a, cfg, keys, mls, ring, rows, true).await? else {
+    let Some((next, pre, commit, n, _)) = removal(a, cfg, keys, mls, ring, rows, true).await?
+    else {
         return Ok(0);
     };
     finish(a, cfg, keys, mls, next, pre, commit, None).await?;
     Ok(n)
 }
 
-/// The removal commit [`remove`] would send, with the keyring after it; `None` when there is
-/// nothing to remove or this identity is not an admin. Leaves the commit pending in `mls`
-/// (in memory only: [`finish`] saves it). Only with `send` may it send a tx first
-/// ([`crate::group::ready`]).
+/// The removal commit [`remove`] would send, with the keyring after it, how many leaves it
+/// removes and how many transfers [`crate::group::ready`] sent first (or, without `send`,
+/// would send); `None` when there is nothing to remove or this identity is not an admin.
+/// Leaves the commit pending in `mls` (in memory only: [`finish`] saves it).
 async fn removal<A: Arkiv>(
     a: &A,
     cfg: &Config,
@@ -136,11 +137,11 @@ async fn removal<A: Arkiv>(
     ring: &Keyring,
     rows: &[EntityData],
     send: bool,
-) -> Result<Option<(Keyring, Pre, Vec<u8>, usize)>> {
+) -> Result<Option<(Keyring, Pre, Vec<u8>, usize, u64)>> {
     if rows.is_empty() || ring.role(&keys.nid()) != Some(Role::Admin) {
         return Ok(None);
     }
-    let mut g = ready(a, mls, ring, keys, send.then_some(cfg)).await?;
+    let (mut g, plugs) = ready(a, mls, ring, keys, send.then_some(cfg)).await?;
     let leaves = pending(a, ring, &g, rows).await?;
     if leaves.is_empty() {
         return Ok(None);
@@ -151,7 +152,7 @@ async fn removal<A: Arkiv>(
     let (epoch, key, id, _) = next_keys(mls, &g, &ring.rid)?;
     next.epochs.insert(epoch, key);
     next.id_rot.insert(epoch, id);
-    Ok(Some((next, pre, commit, leaves.len())))
+    Ok(Some((next, pre, commit, leaves.len(), plugs)))
 }
 
 /// `chart member sync`, `chart device revoke` and the UI's priced write: an admin removes
@@ -171,23 +172,28 @@ pub async fn remove_revoked<A: Arkiv>(
     Box::pin(remove(a, cfg, keys, &mut mls, &ring, &rows)).await
 }
 
-/// The tx [`remove_revoked`] would send now, for pricing it; `None` when it would send
-/// nothing. Sends nothing and saves no commit (the one it builds is dropped).
+/// The commit tx [`remove_revoked`] would send now and how many zero-value transfers from
+/// the same address must land before it (an earlier commit of this home still pending at a
+/// free nonce, [`crate::group::ready`]), for pricing it; `None` when it would send nothing.
+/// Sends nothing and saves no commit (the one it builds is dropped).
 pub async fn removal_ops<A: Arkiv>(
     a: &A,
     cfg: &Config,
     keys: &Keys,
     rid: &charter_core::Rid,
-) -> Result<Option<Vec<Operation>>> {
+) -> Result<Option<(Vec<Operation>, u64)>> {
     let _held = lock(&cfg.home).await?;
     let (mls, ring, rows) = refresh_in(a, cfg, keys, rid).await?;
     let ring = ring.ok_or_else(|| not_member(rid))?;
-    let Some((next, pre, commit, _)) =
+    let Some((next, pre, commit, _, plugs)) =
         Box::pin(removal(a, cfg, keys, &mls, &ring, &rows, false)).await?
     else {
         return Ok(None);
     };
-    Ok(Some(commit_ops(cfg, keys, next, pre, commit, None)?.1))
+    Ok(Some((
+        commit_ops(cfg, keys, next, pre, commit, None)?.1,
+        plugs,
+    )))
 }
 
 /// What a device revoke did to the private repo's group, as this machine sees it after a

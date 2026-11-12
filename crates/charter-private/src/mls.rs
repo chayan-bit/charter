@@ -38,7 +38,7 @@ struct SavedRef<'a> {
     signer: &'a SignatureKeyPair,
     storage: Vec<(String, String)>,
     kps: &'a [Hash32],
-    pending: &'a BTreeMap<String, u64>,
+    pending: &'a BTreeMap<String, Pending>,
 }
 
 #[derive(Deserialize)]
@@ -49,7 +49,7 @@ struct Saved {
     /// Ids (`sha256` of the bytes) of key packages this member published.
     kps: Vec<Hash32>,
     #[serde(default)]
-    pending: BTreeMap<String, u64>,
+    pending: BTreeMap<String, Pending>,
 }
 
 /// OpenMLS storage contents, from [`Mls::snapshot`].
@@ -61,10 +61,32 @@ pub struct Mls {
     nid: Nid,
     path: PathBuf,
     pub kps: Vec<Hash32>,
-    /// Hex group id to the control-address nonce the tx of this member's pending commit
-    /// there takes: [`crate::group::ready`] discards a pending commit that never showed up on
-    /// chain only once another tx has taken that nonce.
-    pub pending: BTreeMap<String, u64>,
+    /// Hex group id to the tx that carries this member's pending commit there, recorded
+    /// before it is sent: [`crate::group::ready`] discards a pending commit that never
+    /// showed up on chain only once another tx has provably taken that nonce.
+    pub pending: BTreeMap<String, Pending>,
+}
+
+/// The control-address nonce of the tx carrying a pending commit and the hash of every tx
+/// signed at it with the commit; none recorded means no such tx was ever sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending {
+    pub nonce: u64,
+    pub txs: Vec<charter_store::TxHash>,
+}
+
+impl Pending {
+    /// `self` after the commit's tx `hash` at `nonce` is signed: a new nonce (a reverted
+    /// tx resent) starts over, the same one adds a hash.
+    pub fn signed(&self, nonce: u64, hash: charter_store::TxHash) -> Self {
+        let mut txs = if nonce == self.nonce {
+            self.txs.clone()
+        } else {
+            vec![]
+        };
+        txs.push(hash);
+        Self { nonce, txs }
+    }
 }
 
 fn create_config() -> MlsGroupCreateConfig {

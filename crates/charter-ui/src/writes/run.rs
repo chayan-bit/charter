@@ -183,7 +183,10 @@ impl<A: Arkiv> Ctx<A> {
             let step = Self::resolve(step).await?;
             if step == Step::RemoveRevoked {
                 e.regroups = true;
-                let gas = self.removal_gas(&d.rid, &mut e).await?;
+                let (gas, plugs) = self.removal_gas(&d.rid, &mut e).await?;
+                for _ in 0..plugs {
+                    self.control_tx(&mut e, &mut have, TRANSFER_GAS, base_fee);
+                }
                 self.control_tx(&mut e, &mut have, gas, base_fee);
                 steps.push(step);
                 continue;
@@ -211,15 +214,17 @@ impl<A: Arkiv> Ctx<A> {
 
     /// Gas of the removal commit `charter_private::revoked::remove_revoked` would send now,
     /// built and dropped without sending (a group refresh and the add and remove path's
-    /// reads: pricing an explicit write, never a background round).
-    async fn removal_gas(&self, rid: &Rid, e: &mut Estimate) -> Result<u64, String> {
-        let ops = charter_private::revoked::removal_ops(&*self.a, &self.cfg, &self.keys, rid)
-            .await
-            .map_err(err)?
-            .ok_or("no revoked device holds a leaf in this repo's group any more")?;
+    /// reads: pricing an explicit write, never a background round), and how many zero-value
+    /// transfers it must send first to retire an earlier commit still pending at a free nonce.
+    async fn removal_gas(&self, rid: &Rid, e: &mut Estimate) -> Result<(u64, u64), String> {
+        let (ops, plugs) =
+            charter_private::revoked::removal_ops(&*self.a, &self.cfg, &self.keys, rid)
+                .await
+                .map_err(err)?
+                .ok_or("no revoked device holds a leaf in this repo's group any more")?;
         e.entities += ops.len();
         let from = self.keys.control_address(rid);
-        self.a.estimate(from, &ops).await.map_err(err)
+        Ok((self.a.estimate(from, &ops).await.map_err(err)?, plugs))
     }
 
     /// One control-address tx of `gas`, preceded by the wallet top-up the send path makes

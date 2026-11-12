@@ -126,42 +126,56 @@ pub(crate) async fn member_ring_in<A: Arkiv>(
 }
 
 /// `ring`'s group, ready for a new commit. A pending commit of this member that the refresh
-/// before did not settle (its row is not on chain) is dropped only once the nonce its tx
-/// took on this member's control address ([`finish`]) is taken on chain by another tx, so it
-/// can never land after a newer commit and fork this home off the group. While that nonce
-/// is still free, `send` sends a zero-value transfer at it first: once that is mined the old
-/// commit cannot land; if the node refuses it, the old commit is still waiting in the pool
-/// and the change is refused with `E_CONCURRENT_PUSH`. Pricing (`send` = `None`) sends
-/// nothing and prices as if the old commit is dropped. Costs one nonce read only while a
-/// commit is pending.
+/// before did not settle (its row is not on chain) can still land, so it is dropped only
+/// when it provably cannot: no tx carrying it was ever sent, or another tx took the nonce
+/// recorded for it ([`finish`]): none of its recorded txs is mined, or the one mined
+/// reverted. If one of them landed (mined after that refresh read the chain, or not yet
+/// indexed), the change is refused with `E_CONCURRENT_PUSH` and the next refresh merges it:
+/// a new commit now would fork this home off the group. While the nonce is still free,
+/// `send` first sends a zero-value transfer at every free nonce up to it: once that is mined
+/// the old commit cannot land; if the node refuses one, a tx of this address is still
+/// waiting in the pool and the change is refused with `E_CONCURRENT_PUSH`. Returns the group
+/// and how many of those transfers it sent; pricing (`send` = `None`) sends nothing and
+/// returns how many it would send. Costs one nonce read while a commit is pending, plus one
+/// receipt read per recorded tx once its nonce is used.
 pub(crate) async fn ready<A: Arkiv>(
     a: &A,
     mls: &Mls,
     ring: &Keyring,
     keys: &Keys,
     send: Option<&Config>,
-) -> Result<MlsGroup> {
+) -> Result<(MlsGroup, u64)> {
     let mut g = mls.load(&ring.group)?;
     let Some((epoch, ..)) = mls.pending_keys(&g, &ring.rid)? else {
-        return Ok(g);
+        return Ok((g, 0));
+    };
+    let Some(p) = mls.pending.get(&hex::encode(&ring.group)) else {
+        mls.clear_pending(&mut g)?;
+        return Ok((g, 0));
     };
     let control = keys.control(&ring.rid);
-    let taken = match mls.pending.get(&hex::encode(&ring.group)) {
-        Some(&nonce) => a.tx_count_mined(control.address()).await? > nonce,
-        // shortcut: no nonce recorded only for a commit saved before this rule (never released).
-        None => true,
-    };
-    if !taken && let Some(cfg) = send {
-        let nonce = mls.pending[&hex::encode(&ring.group)];
+    let mined = a.tx_count_mined(control.address()).await?;
+    let plugs = (p.nonce + 1).saturating_sub(mined);
+    if mined > p.nonce {
+        for h in &p.txs {
+            if a.receipt(*h).await?.is_some_and(|r| r.success) {
+                return Err(SyncError::coded(
+                    ErrorCode::ConcurrentPush,
+                    format!(
+                        "this machine's earlier membership change (epoch {epoch}) was just \
+                         mined; run the command again to make this change after it"
+                    ),
+                ));
+            }
+        }
+    } else if let Some(cfg) = send {
         let chain_id = a.chain_id().await?;
-        let mut p =
+        let mut plug =
             charter_store::TxPipeline::new(a, control.clone(), chain_id, cfg.pipeline.clone())
                 .funded_by(keys.wallet())
-                .at_nonce(nonce);
-        match p
-            .transfer(control.address(), charter_store::U256::ZERO)
-            .await
-        {
+                .at_nonce(mined);
+        let to = (mined..=p.nonce).map(|_| (control.address(), charter_store::U256::ZERO));
+        match plug.transfers(to.collect()).await {
             Ok(_) => {}
             Err(charter_store::StoreError::NonceTooLow(_)) => {
                 return Err(SyncError::coded(
@@ -176,7 +190,7 @@ pub(crate) async fn ready<A: Arkiv>(
         }
     }
     mls.clear_pending(&mut g)?;
-    Ok(g)
+    Ok((g, plugs))
 }
 
 /// The current epoch and every member with its role, number of MLS leaves (devices), and
@@ -268,7 +282,7 @@ async fn add<A: Arkiv>(
         (None, None) => return Err(not_member(rid)),
         _ => {}
     }
-    let mut g = ready(a, &mls, &ring, keys, Some(cfg)).await?;
+    let (mut g, _) = ready(a, &mls, &ring, keys, Some(cfg)).await?;
     let pre = prepare(a, cfg, keys, &ring).await?;
     let (commit, welcome, _) = mls.add(&mut g, kp)?;
     if let Some(role) = role {
@@ -293,7 +307,7 @@ pub async fn remove_member<A: Arkiv>(
     let _held = lock(&cfg.home).await?;
     let (mut mls, mut ring) = member_ring_in(a, cfg, keys, rid).await?;
     ring.require(&keys.nid(), Role::Admin)?;
-    let mut g = ready(a, &mls, &ring, keys, Some(cfg)).await?;
+    let (mut g, _) = ready(a, &mls, &ring, keys, Some(cfg)).await?;
     let pre = prepare(a, cfg, keys, &ring).await?;
     let commit = mls.remove(&mut g, nid)?;
     ring.roles.remove(&hex::encode(nid));
@@ -367,12 +381,13 @@ pub(crate) async fn prepare<A: Arkiv>(
 }
 
 /// Sends the commit (and welcome) for `ring`, the keyring after it. The commit stays pending
-/// in the MLS state, saved before the send together with the control-address nonce its tx
-/// takes, and neither it nor `ring` is applied here: the next refresh merges it if its row
-/// is the first valid commit of its epoch on chain (the lockbox opens under its pending key),
-/// and drops it once another one is; [`ready`] drops it only once that nonce is taken by
-/// another tx. So a lost race, a crash or a failed send never leaves this home on an epoch
-/// the group did not take.
+/// in the MLS state, saved together with the nonce and hash of the tx carrying its row
+/// right before that tx goes out (a split job's later part, or a reverted tx's resend at the
+/// next nonce, saves again). Neither it nor `ring` is applied here: the next refresh merges it
+/// if its row is the first valid commit of its epoch on chain (the lockbox opens under its
+/// pending key), and drops it once another one is; [`ready`] drops it only once another tx
+/// provably took that nonce. So a lost race, a crash or a failed send never leaves this home
+/// on an epoch the group did not take.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finish<A: Arkiv>(
     a: &A,
@@ -384,24 +399,40 @@ pub(crate) async fn finish<A: Arkiv>(
     commit: Vec<u8>,
     welcome: Option<Welcome>,
 ) -> Result<()> {
+    let at = usize::from(pre.peer.is_some()); // the commit row follows a missing peer document
     let (ring, ops) = commit_ops(cfg, keys, ring, pre, commit, welcome)?;
-    let control = keys.control(&ring.rid);
-    // shortcut: assumes the commit tx is one tx (a few KB); a split job would take nonce + 1 too.
+    let row = ops[at].clone();
+    let (group, control) = (hex::encode(&ring.group), keys.control(&ring.rid));
     let nonce = a.tx_count(control.address()).await?;
-    mls.pending.insert(hex::encode(&ring.group), nonce);
-    mls.save()?;
-    let seed = write::Seed::default();
-    write::send_funded_at(
-        a,
-        &control,
-        &keys.wallet(),
-        &cfg.pipeline,
-        nonce,
-        seed,
-        vec![ops],
-    )
-    .await
-    .map(|_| ())
+    mls.pending.remove(&group);
+    // Saved with the pending commit only right before the row's tx goes out: until then the
+    // disk keeps the state before this change, which needs nothing settled.
+    let record = |ops: &[charter_store::Operation], tx: &charter_store::SignedTx| {
+        if !ops.contains(&row) {
+            return Ok(());
+        }
+        let p = mls.pending.get(&group).cloned().unwrap_or_default();
+        mls.pending
+            .insert(group.clone(), p.signed(tx.nonce(), tx.hash()));
+        mls.save().map_err(|e| {
+            charter_store::StoreError::InvalidOp(format!("recording the commit tx: {e}"))
+        })
+    };
+    let chain_id = a.chain_id().await?;
+    charter_store::TxPipeline::new(a, control, chain_id, cfg.pipeline.clone())
+        .funded_by(keys.wallet())
+        .at_nonce(nonce)
+        .on_send(record)
+        .run(vec![ops])
+        .await
+        .map(|_| ())
+        .map_err(|e| match e {
+            charter_store::StoreError::NonceTooLow(m) => SyncError::coded(
+                ErrorCode::ConcurrentPush,
+                format!("{m}: another machine with this device seed is pushing; push again"),
+            ),
+            e => e.into(),
+        })
 }
 
 /// The keyring after the commit (`ring` with this epoch's roles, admin set and pins) and

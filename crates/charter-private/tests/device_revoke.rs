@@ -5,13 +5,20 @@
 //! admin home leave it in the group; the device's writes after the cut are refused before
 //! the removal lands; a revoke a stolen device makes removes nothing on its own; and a
 //! membership change interrupted after its tx went out is never dropped while that tx can
-//! still land, so a retry cannot fork the admin off the group.
+//! still land, nor replaced once it landed (even when the job split or a revert moved the
+//! commit to a later nonce), so a retry cannot fork the admin off the group.
 
 mod common;
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use charter_core::{Nid, Rid};
 use charter_private::{Role, Sealed};
-use charter_store::Arkiv;
+use charter_store::{
+    Address, Arkiv, Operation, Query, QueryOpts, QueryPage, Receipt, SignedTx, StoreError, TxHash,
+    TxInfo, U256,
+};
 use common::sec::*;
 use common::*;
 
@@ -458,5 +465,276 @@ fn a_removal_whose_tx_was_dropped_is_replaced_at_its_nonce_and_the_retry_goes_th
             !list.iter().any(|m| m.0 == dan.keys.nid()),
             "dan is out: {list:?}"
         );
+    });
+}
+
+/// `Net` behind a flaky edge: sends from one address after the first `pass` are kept back
+/// instead of reaching the node; once armed, the next `tx_count_mined` first hands them to
+/// the node and mines a block, so a commit lands between a retry's refresh and its nonce read.
+struct Edge<'a> {
+    net: &'a Net,
+    hold: Mutex<Option<(Address, usize)>>,
+    held: Mutex<Vec<SignedTx>>,
+    armed: AtomicBool,
+}
+
+impl<'a> Edge<'a> {
+    fn new(net: &'a Net) -> Self {
+        Self {
+            net,
+            hold: Mutex::new(None),
+            held: Mutex::new(vec![]),
+            armed: AtomicBool::new(false),
+        }
+    }
+
+    fn holding(self, from: Address, pass: usize) -> Self {
+        *self.hold.lock().expect("hold") = Some((from, pass));
+        self
+    }
+
+    /// Stops holding; the next nonce read lands what was held.
+    fn arm(&self) {
+        *self.hold.lock().expect("hold") = None;
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn held(&self) -> Vec<SignedTx> {
+        self.held.lock().expect("held").clone()
+    }
+
+    async fn holds(&self, n: usize) {
+        for _ in 0..250 {
+            if self.held.lock().expect("held").len() >= n {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("never held {n} txs");
+    }
+}
+
+impl Arkiv for Edge<'_> {
+    async fn chain_id(&self) -> Result<u64, StoreError> {
+        self.net.chain_id().await
+    }
+    async fn head(&self) -> Result<u64, StoreError> {
+        self.net.head().await
+    }
+    async fn base_fee(&self) -> Result<u128, StoreError> {
+        self.net.base_fee().await
+    }
+    async fn query(&self, q: &Query, o: &QueryOpts) -> Result<QueryPage, StoreError> {
+        self.net.query(q, o).await
+    }
+    async fn entity_nonce(&self, c: Address) -> Result<u64, StoreError> {
+        self.net.entity_nonce(c).await
+    }
+    async fn balance(&self, a: Address) -> Result<U256, StoreError> {
+        self.net.balance(a).await
+    }
+    async fn tx_count(&self, a: Address) -> Result<u64, StoreError> {
+        self.net.tx_count(a).await
+    }
+    async fn tx_count_mined(&self, a: Address) -> Result<u64, StoreError> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            let held = std::mem::take(&mut *self.held.lock().expect("held"));
+            for tx in held {
+                self.net
+                    .mem
+                    .send(tx)
+                    .await
+                    .expect("the held tx reaches the node");
+            }
+            self.net.mine(1);
+        }
+        self.net.tx_count_mined(a).await
+    }
+    async fn transaction(&self, h: TxHash) -> Result<Option<TxInfo>, StoreError> {
+        self.net.transaction(h).await
+    }
+    async fn mined_tx(&self, h: TxHash) -> Result<Option<charter_store::MinedTx>, StoreError> {
+        self.net.mined_tx(h).await
+    }
+    async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
+        self.net.block_txs(n).await
+    }
+    async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
+        self.net.estimate(from, ops).await
+    }
+    async fn send(&self, tx: SignedTx) -> Result<TxHash, StoreError> {
+        let kept = {
+            let mut hold = self.hold.lock().expect("hold");
+            match hold.as_mut() {
+                Some((from, 0)) if *from == tx.from() => true,
+                Some((from, pass)) if *from == tx.from() => {
+                    *pass -= 1;
+                    false
+                }
+                _ => false,
+            }
+        };
+        if !kept {
+            return self.net.send(tx).await;
+        }
+        let mut held = self.held.lock().expect("held");
+        if !held.iter().any(|t| t.hash() == tx.hash()) {
+            held.push(tx.clone());
+        }
+        Ok(tx.hash())
+    }
+    async fn receipt(&self, h: TxHash) -> Result<Option<Receipt>, StoreError> {
+        self.net.receipt(h).await
+    }
+}
+
+/// alice (root admin), carol (admin, no peer document yet), bob (write) and dan (read).
+async fn group() -> (Net, [Peer; 4], Rid) {
+    let net = Net::new();
+    let [alice, carol, bob, dan] = [1, 3, 2, 4].map(|s| Peer::new(&net, s));
+    let rid = charter_private::init(&net, &alice.cfg, &alice.keys, &meta("secret"))
+        .await
+        .expect("init");
+    invite(&net, &alice, &carol, &rid, Role::Admin).await;
+    invite(&net, &alice, &bob, &rid, Role::Write).await;
+    invite(&net, &alice, &dan, &rid, Role::Read).await;
+    for p in [&carol, &bob, &dan] {
+        ring(&net, p, &rid).await.expect("join");
+    }
+    (net, [alice, carol, bob, dan], rid)
+}
+
+/// `a` and `b` are both on epoch `want` with the same key.
+async fn one_epoch(net: &Net, a: &Peer, b: &Peer, rid: &Rid, want: u64) {
+    let (ra, rb) = (
+        ring(net, a, rid).await.expect("a"),
+        ring(net, b, rid).await.expect("b"),
+    );
+    assert_eq!(
+        (current(&ra), current(&rb)),
+        (want, want),
+        "one epoch for both"
+    );
+    assert_eq!(ra.epochs.get(&want), rb.epochs.get(&want), "the same key");
+}
+
+/// `admin`'s retry while its earlier commit lands right after the retry's refresh is
+/// refused (the next refresh merges that commit), never sent as a second commit of the
+/// epoch; then a retry goes through on top.
+async fn retry_while_it_lands(
+    edge: &Edge<'_>,
+    admin: &Peer,
+    other: &Peer,
+    dan: &Peer,
+    rid: &Rid,
+    e0: u64,
+) {
+    edge.arm();
+    let e = charter_private::remove_member(edge, &admin.cfg, &admin.keys, rid, &dan.keys.nid())
+        .await
+        .expect_err("refused: the earlier commit just landed");
+    assert_eq!(e.code(), charter_core::ErrorCode::ConcurrentPush, "{e}");
+    one_epoch(edge.net, admin, other, rid, e0 + 1).await;
+    charter_private::remove_member(edge.net, &admin.cfg, &admin.keys, rid, &dan.keys.nid())
+        .await
+        .expect("the retry goes through on top");
+    one_epoch(edge.net, admin, other, rid, e0 + 2).await;
+}
+
+#[test]
+fn an_interrupted_commit_landing_during_the_retry_is_merged_not_forked() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let e0 = current(&ring(&net, &alice, &rid).await.expect("alice"));
+        net.hold_mining(true);
+        let bob = bob.keys.nid();
+        let first = charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &bob);
+        tokio::select! {
+            r = first => panic!("finished while mining is held: {r:?}"),
+            () = pool_holds(&net, 1) => {}
+        }
+        net.hold_mining(false);
+        retry_while_it_lands(&Edge::new(&net), &alice, &carol, &dan, &rid, e0).await;
+    });
+}
+
+/// carol's first commit carries her peer document; a tx cap that fits each op but not both
+/// splits the job, so the commit row rides the second tx, at the next nonce. Interrupted
+/// between the parts, the record names that second tx, so its landing during the retry is
+/// recognised.
+#[test]
+fn a_split_commit_job_is_recorded_at_the_nonce_of_the_tx_carrying_the_commit() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let e0 = current(&ring(&net, &carol, &rid).await.expect("carol"));
+        let control = carol.keys.control_address(&rid);
+        let n0 = net.tx_count(control).await.expect("nonce");
+        let mut cfg = carol.cfg.clone();
+        cfg.pipeline.max_raw_bytes = SPLIT_CAP;
+        let edge = Edge::new(&net).holding(control, 1);
+        let bob = bob.keys.nid();
+        let first = charter_private::remove_member(&edge, &cfg, &carol.keys, &rid, &bob);
+        tokio::select! {
+            r = first => panic!("finished with its commit held back: {r:?}"),
+            () = edge.holds(1) => {}
+        }
+        let held = edge.held();
+        assert_eq!(
+            held[0].nonce(),
+            n0 + 1,
+            "the job split: the commit rides the second tx"
+        );
+        retry_while_it_lands(&edge, &carol, &alice, &dan, &rid, e0).await;
+    });
+}
+
+/// A raw tx cap above carol's commit tx alone (about 20.6 KB) and below it with her peer
+/// document (over 25 KB).
+const SPLIT_CAP: usize = 23_000;
+
+/// The commit tx is mined but reverts; the pipeline resends it at the next nonce, and the
+/// record moves there before that resend goes out.
+#[test]
+fn a_reverted_commit_resent_at_the_next_nonce_is_recorded_there() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let e0 = current(&ring(&net, &alice, &rid).await.expect("alice"));
+        let control = alice.keys.control_address(&rid);
+        let n0 = net.tx_count(control).await.expect("nonce");
+        net.mem.revert_next_at(0);
+        let edge = Edge::new(&net).holding(control, 1);
+        let bob = bob.keys.nid();
+        let first = charter_private::remove_member(&edge, &alice.cfg, &alice.keys, &rid, &bob);
+        tokio::select! {
+            r = first => panic!("finished with its resend held back: {r:?}"),
+            () = edge.holds(1) => {}
+        }
+        assert_eq!(edge.held()[0].nonce(), n0 + 1, "resent at the next nonce");
+        retry_while_it_lands(&edge, &alice, &carol, &dan, &rid, e0).await;
+    });
+}
+
+/// Pricing a removal counts the zero-value transfer the send would make first to retire an
+/// earlier commit of this home still pending at a free nonce, and sends nothing itself.
+#[test]
+fn a_priced_removal_counts_the_transfer_that_retires_a_pending_commit() {
+    run(async {
+        let w = world().await;
+        let (net, rid, alice) = (&w.net, &w.rid, &w.alice);
+        revoke_laptop(net, &w.bob, &w.laptop, rid).await;
+        let priced = || charter_private::revoked::removal_ops(net, &alice.cfg, &alice.keys, rid);
+        let (_, plugs) = priced().await.expect("price").expect("a removal");
+        assert_eq!(plugs, 0, "nothing pending: no transfer first");
+
+        net.hold_mining(true);
+        let bob = w.bob.keys.nid();
+        let first = charter_private::remove_member(net, &alice.cfg, &alice.keys, rid, &bob);
+        tokio::select! {
+            r = first => panic!("finished while mining is held: {r:?}"),
+            () = pool_holds(net, 1) => {}
+        }
+        let (_, plugs) = priced().await.expect("price").expect("a removal");
+        assert_eq!(plugs, 1, "the pending commit's nonce is still free");
+        assert_eq!(net.mem.pending(), 1, "pricing sent nothing");
     });
 }
