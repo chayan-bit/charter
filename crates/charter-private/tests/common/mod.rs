@@ -354,3 +354,19 @@ pub fn run<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
 
 /// The longest any one test may run.
 const TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The epoch `r` is on.
+pub fn current(r: &charter_private::Keyring) -> u64 {
+    r.current().expect("current").0
+}
+
+/// Waits (bounded) until the pool holds `n` txs.
+pub async fn pool_holds(net: &Net, n: usize) {
+    for _ in 0..250 {
+        if net.mem.pending() >= n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the pool never held {n} txs");
+}

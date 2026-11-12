@@ -7,7 +7,7 @@ use charter_store::{Address, Arkiv, Field, Pred, Query, Select, StoreError, TxHa
 use crate::mls::Pending;
 
 /// Blocks one attempt reads at most while looking for the tx at a pending nonce; the next
-/// attempt goes on from [`Pending::cursor`].
+/// attempt goes on down from [`Pending::cursor`].
 pub(crate) const SCAN: u64 = 256;
 
 /// What took a pending commit's recorded nonce.
@@ -81,19 +81,24 @@ async fn seen<A: Arkiv>(a: &A, c: Address, n: u64, b: u64) -> Result<Seen, Store
 }
 
 /// The tx `c` signed at `p.nonce`, mined after block `p.from`. The blocks `c` created an
-/// entity in narrow it (one query: commits, grants, revoke anchors and delegations all
-/// create one), then the blocks left are read in order from `p.cursor`, at most [`SCAN`]
-/// per call. A pass that reaches the head without it (a node behind the one that reported
-/// the nonce used) starts over at `p.from`: `None` stays temporary.
+/// entity in (one query: commits, grants, revoke anchors and delegations all create one)
+/// bound it by binary search: below the first one holding a later nonce, above the last one
+/// holding only earlier ones. The blocks left are then read down from that upper bound (or
+/// the head, or `p.cursor` where the last attempt stopped), since the tx that took the
+/// nonce sits right under the next tx of `c`: at most [`SCAN`] reads per call. A walk that
+/// reaches the lower bound without it (a node behind the one that reported the nonce used)
+/// starts over: `None` stays temporary.
 async fn at_nonce<A: Arkiv>(
     a: &A,
     c: Address,
     p: &mut Pending,
 ) -> Result<Option<TxHash>, StoreError> {
-    let (head, n) = (a.head().await?, p.nonce);
-    let mut lo = p.from.max(p.cursor); // no block up to `lo` holds it
-    let mut hi = head;
-    let mut reads = 0;
+    let n = p.nonce;
+    let mut lo = p.from; // no block up to `lo` holds it
+    let mut hi = match (a.head().await?, p.cursor) {
+        (head, 0) => head,
+        (head, cursor) => head.min(cursor), // every block above `cursor` is ruled out
+    };
     let q = Query::from(Pred::eq(Field::Creator, c));
     let select = Select {
         key: false,
@@ -104,36 +109,32 @@ async fn at_nonce<A: Arkiv>(
         .await?
         .iter()
         .filter_map(|e| e.created_at)
-        .filter(|b| (lo + 1..=head).contains(b))
+        .filter(|b| (lo + 1..=hi).contains(b))
         .collect();
     made.sort_unstable();
     made.dedup();
-    for b in made {
-        if reads == SCAN {
-            p.cursor = lo;
-            return Ok(None);
-        }
+    let mut reads = 0;
+    while !made.is_empty() && reads < SCAN {
+        let b = made[made.len() / 2];
         reads += 1;
         match seen(a, c, n, b).await? {
             Seen::Holds(h) => return Ok(Some(h)),
             Seen::Before => lo = b,
-            Seen::After => {
-                hi = b - 1;
-                break;
-            }
+            Seen::After => hi = b - 1,
             Seen::Absent => {}
         }
+        made.retain(|x| *x != b && (lo + 1..=hi).contains(x));
     }
-    for b in lo + 1..=hi {
+    for b in (lo + 1..=hi).rev() {
         if reads == SCAN {
-            p.cursor = b - 1;
+            p.cursor = b;
             return Ok(None);
         }
         reads += 1;
         match seen(a, c, n, b).await? {
             Seen::Holds(h) => return Ok(Some(h)),
-            Seen::After => break,
-            Seen::Before | Seen::Absent => {}
+            Seen::Before => break,
+            Seen::After | Seen::Absent => {}
         }
     }
     p.cursor = 0;

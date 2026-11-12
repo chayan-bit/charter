@@ -71,7 +71,7 @@ pub struct Mls {
 /// signed at it with the commit, and of every other tx this home signed at it (a plug, a
 /// grant); none recorded means no tx carrying the commit was ever sent. No tx at that nonce
 /// is mined in block `from` or before it, and a search for the one that was
-/// ([`crate::taken`]) has read every block up to `cursor` (when above `from`).
+/// ([`crate::taken`]) has ruled out every block above `cursor` (when not zero).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
     pub nonce: u64,
