@@ -331,7 +331,7 @@ Total about 34 days; slices 0 to 3 (about 14 days) give the biggest visible chan
 | 3 | Cost dialog v2, write progress, wallet page and chip, spend ledger, low-balance and quota variants | 4 | Dialog shows what is published, max cost, balance after and lifetime; no tx hash on the success path; low balance disables Send; the e2e write flow still passes and `chart op list` shows the op | `templates/confirm.html`, `status.html`, `toast.html`, `src/writes/*`, `pages/write.rs`, new `pages/wallet.rs`, `assets/live.js` |
 | 4 | Issues and patches v2: filters, close and reopen, patch Overview, Files changed, Commits, revision picker, checks panel | 6 | A patch shows its diff and checks without leaving the page; the hosted repo's patches show approvals and CI attestation; closing an issue from the UI verifies with `chart op list` | `templates/threads.html`, `thread.html`, new `patch.html`, `src/pages/cobs.rs`, `fold.rs`, `writes/form.rs` |
 | 5 | Releases and Rules and CI pages, humane sizes, copy hash, plain-language rule text, decisions table | 3 | Sizes in MB or KB; the full hash is copyable; each accepted or refused push links to its patch and checks | `templates/releases.html`, `program.html`, `src/pages/program.rs` |
-| 6 | Activity page, local search, "Jump to" box, large-file paging | 4 | Search finds a repo, issue, patch and commit subject from the fixture; a 3,200-line file renders in under 50 ms and under 200 KB; Activity lists a pending review | new `pages/activity.rs`, `pages/search.rs`, `assets/keys.js`, `pages/code.rs`, `highlight.rs` |
+| 6 | Activity page, local search (built, section 10.9), "Jump to" box (built), large-file paging | 4 | Search finds a repo, issue, patch and commit subject from the fixture; a 3,200-line file renders in under 50 ms and under 200 KB; Activity lists a pending review | new `pages/activity.rs`, `pages/search.rs`, `assets/keys.js`, `pages/code.rs`, `highlight.rs` |
 | 7 | Settings: maintainers, identity history, propose and accept, storage and renew with cost preview | 5 | Renew shows the dry-run cost and extends the expiry; adding a maintainer creates an identity proposal visible to `chart id show` | new `pages/settings.rs`, `writes/*`, `cache.rs` |
 | 8 | Phone and accessibility pass, empty and error states for every page, e2e screenshots, performance budget re-check | 2 | Every page has a designed empty, loading and error state; the `ui.md` section 6 budgets pass; axe 0 violations | `templates/*`, `assets/app.css`, `e2e/e2e.py` |
 
@@ -365,7 +365,7 @@ Answered on 2026-11-11; see section 10.1 for who decided what.
 
 The user, on 2026-11-11: "for 6 one can also using quering arkiv as its free right? its slow for now but free right?"
 So slice 6 search gets a second source, Arkiv, next to the local cache.
-This is a design only; nothing of it is built in slices 0 to 3, and the Settings control for it is added only when slice 6 is built.
+This started as a design only; the search part of slice 6 is now built (section 10.9) and the Settings control is there.
 Everything below was read from the code at main 53f7774 (v0.5.0) and from two live read probes on 2026-11-11, one anonymous and one with the access key.
 
 **What `arkiv_query` can filter on.**
@@ -403,7 +403,9 @@ Consequences:
   A search also stops early, and says so, when the quota the RPC reports reaches 60 percent used, well under `pace.rs` `PAUSE_AT` (80 percent), so a search can never push the shared quota into the sync pause.
 - A title search on Arkiv (issues and patches across the network) downloads op pages and matches them locally; it gets the same budget, so it reads at most a few hundred of the newest ops and says how far it got.
 
-**The default is left open for the user.**
+**The default.**
+The user decided on 2026-11-12: search is "Local only" by default, and "Local + Arkiv" is an option on the Settings page (built, section 10.9).
+The costs below are what each choice means.
 What each choice costs:
 
 - Arkiv reads cost no gas and no tGLM, so "free" is right in money.
@@ -456,7 +458,7 @@ So every question in section 7 took its proposed default, and each default is a 
 | 3. Fonts and icons | Embedded (Schibsted Grotesk, IBM Plex Mono, Phosphor) | User (defaults) | Fonts: Charter's or this computer's |
 | 4. Patch status | Infer "merged" when the default branch contains the patch head | User (defaults) | Patch status: infer, or only a merged op |
 | 5. Times | Block time only | User (defaults) | Times: block, or block plus the author's clock (`ts_ms`) |
-| 6. Activity and Search scope | Local cache only for now; Arkiv as a second source in slice 6 (7.1) | User | None yet; the control comes with slice 6 |
+| 6. Activity and Search scope | Search defaults to local only; Arkiv is an option in Settings (decided 2026-11-12, built, see 10.9). Activity is not built yet | User | Search scope: Local only (default) or Local + Arkiv |
 | 7. Order | Slices 0 to 3 first | User (defaults) | - |
 | Visual direction | Folio (design A): light-first, reads like a document, one green accent meaning only "proven", ink buttons | Coordinator | Theme: system, light or dark |
 
@@ -472,7 +474,7 @@ Folio replaced the Geist-based look of section 3.5 and the mockup of section 6: 
 - Settings never reads the chain: the peer table comes from the cached views.
 - A write skipped under the small-write limit lands on its status page with "Sent without asking", shows the actual cost, and is recorded in the spend ledger with `skipped: true`.
   The limit applies only when the write moves no funds (no escrow deposit), its estimate is at most the limit, the balance covers it and no RPC quota pause is on.
-- Future work: a search-scope choice (local, or local plus Arkiv) when slice 6 is built.
+- Search scope: "Local only" (default) or "Local + Arkiv", stored in the same file as `"search": "local"` or `"arkiv"` (section 10.9).
 
 ### 10.3 What was built
 
@@ -551,3 +553,39 @@ The writer reads the wallet balance once at start, once when pricing (as before)
 - Workspace tests (581), `cargo fmt --check` and `cargo clippy -D warnings` pass; `tests/pace.rs` adds the refs-only push from another device (it failed before the probe fix); `tests/v2.rs` adds 8 tests (vocabulary and no bare block numbers on 14 pages, aliases, branches and picker, the conflict banner, Settings applied, kept across a restart, mode 0600, bad input and missing CSRF refused, corrupt-file reset, the small-write skip, the dialog fields and the ledger, and the unfunded case).
 - The e2e run on the fake chain: 1,495 checks pass, 3 warn (two synthetic long pages over 20 KB and debug-build timing on one of them), 0 fail, including the live update of section 10.7 and the tab fade at both ends on 76 phone pages; axe reports 0 WCAG 2.1 A and AA violations on 50 page and state runs, including the confirm dialog with its breakdown open.
 - `e2e/run.sh` now exits 0 when every check passes and `E2E_WORK` keeps the work directory (its cleanup trap's last test used to set the exit status to 1).
+
+### 10.9 Built: search and "Jump to" (slice 6, search part)
+
+The user decided on 2026-11-12 that search is local only by default, with "Local + Arkiv" as an option in Settings.
+Activity and large-file paging, the rest of slice 6, are not built.
+
+- Page: `GET /search?q=` (`pages/search.rs`, `search.rs`).
+  Local results come from the cache at once and never touch the chain: repo names and descriptions, issue and patch titles (read from the ops without rendering markdown), commit subjects (the newest 2,000 commits of each default branch) and file names (the default branch's tree, up to 20,000 paths).
+  Every query word must match, case-insensitively, as a substring; each section shows 20 rows and says how many more matched.
+  Private repos in this home are searched like any other cached repo.
+- "Jump to": a box in the header on every page but Search (`/` focuses it; Esc blurs it).
+  It is a plain GET form, so it works without JavaScript.
+  Up to 900 px wide the box does not fit, so a "Search" link takes its place: in the header nav from 641 px, in the bottom tab bar on phones (a fourth tab); `/` opens `/search` there.
+  The header was made to fit at every width from 320 px up (the tGLM unit and, from 641 to 760 px, the ? button give way; at 340 px and below the ? button goes and a long balance shortens).
+- Page weight: the Search page's own CSS is `search.css`, linked by that page only, so other pages carry just the header box.
+  Every link into Search is `hx-boost="false"` (a full load), because htmx does not merge `<head>` links on a boosted swap.
+  Net weight against `2907c34` on the e2e fixture, HTML raw and HTML plus CSS gzipped: home -306 B and -728 B, repo -311 B and -740 B, blob -309 B and -729 B, long blob -309 B and -796 B, long commit -309 B and -775 B.
+  The Jump to box and the Search links add about 0.7 KB of HTML and 0.25 KB of gzipped CSS per page; they are paid for on the shared pages by moving the shortcut help dialog out of every page into `keys.js` (built when first opened, only a script opens it; `keys.js` is cached), by serving `app.css` and `search.css` without comments, indentation and blank lines (`assets.rs`; the sources keep them, a test checks no rule is lost), and by deleting five rule groups no template used (`.page-head .actions`, `.btn-quiet`, `.grow`, `.commit .subj`, `.ledger .trail`).
+  Server time did not move: three alternating runs of each build on the same machine gave the same spread (the base build alone drifted from 11 ms to 26 ms p50 on the long commit page as the machine got busier), so the two extra e2e timing warnings seen on the first version (blob max 51 ms against 50, long commit p50 20.6 ms against 20) were noise.
+  `budget` and `render_time` list `/search` and `/search?q=main`; `render_time` caps them at the section 6 limits (p50 under 20 ms, p99 under 50 ms).
+- Setting: `Search scope`, "Local only" (default) or "Local + Arkiv", in `ui/prefs.json` as `search`.
+- With "Local + Arkiv", the page renders the local results and a loading section; an htmx request then asks Arkiv.
+  The request is made once per submitted search (Enter or the Search button) and never while typing, because typing sends nothing.
+  Nothing else asks: the sync loop and `pace.rs` are untouched, and "Local only" makes zero chain calls (asserted with the fake chain's `Meter`).
+- Query cost: the first word, if it can be a repo name (`[a-z0-9._-]`, at most 64 bytes), goes to `charter_sync::search::search_until` as a name prefix with a limit of 10 candidates.
+  That is 1 candidate query plus the identity re-read of each candidate (3 queries per one-maintainer repo), so at most 31 queries (310 units) for 10 candidates; the test with 3 candidates sees exactly 10.
+  `search_until` is `search` with a check before each verification; the UI stops there at 60 percent of the RPC quota used (a report older than its window is ignored) and says so.
+  A finished search is kept in memory for 5 minutes, so a reload or Back asks nothing; a failed or stopped one is not kept.
+  Under a 429 pause (`Shared::quota_wait`) it asks nothing.
+- Arkiv hits are verified by the library (the head must still match), then dropped unless the name looks like a repo; the description is stripped of control characters and cut at 200 characters, and language and licence must look like short tags.
+  All of it is escaped by the templates.
+  Hits already on this computer are not repeated in the Arkiv section.
+- Each Arkiv row says "On Arkiv, not on this computer" and has a Fetch button: `POST /search/fetch` (CSRF-guarded) calls `Shared::want`, the call `chart ui <rid>` makes, so the sync loop runs the first sync at once and the repo then shows under Repositories.
+- States: empty, no match, loading, found, nothing asked (a word Arkiv cannot match, a quota pause), stopped early, and failed (rate limit, or Arkiv did not answer; the detail goes to the log, not the page).
+- Left out: the "Verify 10 more" button, and the title search of issues and patches across the network on Arkiv (it needs op rows downloaded and signature-checked; only repo names are searched on Arkiv); matching beyond the first word on Arkiv; live results while typing (local search runs on submit too).
+- Also changed: htmx no longer settles the `style` attribute (`attributesToSettle`), because the CSP forbids inline styles and a screenshot tool's `style=""` on a focused input made the swap log a CSP violation; the header icon sprite has a 32nd symbol (magnifying glass); `e2e/fixture.sh` adds two repos that exist only on the chain (one with a hostile description) for the Arkiv path of the e2e.

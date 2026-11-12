@@ -121,6 +121,16 @@ g add -A && g commit -q -m "feat: a commit on a branch with a very long name"
 g push -q "$url" feat/chore/rename-everything-for-the-narrow-layout-stress/with-more-segments-after-it || echo "warning: long-ref push failed" >&2
 g checkout -q main
 
+# Repos on the chain that are not on this computer (search on Arkiv): another key and home.
+(
+  export HOME="$root/elsewhere" CHARTER_HOME="$root/elsewhere/.charter" CHARTER_ALIAS=bob
+  mkdir -p "$HOME"
+  chart keys init >/dev/null
+  chart fund --dev 1000000 >/dev/null
+  chart init --name charter-elsewhere --description 'A repo that is only on Arkiv' >/dev/null 2>&1
+  chart init --name charter-evil --description '<img src=x onerror=alert(1)> <script>alert(2)</script>' >/dev/null 2>&1
+)
+
 cat > "$root/env.sh" <<ENV
 export CHART_BIN_DIR="$bin"
 export HOME="$root/home"

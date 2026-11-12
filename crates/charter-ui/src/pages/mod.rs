@@ -10,6 +10,7 @@ pub mod money;
 pub mod people;
 pub mod program;
 pub mod repos;
+pub mod search;
 pub mod settings;
 mod verify;
 pub mod wallet;
@@ -48,6 +49,11 @@ pub struct App {
     pub writer: Option<Arc<crate::writes::Writer>>,
     /// Local preferences (`ui/prefs.json`).
     pub prefs: Store,
+    /// The Arkiv source of a submitted search ([`crate::search::arkiv`]); `None` in tests
+    /// that read no chain.
+    pub arkiv: Option<crate::search::ArkivSearch>,
+    /// Arkiv results by query for a few minutes, so a reload or Back costs no queries.
+    arkiv_seen: Mutex<HashMap<String, (std::time::Instant, Arc<crate::search::ArkivFound>)>>,
     /// One gix handle and last-commit index per repo, keyed by the `synced_ms` of the view
     /// they were read under.
     repos: Mutex<HashMap<Rid, Opened>>,
@@ -61,7 +67,17 @@ impl App {
             shared,
             csrf,
             writer: None,
+            arkiv: None,
+            arkiv_seen: Mutex::default(),
             repos: Mutex::default(),
+        }
+    }
+
+    /// Submitted searches may also ask Arkiv, through `f`.
+    pub fn with_arkiv(self, f: crate::search::ArkivSearch) -> Self {
+        Self {
+            arkiv: Some(f),
+            ..self
         }
     }
 
@@ -158,7 +174,7 @@ pub struct Layout {
     pub sysfont: bool,
     /// Write forms are shown (keys are loaded).
     pub writes: bool,
-    /// Which main destination this page is under: `repos`, `wallet` or `settings`.
+    /// Which main destination this page is under: `repos`, `wallet`, `search` or `settings`.
     pub nav: &'static str,
     pub sync: SyncChip,
     pub wallet: Option<WalletChip>,

@@ -64,6 +64,8 @@ impl Config {
     pub fn for_fake(home: PathBuf) -> Self {
         let mut c = Self::new(home);
         c.pipeline.poll = Duration::ZERO;
+        // A cached fee that expired on a slow machine would add a read the gate counts.
+        c.pipeline.fee_fresh = Duration::MAX;
         c
     }
 

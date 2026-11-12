@@ -67,7 +67,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .amtc { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .amtc .u { display: inline-block; width: 4ch; text-align: left; }
 .nw { white-space: nowrap; }
-.grow { flex: 1; }
 .js { display: none !important; } html.has-js .js { display: inline-flex !important; }
 html.has-js .nojs { display: none; }
 .skip { position: absolute; left: 8px; top: -60px; z-index: 50; padding: 8px 12px; background: var(--raised); border: 1px solid var(--rule-2); border-radius: var(--r-ctl); }
@@ -81,8 +80,6 @@ html.has-js .nojs { display: none; }
 .btn-ink:hover { background: var(--ink-2); border-color: var(--ink-2); }
 .btn-ink:disabled { background: var(--tone-2); color: var(--ink-3); border-color: var(--tone-2); }
 .btn-sm { height: 30px; padding: 0 10px; font-size: 13px; }
-.btn-quiet { border-color: transparent; background: transparent; }
-.btn-quiet:hover { background: var(--tone); border-color: transparent; }
 .icon-btn { width: 36px; padding: 0; }
 .chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px; border-radius: 999px; font-size: var(--t-xs); font-weight: 600; white-space: nowrap; background: var(--tone); color: var(--ink-2); }
 .chip .i { width: 14px; height: 14px; vertical-align: 0; }
@@ -127,7 +124,6 @@ main { padding-block: 36px 96px; }
 .page-head { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; margin-bottom: 28px; }
 .page-head h1 { font-size: var(--t-xl); font-weight: 700; line-height: 1.15; }
 .page-head p { color: var(--ink-2); margin-top: 6px; max-width: 62ch; }
-.page-head .actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .input, .fm input:not([type=radio]):not([type=checkbox]), .fm textarea { min-height: 36px; padding: 6px 12px; border: 1px solid var(--rule-2); border-radius: var(--r-ctl); background: var(--raised); min-width: 0; width: 100%; line-height: 1.5; }
 .input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .input:hover, .fm input:hover, .fm textarea:hover { border-color: var(--ink-3); }
@@ -320,8 +316,6 @@ x-f { color: var(--sx-f); } x-t { color: var(--sx-t); } x-o { color: var(--ink-2
 .ledger .who { font-size: 14px; color: var(--ink-3); }
 .ledger .who b { color: var(--ink); font-weight: 650; }
 .ledger .text { margin-top: 6px; }
-.ledger .trail { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: var(--t-xs); color: var(--ink-3); }
-.ledger .trail code { font-size: 11.5px; }
 .ledger .kv { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 2px 16px; font-size: var(--t-sm); color: var(--ink-3); }
 .ledger .kv code { color: var(--ink-2); overflow-wrap: anywhere; }
 .ledger li.cur .bd { box-shadow: inset 2px 0 0 var(--ink); padding-left: 10px; }
@@ -329,8 +323,6 @@ x-f { color: var(--sx-f); } x-t { color: var(--sx-t); } x-o { color: var(--ink-2
 .day:first-child { margin-top: 0; }
 .day h2 { grid-column: 3; font-size: var(--t-md); font-weight: 650; }
 .commit { display: flex; gap: 6px 16px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
-.commit .subj { font-weight: 600; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; min-width: 0; }
-.commit .subj:hover { text-decoration: underline; }
 .pager { display: flex; gap: 16px; margin-top: 12px; font-size: 14px; }
 
 /* Threads and lists of them */
@@ -487,7 +479,7 @@ dialog.help form { margin-top: 14px; text-align: right; }
   .ledger .sp::after { top: 6px; }
   .day { grid-template-columns: 22px 1fr; } .day h2 { grid-column: 2; }
   .code { --gw: calc(4ch + 16px); } .code .ln { padding: 0 6px 0 10px; }
-  .botnav { display: grid; grid-template-columns: repeat(3, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 25; background: var(--paper); border-top: 1px solid var(--rule); padding: 6px max(8px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px)); }
+  .botnav { display: grid; grid-template-columns: repeat(4, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 25; background: var(--paper); border-top: 1px solid var(--rule); padding: 6px max(8px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px)); }
   .botnav a { display: grid; justify-items: center; gap: 2px; padding: 6px 0; font-size: 12px; font-weight: 500; color: var(--ink-3); text-decoration: none; border-radius: var(--r-ctl); }
   .botnav a[aria-current] { color: var(--ink); font-weight: 650; }
   .botnav .i { width: 22px; height: 22px; }
@@ -520,3 +512,32 @@ dialog.help form { margin-top: 14px; text-align: right; }
 html.has-js .cd-foot .js { display: inline !important; }
 /* Touch screens have no Esc or Cmd Enter to offer. */
 @media (pointer: coarse) { html.has-js .cd-foot .js { display: none !important; } }
+
+.jump { position: relative; flex: 1 1 200px; max-width: 280px; margin-left: 4px; display: flex; align-items: center; }
+.jump > .i { position: absolute; left: 10px; width: 16px; height: 16px; color: var(--ink-3); pointer-events: none; vertical-align: 0; }
+.jump input { width: 100%; height: 36px; padding: 0 34px 0 32px; border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--raised); }
+.jump input::placeholder { color: var(--ink-3); }
+.jump input:hover { border-color: var(--rule-2); }
+.jump kbd { position: absolute; right: 8px; pointer-events: none; }
+html.has-js .jump:focus-within kbd.js { display: none !important; }
+.jump input::-webkit-search-cancel-button { appearance: none; }
+.icon-btn { flex: none; }
+.primary .s { display: none; }
+@media (max-width: 900px) {
+  .jump { display: none; }
+  .primary .s { display: inline; }
+}
+@media (min-width: 641px) and (max-width: 800px) {
+  .wallet small { display: none; }
+  .primary a { padding-inline: 8px; }
+}
+@media (min-width: 641px) and (max-width: 760px), (max-width: 340px) {
+  html.has-js .help-btn { display: none !important; }
+}
+@media (min-width: 641px) and (max-width: 760px) {
+  .top-in, .top-right { gap: 6px; }
+}
+@media (max-width: 340px) {
+  .wallet, .wallet .num { min-width: 0; }
+  .wallet .num { overflow: hidden; text-overflow: ellipsis; }
+}

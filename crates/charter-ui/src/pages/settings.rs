@@ -13,7 +13,9 @@ use axum::response::{IntoResponse, Response};
 
 use super::{App, Layout, Pref, blocking, html, short};
 use crate::cache::{self, RepoView};
-use crate::prefs::{self, Fonts, MAX_NICK, MAX_SKIP, Merged, Names, Prefs, Theme, Times};
+use crate::prefs::{
+    self, Fonts, MAX_NICK, MAX_SKIP, Merged, Names, Prefs, SearchScope, Theme, Times,
+};
 use crate::sync_loop::cached_repos;
 
 /// A peer the nickname table offers: id, alias, repos it appears in.
@@ -166,6 +168,11 @@ pub fn from_form(f: &BTreeMap<String, String>) -> Result<Prefs, String> {
             &[("block", Times::Block), ("both", Times::Both)],
         )?,
         theme: theme(f)?,
+        search: pick(
+            f,
+            "search",
+            &[("local", SearchScope::Local), ("arkiv", SearchScope::Arkiv)],
+        )?,
     })
 }
 
@@ -233,13 +240,14 @@ mod tests {
             .collect()
     }
 
-    const BASE: [(&str, &str); 6] = [
+    const BASE: [(&str, &str); 7] = [
         ("names", "both"),
         ("small", "always"),
         ("fonts", "embedded"),
         ("merged", "infer"),
         ("times", "block"),
         ("theme", "system"),
+        ("search", "local"),
     ];
 
     #[test]

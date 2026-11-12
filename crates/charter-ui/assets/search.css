@@ -1,0 +1,23 @@
+/* The Search page (docs/p6/ui-v2.md 7.1); loaded by that page only, so no other page pays for it. */
+.sform { display: flex; gap: 10px; }
+.sform .input { height: 44px; flex: 1; font-size: var(--t-md); }
+.sform .btn { height: 44px; padding: 0 18px; }
+.sform .btn .i { width: 16px; height: 16px; vertical-align: 0; }
+.scope { margin-top: 10px; }
+.scope a { color: var(--ink-2); }
+.sform + .scope + .notice, .scope + .notice { margin-top: 18px; }
+.rows.hits > li { grid-template-columns: minmax(0, 1fr) auto; gap: 2px 14px; padding: 12px 0; }
+.hits span.t { font-weight: 600; overflow-wrap: anywhere; }
+.hits .t.mono { font-weight: 500; }
+.hits .dir { color: var(--ink-3); }
+.hits .desc, .hits .meta { grid-column: 1; }
+.hits .desc { color: var(--ink-2); font-size: 14px; overflow-wrap: anywhere; }
+.hits .act { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+.sec > h2 .n { font: 500 var(--t-xs) var(--f-mono); color: var(--ink-3); margin-left: 6px; letter-spacing: 0; }
+.more, .lead { font-size: var(--t-sm); color: var(--ink-3); }
+.more { padding-top: 10px; }
+.sec > .lead { margin: -6px 0 12px; }
+.arkiv .notice { margin-bottom: 12px; }
+.wait { display: flex; gap: 10px; align-items: center; color: var(--ink-2); }
+.wait .i { color: var(--ink-3); animation: spin 1.2s linear infinite; }
+.sform input::-webkit-search-cancel-button { appearance: none; }

@@ -215,13 +215,14 @@ async fn an_equivocation_shows_the_red_banner_on_every_repo_page() {
     assert!(t.contains("has conflicting histories"), "{t}");
 }
 
-const DEFAULTS: [(&str, &str); 6] = [
+const DEFAULTS: [(&str, &str); 7] = [
     ("names", "both"),
     ("small", "always"),
     ("fonts", "embedded"),
     ("merged", "infer"),
     ("times", "block"),
     ("theme", "system"),
+    ("search", "local"),
 ];
 
 /// Each changed preference, as one issue/patch page renders it.
@@ -265,6 +266,7 @@ async fn settings_apply_at_once_survive_a_restart_and_refuse_bad_input() {
         ("merged", "ops"),
         ("times", "both"),
         ("theme", "dark"),
+        ("search", "local"),
     ];
     let r = send(app.clone(), form("/settings", &kv)).await;
     assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.text());

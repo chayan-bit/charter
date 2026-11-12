@@ -262,6 +262,16 @@ async fn bench_gate() {
     );
 }
 
+/// The gate compares exact counts, so nothing it measures may depend on the wall clock. The
+/// one clock the pipeline reads is its fee cache: with a stale cache a push re-reads the
+/// head (50 -> 51 rounds, 68 -> 69 calls in `push_table_new`, as on a loaded machine).
+#[test]
+fn the_fake_chain_config_never_lets_the_fee_cache_expire() {
+    let cfg = charter_sync::Config::for_fake(std::env::temp_dir());
+    assert_eq!(cfg.pipeline.fee_fresh, std::time::Duration::MAX);
+    assert_eq!(cfg.pipeline.poll, std::time::Duration::ZERO);
+}
+
 #[test]
 fn gate_fails_a_deliberately_slowed_operation() {
     let m = Metrics {
