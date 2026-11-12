@@ -275,7 +275,8 @@ pub struct TxPipeline<'a, A: Arkiv> {
 }
 
 /// See [`TxPipeline::on_send`].
-type OnSend<'a> = Box<dyn FnMut(&[Operation], &SignedTx) -> Result<(), StoreError> + Send + 'a>;
+type OnSend<'a> =
+    Box<dyn FnMut(&[Operation], &SignedTx, u64) -> Result<(), StoreError> + Send + 'a>;
 
 impl<'a, A: Arkiv> TxPipeline<'a, A> {
     pub fn new(arkiv: &'a A, signer: PrivateKeySigner, chain_id: u64, cfg: PipelineConfig) -> Self {
@@ -302,14 +303,15 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         }
     }
 
-    /// Calls `f` with the ops and the signed tx of every tx this sender signs, right before
+    /// Calls `f` with the ops, the signed tx and a head read before it was signed (so the
+    /// tx can only be mined in a later block) of every tx this sender signs, right before
     /// its first send: a split job's parts, a reverted job's resend at a new nonce, a plain
     /// transfer and a gap-plugging transfer (no ops) included; a resend of the same bytes
     /// keeps its hash. An error sends nothing of that window (or that plug) and fails the
     /// run. For a caller that must record which tx takes a nonce before it can land.
     pub fn on_send(
         mut self,
-        f: impl FnMut(&[Operation], &SignedTx) -> Result<(), StoreError> + Send + 'a,
+        f: impl FnMut(&[Operation], &SignedTx, u64) -> Result<(), StoreError> + Send + 'a,
     ) -> Self {
         self.on_send = Some(std::sync::Mutex::new(Box::new(f)));
         self
@@ -697,8 +699,8 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             let mut f = f.lock().unwrap_or_else(|p| p.into_inner());
             for (_, body, .., tx) in &signed {
                 match body {
-                    Job::Execute(ops) => f(ops, tx)?,
-                    Job::Transfer(..) => f(&[], tx)?,
+                    Job::Execute(ops) => f(ops, tx, sent_at)?,
+                    Job::Transfer(..) => f(&[], tx, sent_at)?,
                 }
             }
         }
@@ -1004,7 +1006,7 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         };
         let tx = SignedTx::sign(&self.signer, self.chain_id, params)?;
         if let Some(f) = &self.on_send {
-            f.lock().unwrap_or_else(|p| p.into_inner())(&[], &tx)?;
+            f.lock().unwrap_or_else(|p| p.into_inner())(&[], &tx, sent_at)?;
         }
         match send_retrying(self.arkiv, &tx).await {
             Ok(()) => Ok(Some(InFlight {

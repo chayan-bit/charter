@@ -360,6 +360,7 @@ mod tests {
             to: Some(charter_store::ARKIV_ADDRESS),
             block: 9,
             index: 0,
+            nonce: 0,
             input: charter_store::execute_calldata(&[op]),
         };
         let rows = crate::observe::to_observed(

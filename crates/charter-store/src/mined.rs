@@ -21,6 +21,8 @@ pub struct MinedTx {
     pub block: u64,
     /// Index in the block.
     pub index: u32,
+    /// The sender's nonce it was signed at.
+    pub nonce: u64,
     pub input: Bytes,
 }
 
@@ -143,6 +145,7 @@ mod tests {
             to: Some(ARKIV_ADDRESS),
             block: 42,
             index: 3,
+            nonce: 0,
             input: execute_calldata(&ops),
         };
         let rows = tx_rows(&tx);

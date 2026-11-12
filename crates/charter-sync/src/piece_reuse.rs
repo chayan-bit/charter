@@ -85,6 +85,7 @@ fn sealed_under<A: Arkiv>(a: &A, rid: &Rid) -> Result<Option<String>> {
         to: Some(charter_store::ARKIV_ADDRESS),
         block: 0,
         index: 0,
+        nonce: 0,
         input: charter_store::execute_calldata(&a.seal_ops(vec![op])?),
     };
     Ok(epochs(&tx).next().flatten())
@@ -202,6 +203,7 @@ mod tests {
             to: Some(charter_store::ARKIV_ADDRESS),
             block: 9,
             index: 0,
+            nonce: 0,
             input: charter_store::execute_calldata(&[piece(bytes, ep)]),
         }
     }

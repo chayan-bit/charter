@@ -583,7 +583,7 @@ async fn on_send_names_each_tx_and_its_ops_before_it_goes_out() {
     let last = blob(60_000, DAY, 2);
     let seen = std::sync::Mutex::new(vec![]);
     let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default()).on_send(
-        |ops, tx| {
+        |ops, tx, _| {
             seen.lock()
                 .expect("seen")
                 .push((tx.nonce(), tx.hash(), ops.contains(&last)));
@@ -613,11 +613,12 @@ async fn on_send_names_each_tx_and_its_ops_before_it_goes_out() {
 
     fake.revert_next_at(0);
     let calls = std::sync::Mutex::new(vec![]);
-    let mut p =
-        TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default()).on_send(|_, tx| {
+    let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default()).on_send(
+        |_, tx, _| {
             calls.lock().expect("calls").push((tx.nonce(), tx.hash()));
             Ok(())
-        });
+        },
+    );
     let landed = with_miner(fake.clone(), p.run(vec![vec![small("r", 0, 0)]]))
         .await
         .expect("resent");
@@ -630,12 +631,15 @@ async fn on_send_names_each_tx_and_its_ops_before_it_goes_out() {
     let named = std::sync::Mutex::new(vec![]);
     let to = vec![(key.address(), U256::ZERO); 2];
     let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default()).on_send(
-        |ops, tx| {
-            named.lock().expect("named").push((ops.len(), tx.nonce()));
+        |ops, tx, at| {
+            named
+                .lock()
+                .expect("named")
+                .push((ops.len(), tx.nonce(), at));
             Ok(())
         },
     );
-    with_miner(fake.clone(), p.transfers(to))
+    let sent = with_miner(fake.clone(), p.transfers(to))
         .await
         .expect("transfers");
     drop(p);
@@ -646,9 +650,15 @@ async fn on_send_names_each_tx_and_its_ops_before_it_goes_out() {
         "transfers are named too, with no ops: {named:?}"
     );
     assert!(named.iter().all(|n| n.0 == 0) && named[1].1 == named[0].1 + 1);
+    assert!(
+        named
+            .iter()
+            .all(|n| sent.iter().all(|l| l.receipt.block_number > n.2)),
+        "each is named with a head before the block it was mined in: {named:?}"
+    );
 
     let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default())
-        .on_send(|_, _| Err(StoreError::InvalidOp("not recorded".into())));
+        .on_send(|_, _, _| Err(StoreError::InvalidOp("not recorded".into())));
     let before = fake.tx_count(key.address()).await.expect("count");
     let err = with_miner(fake.clone(), p.run(vec![vec![small("r", 1, 1)]])).await;
     assert!(matches!(err, Err(StoreError::InvalidOp(_))), "{err:?}");

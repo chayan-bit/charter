@@ -356,6 +356,7 @@ impl Inner {
             to: Some(p.to),
             block: n,
             index: tx_index,
+            nonce: p.nonce,
             input: p.input.clone(),
         };
         self.mined.insert(p.hash, mined);
