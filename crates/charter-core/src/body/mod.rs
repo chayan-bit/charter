@@ -25,7 +25,7 @@ pub use head_v4::{
     HEAD_V4_LAYOUT_VERSION, HeadBodyV4, MAX_TABLE_PIECES, MAX_TABLE_SIZE, RefTable, decode_table,
     effective_refs, encode_table,
 };
-pub use id::{IdBody, ProgramPin};
+pub use id::{ID_ARCHIVED_LAYOUT_VERSION, IdBody, ProgramPin};
 pub use pack::{Pack, PackPieces};
 pub use peer::{BindBody, IdAccBody, PeerBody};
 pub use refs::{RefEntry, RefsBody};
@@ -43,6 +43,13 @@ pub trait Body: Sized + Clone {
     const AG_KIND: &'static str = Self::KIND.name();
     /// The `ag.v` entity layout version.
     const AG_V: u64 = crate::ENTITY_LAYOUT_VERSION;
+    /// The newest `ag.v` this kind may carry; a body says which one it needs ([`Body::ag_v`]).
+    const AG_V_MAX: u64 = Self::AG_V;
+
+    /// The `ag.v` of this body; the attribute check makes an entity carry exactly it.
+    fn ag_v(&self) -> u64 {
+        Self::AG_V
+    }
 
     /// Canonical CBOR bytes.
     fn encode(&self) -> Vec<u8>;

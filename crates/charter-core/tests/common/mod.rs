@@ -120,6 +120,7 @@ pub fn root_body(delegates: Vec<Nid>, threshold: u64) -> IdBody {
         license: Some("MIT".into()),
         nonce: Some([9u8; 16]),
         program: None,
+        archived: None,
     }
 }
 

@@ -26,7 +26,7 @@ pub fn entity_attributes<B: Body>(env: &Envelope, env_bytes: &[u8], body: &B) ->
     let h = content_hash(B::KIND, env_bytes);
     let mut v = vec![
         Attribute::str("ag.kind", B::AG_KIND),
-        Attribute::u64("ag.v", B::AG_V),
+        Attribute::u64("ag.v", body.ag_v()),
         Attribute::new("ag.body", AttrValue::Bytes(env_bytes.to_vec())),
     ];
     v.extend(body.extra_attributes(&env.signer, &h));
@@ -44,7 +44,7 @@ fn kind_and_bytes<B: Body>(obs: &Observed) -> Result<&[u8], FormatError> {
         }
     }
     match obs.attr("ag.v") {
-        Some(AttrValue::U64(v)) if *v == B::AG_V => {}
+        Some(AttrValue::U64(v)) if (B::AG_V..=B::AG_V_MAX).contains(v) => {}
         Some(AttrValue::U64(v)) => {
             return Err(FormatError::Unsupported {
                 what: "entity layout version",

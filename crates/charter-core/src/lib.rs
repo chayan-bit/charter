@@ -22,10 +22,10 @@ mod types;
 pub use attrs::{AttrValue, Attribute, check_arkiv_rules, chunk_attributes};
 pub use body::{
     AnchorBody, BindBody, Body, CREATE, CobOpBody, DEVICE_LAYOUT_VERSION, DEVICE_SEQ, DeviceBody,
-    HEAD_V3_LAYOUT_VERSION, HeadBody, HeadBodyV3, HeadPack, HeadRef, IdAccBody, IdBody, MAX_ACTION,
-    MAX_HEAD_PIECES, MAX_PAYLOAD, MAX_TYPE_NAME, ManifestBody, Pack, PackPieces, PackV3, PeerBody,
-    PieceRef, PieceRun, ProgramPin, RefEntry, RefsBody, Require, head_patch_attributes,
-    open_head_calldata, runs,
+    HEAD_V3_LAYOUT_VERSION, HeadBody, HeadBodyV3, HeadPack, HeadRef, ID_ARCHIVED_LAYOUT_VERSION,
+    IdAccBody, IdBody, MAX_ACTION, MAX_HEAD_PIECES, MAX_PAYLOAD, MAX_TYPE_NAME, ManifestBody, Pack,
+    PackPieces, PackV3, PeerBody, PieceRef, PieceRun, ProgramPin, RefEntry, RefsBody, Require,
+    head_patch_attributes, open_head_calldata, runs,
 };
 pub use body::{
     HEAD_V4_LAYOUT_VERSION, HeadBodyV4, MAX_TABLE_PIECES, MAX_TABLE_SIZE, RefTable, decode_table,
