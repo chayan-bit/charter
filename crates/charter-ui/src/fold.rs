@@ -38,6 +38,8 @@ pub struct Entry {
     pub block: u64,
     /// `(kind, verified)` of each proof attachment the fold checked.
     pub proofs: Vec<(String, Option<bool>)>,
+    /// Inline comments of a review op ([`crate::inline`]).
+    pub inline: Vec<crate::inline::Inline>,
 }
 
 /// An issue or a patch.
@@ -103,7 +105,7 @@ fn entry(o: &VerifiedOp, p: &Value, view: Option<&RepoView>) -> Entry {
         .as_object()
         .map(|m| {
             m.iter()
-                .filter(|(k, _)| !matches!(k.as_str(), "title" | "body" | "proofs"))
+                .filter(|(k, _)| !matches!(k.as_str(), "title" | "body" | "proofs" | "comments"))
                 .filter(|(k, _)| {
                     !(triaged && matches!(k.as_str(), "labels" | "assignees" | "milestone"))
                 })
@@ -115,7 +117,12 @@ fn entry(o: &VerifiedOp, p: &Value, view: Option<&RepoView>) -> Entry {
         true => (triage::labels(p), triage::assignees(p)),
         false => (vec![], vec![]),
     };
+    let inline = match o.body.type_name == REVIEW {
+        true => crate::inline::parse(p),
+        false => vec![],
+    };
     Entry {
+        inline,
         milestone: triage::milestone(p).filter(|_| o.body.action == "milestone"),
         labels,
         people,

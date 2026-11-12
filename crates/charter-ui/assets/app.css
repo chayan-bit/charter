@@ -297,6 +297,31 @@ details.tech > summary { cursor: pointer; font-size: var(--t-sm); font-weight: 6
 .diff tr.hunk td { background: var(--tone); color: var(--ink-3); padding-block: 4px; }
 .diff td.hunk { padding-left: 2ch; }
 .codefoot, .more { font-size: var(--t-sm); color: var(--ink-3); padding-top: 10px; }
+/* Inline review comments (files page): a "+" in the sign column opens a box under the line. */
+.diff td.lc { position: relative; }
+.diff .ac > summary { position: absolute; top: 2px; left: calc(-2ch - 2px); width: calc(2ch - 2px); height: 18px; display: grid; place-items: center; border-radius: 4px; background: var(--ink); color: var(--paper); font: 600 12px/1 var(--f-ui); cursor: pointer; list-style: none; opacity: 0; }
+.diff .ac > summary::-webkit-details-marker { display: none; }
+.diff tr:hover .ac > summary, .diff .ac > summary:focus-visible, .diff .ac[open] > summary { opacity: 1; }
+@media (hover: none) { .diff .ac > summary { opacity: .35; } }
+.diff .acbox { display: grid; gap: 6px; max-width: 72ch; padding: 6px 0 10px; white-space: normal; }
+.diff .acbox textarea { width: 100%; min-height: 0; padding: 6px 10px; border: 1px solid var(--rule-2); border-radius: var(--r-ctl); background: var(--raised); font: 400 14px/1.5 var(--f-ui); color: var(--ink); resize: vertical; }
+.diff .acbox textarea.mono { font: 13px/1.6 var(--f-mono); }
+.diff tr.ic > td { padding: 10px 16px 12px calc(var(--gw) * 2 + 2ch); background: var(--raised); border-block: 1px solid var(--rule); white-space: normal; }
+.note { max-width: 80ch; font: 400 14px/1.6 var(--f-ui); }
+.note + .note { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.note .who { color: var(--ink-2); }
+.note .who b { color: var(--ink); font-weight: 650; }
+.note .md { margin-top: 4px; }
+.note:target { outline: 2px solid var(--warn); outline-offset: 4px; border-radius: 2px; }
+.note .sgh { margin-top: 8px; font-size: var(--t-sm); font-weight: 600; color: var(--ink-2); }
+.note .sug { margin-top: 4px; border: 1px solid var(--rule); border-radius: var(--r-ctl); overflow: hidden; }
+.note .sug tr td { padding-block: 0; } .note .sug .lc { padding-right: 12px; white-space: pre-wrap; }
+details.outdated { margin: 4px 0 20px; padding: 10px 14px; border-radius: var(--r-ctl); background: var(--tone); }
+details.outdated > summary { cursor: pointer; font-size: 14px; font-weight: 600; color: var(--ink-2); }
+details.outdated[open] > summary { margin-bottom: 10px; }
+.ledger .inl { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.ledger .inl li { padding-left: 12px; border-left: 2px solid var(--rule-2); }
+.ledger .inl code { font-size: 13px; }
 .file { border-top: 1px solid var(--ink); margin-bottom: 28px; }
 .file > summary { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--rule); cursor: pointer; list-style: none; }
 .file > summary::-webkit-details-marker { display: none; }

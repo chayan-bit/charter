@@ -10,6 +10,7 @@ pub mod money;
 pub mod people;
 pub mod program;
 pub mod repos;
+pub mod review;
 pub mod settings;
 mod verify;
 pub mod wallet;

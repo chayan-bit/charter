@@ -231,13 +231,24 @@ fn review(f: &Fields) -> Result<(String, Vec<Step>), String> {
     let (_, patch) = id(f, "patch")?;
     let create = op(REVIEW, "create", Obj::New, json!({"patch": patch}));
     let body = get(f, "body");
+    let comments = inline_comments(f)?;
     let (label, verdict) = match get(f, "verdict") {
         "approve" => {
             let mut p = json!({"patch": patch, "head": oid(f, "head")?});
             if !body.is_empty() {
                 p["body"] = json!(body);
             }
+            if !comments.is_empty() {
+                p["comments"] = Value::Array(comments);
+            }
             ("Approve patch", op(REVIEW, "approve", Obj::Prev, p))
+        }
+        "comment" if !comments.is_empty() => {
+            let mut p = json!({"patch": patch, "head": oid(f, "head")?, "comments": comments});
+            if !body.is_empty() {
+                p["body"] = json!(body);
+            }
+            ("Review patch", op(REVIEW, "comment", Obj::Prev, p))
         }
         "comment" => {
             let p = json!({"patch": patch, "body": need(f, "body")?});
@@ -246,6 +257,53 @@ fn review(f: &Fields) -> Result<(String, Vec<Step>), String> {
         v => return Err(format!("unknown verdict {v:?}")),
     };
     Ok((label.into(), vec![create, verdict]))
+}
+
+/// Inline comments from the files page: `c.<file>.<n|o>.<line>` holds a comment on that
+/// line of file `p.<file>`, on the new or old side, and `s.<file>.n.<line>` a suggested
+/// replacement; empty boxes are skipped. Checked as every reader checks them.
+fn inline_comments(f: &Fields) -> Result<Vec<Value>, String> {
+    let mut at: Vec<(usize, &str, u32, &str)> = vec![];
+    for (k, v) in f {
+        let mut it = k.splitn(4, '.');
+        let (Some("c"), Some(i), Some(side), Some(n)) =
+            (it.next(), it.next(), it.next(), it.next())
+        else {
+            continue;
+        };
+        let bad = || format!("bad inline comment field {k:?}");
+        let i = i.parse::<usize>().map_err(|_| bad())?;
+        let side = match side {
+            "n" => "new",
+            "o" => "old",
+            _ => return Err(bad()),
+        };
+        let n = n.parse::<u32>().map_err(|_| bad())?;
+        let suggestion = get(f, &format!("s.{i}.n.{n}"));
+        if !v.trim().is_empty() || (side == "new" && !suggestion.is_empty()) {
+            at.push((i, side, n, v.trim()));
+        }
+    }
+    at.sort();
+    if at.len() > crate::inline::MAX_COMMENTS {
+        let max = crate::inline::MAX_COMMENTS;
+        return Err(format!("a review carries at most {max} inline comments"));
+    }
+    let mut out = vec![];
+    for (i, side, n, body) in at {
+        let mut c =
+            json!({"path": need(f, &format!("p.{i}"))?, "side": side, "line": n, "body": body});
+        let suggestion = f.get(&format!("s.{i}.n.{n}")).map_or("", |s| s.trim_end());
+        if side == "new" && !suggestion.trim().is_empty() {
+            c["suggestion"] = json!(suggestion);
+        }
+        out.push(c);
+    }
+    let checked = crate::inline::parse(&json!({ "comments": out })).len();
+    match checked == out.len() {
+        true => Ok(out),
+        false => Err("an inline comment is too long or names a bad line".into()),
+    }
 }
 
 /// A pledge that raises the issue's bounty (`bounty.rhai` counts `pledge` ops; a follow-up

@@ -30,6 +30,9 @@ struct Fx {
     plain: String,
     /// Labelled `bug` and `docs`, milestone `v1`, assigned to alice.
     issue: String,
+    /// A patch from `plain` to `unclaimed`, with an inline comment at that head and one
+    /// at an older head.
+    patch: String,
     _work: tempfile::TempDir,
 }
 
@@ -121,6 +124,44 @@ async fn build() -> Fx {
     .await;
     let other = json!({"title": "Untriaged"});
     post(&net, &alice, &rid, "xyz.arkiv.issue", "create", ZERO, other).await;
+    let pj = json!({"title": "Add files", "head": unclaimed, "base": plain});
+    let patch = post(&net, &alice, &rid, "xyz.arkiv.patch", "create", ZERO, pj).await;
+    let ph = hex32(&patch);
+    let rv = post(
+        &net,
+        &alice,
+        &rid,
+        "xyz.arkiv.review",
+        "create",
+        ZERO,
+        json!({"patch": ph}),
+    )
+    .await;
+    let inline = |head: &str, body: &str| {
+        json!({"patch": ph, "head": head, "body": "Looks fine", "comments": [
+            {"path": "b.txt", "line": 1, "body": body, "suggestion": "b, better"}
+        ]})
+    };
+    post(
+        &net,
+        &alice,
+        &rid,
+        "xyz.arkiv.review",
+        "comment",
+        rv,
+        inline(&claimed, "Old note"),
+    )
+    .await;
+    post(
+        &net,
+        &alice,
+        &rid,
+        "xyz.arkiv.review",
+        "comment",
+        rv,
+        inline(&unclaimed, "Rename this"),
+    )
+    .await;
     let r = sync_loop::round(&net, &alice.cfg, &rid)
         .await
         .expect("round");
@@ -128,6 +169,7 @@ async fn build() -> Fx {
     Fx {
         hex: hex32(&rid),
         issue: hex32(&issue),
+        patch: ph,
         net: Arc::new(net),
         alice,
         rid,
@@ -236,8 +278,12 @@ fn writing_app() -> axum::Router {
     )
 }
 
+/// One write at a time: every writing test signs with alice's keys, from one address.
+static WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Prices `kv`, confirms it and waits for its block; returns the confirm page.
 async fn write(kv: &[(&str, &str)]) -> String {
+    let _one = WRITES.lock().await;
     let (f, app) = (fx(), writing_app());
     let r = send(app.clone(), form(&format!("/r/{}/write", f.hex), kv)).await;
     let page = r.text();
@@ -265,7 +311,7 @@ async fn write(kv: &[(&str, &str)]) -> String {
 #[tokio::test]
 async fn the_triage_form_signs_one_op_per_change() {
     let f = fx();
-    let before = cob::list(&*f.net, &f.rid, None, None)
+    let before = cob::list(&*f.net, &f.rid, None, Some("xyz.arkiv.issue"))
         .await
         .expect("list")
         .len();
@@ -285,7 +331,10 @@ async fn the_triage_form_signs_one_op_per_change() {
         page.contains("Update issue?") && page.contains("Labels added: ui"),
         "{page}"
     );
-    let ops = cob::list(&*f.net, &f.rid, None, None).await.expect("list");
+    // Issue ops only: other tests write review ops on the same chain at the same time.
+    let ops = cob::list(&*f.net, &f.rid, None, Some("xyz.arkiv.issue"))
+        .await
+        .expect("list");
     assert_eq!(ops.len(), before + 1, "one op for one kind of change");
     let last = ops.last().expect("op");
     assert_eq!(
@@ -416,4 +465,70 @@ async fn a_maintainer_archives_and_renames_from_the_manage_page() {
     round().await;
     let home = get(format!("/r/{hex}")).await;
     assert!(!home.contains("Archived."), "{home}");
+}
+
+#[tokio::test]
+async fn inline_comments_sit_under_their_line_and_old_ones_are_outdated() {
+    let f = fx();
+    let files = html(&format!("/r/{}/patches/{}/files", f.hex, f.patch)).await;
+    let under = files.find("Rename this").expect("current note");
+    let row = files.find(r#"<tr class=ic>"#).expect("note row");
+    assert!(
+        row < under,
+        "the note is in the row after its line: {files}"
+    );
+    assert!(files.contains("<code>b.txt:1</code>") && files.contains("Suggested change"));
+    assert!(
+        files.contains("<tr class=a><td class=sg><td class=lc>b, better</tr>"),
+        "{files}"
+    );
+    let old = files.find("1 outdated comment").expect("outdated list");
+    assert!(files[old..].contains("Old note"), "{files}");
+    assert!(
+        files.contains(r#"<h2><a href="/r/"#) && files.contains("+1"),
+        "diff shown"
+    );
+    let conv = html(&format!("/r/{}/patches/{}", f.hex, f.patch)).await;
+    assert!(
+        conv.contains(&format!("/patches/{}/files#ic-", f.patch)),
+        "{conv}"
+    );
+    assert!(
+        conv.contains("suggested change") && !conv.contains("comments:"),
+        "{conv}"
+    );
+}
+
+#[tokio::test]
+async fn the_files_page_review_batches_inline_comments_in_one_op() {
+    let f = fx();
+    let back = format!("/r/{}/patches/{}/files", f.hex, f.patch);
+    write(&[
+        ("kind", "review"),
+        ("patch", &f.patch),
+        ("head", &f.unclaimed),
+        ("back", &back),
+        ("verdict", "comment"),
+        ("p.0", "a.txt"),
+        ("p.1", "b.txt"),
+        ("c.0.n.1", "First file"),
+        ("c.1.n.1", ""),
+        ("s.1.n.1", "replacement"),
+        ("c.1.o.9", "  "),
+    ])
+    .await;
+    let ops = cob::list(&*f.net, &f.rid, None, Some("xyz.arkiv.review"))
+        .await
+        .expect("list");
+    let last = ops.last().expect("op");
+    let p = charter_sync::cob::json::to_json(&last.body.payload).expect("json");
+    assert_eq!(last.body.action, "comment");
+    assert_eq!(p["head"], json!(f.unclaimed));
+    assert_eq!(
+        p["comments"],
+        json!([
+            {"path": "a.txt", "side": "new", "line": 1, "body": "First file"},
+            {"path": "b.txt", "side": "new", "line": 1, "body": "", "suggestion": "replacement"}
+        ])
+    );
 }

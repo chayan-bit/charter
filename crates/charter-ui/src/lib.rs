@@ -14,6 +14,7 @@ pub mod fold;
 pub mod gitread;
 pub mod head_watch;
 pub mod highlight;
+pub mod inline;
 pub mod last;
 pub mod markdown;
 pub mod pace;
@@ -50,7 +51,9 @@ pub enum UiError {
 /// The router with every page, the assets and the guard.
 pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
     use axum::routing::post;
-    use pages::{cobs, code, forms, history, live, program, repos, settings, wallet, write};
+    use pages::{
+        cobs, code, forms, history, live, program, repos, review, settings, wallet, write,
+    };
     Router::new()
         .route("/", get(repos::index))
         .route("/wallet", get(wallet::page))
@@ -80,6 +83,7 @@ pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
         .route("/r/{rid}/issues/{id}", get(cobs::issue))
         .route("/r/{rid}/patches", get(cobs::patches))
         .route("/r/{rid}/patches/{id}", get(cobs::patch))
+        .route("/r/{rid}/patches/{id}/files", get(review::files))
         .route("/r/{rid}/releases", get(program::releases))
         .route("/r/{rid}/program", get(program::program))
         .route("/r/{rid}/rules", get(program::program))
