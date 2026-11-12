@@ -143,6 +143,7 @@ main { padding-block: 36px 96px; }
 .notice.bad { background: var(--bad-tint); color: var(--bad); }
 .notice.warn { background: var(--warn-tint); color: var(--warn); }
 .notice.off { background: var(--tone); color: var(--ink-2); }
+.notice.revoked { margin-top: 16px; max-width: 34rem; }
 
 /* Repositories */
 .repos { border-top: 1px solid var(--ink); }
@@ -517,3 +518,5 @@ dialog.help form { margin-top: 14px; text-align: right; }
 /* On the status page the card says everything the toast does; keep the toast for screen readers only. */
 .solo .toast { position: absolute; left: auto; bottom: auto; transform: none; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; box-shadow: none; }
 html.has-js .cd-foot .js { display: inline !important; }
+/* Touch screens have no Esc or Cmd Enter to offer. */
+@media (pointer: coarse) { html.has-js .cd-foot .js { display: none !important; } }

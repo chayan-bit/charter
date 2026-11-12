@@ -19,7 +19,7 @@
 <ol class="repos" data-list>
 {% for x in repos %}
 <li class="repo-row" data-row>
-<h2><a href="/r/{{ x.hex }}">{{ x.name }}</a><span class="vis">{% if x.private %}{{ m::i(l.v, "lock-simple") }}Private{% else %}{{ m::i(l.v, "globe-simple") }}Public{% endif %}</span></h2>
+<h2><a href="/r/{{ x.hex }}">{{ x.name }}</a>{% match x.private %}{% when Some(true) %}<span class="vis">{{ m::i(l.v, "lock-simple") }}Private</span>{% when Some(false) %}<span class="vis">{{ m::i(l.v, "globe-simple") }}Public</span>{% when None %}{% endmatch %}</h2>
 {% if !x.description.is_empty() %}<p class="desc">{{ x.description }}</p>{% endif %}
 <p class="meta">{% if let Some((when, full, who)) = x.updated %}<span>Updated <time title="{{ full }}">{{ when }}</time> by {{ who }}</span>{% else %}<span>No signed push yet</span>{% endif %}<span>{{ x.issues }} issue{% if x.issues != 1 %}s{% endif %}, {{ x.patches }} patch{% if x.patches != 1 %}es{% endif %}</span></p>
 <div class="state"><span class="sealmini {{ x.verify.state }}">{% match x.verify.state %}{% when "verified" %}{{ m::i(l.v, "seal-check") }}{% when "equivocation" %}{{ m::i(l.v, "seal-warning") }}{% when "pending" %}{{ m::i(l.v, "circle-dashed") }}{% else %}{{ m::i(l.v, "seal-question") }}{% endmatch %}{{ x.verify.word }}</span><span>{% if let Some(p) = x.verify.pause %}Sync {{ p }}{% else %}Checked {{ x.verify.synced }}{% endif %}</span></div>

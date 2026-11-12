@@ -499,6 +499,22 @@ fn a_revoked_leaf_is_removed_only_by_a_priced_write_the_admin_confirms() {
             assert!(Instant::now() < deadline, "never confirmed");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        let status = send(app.clone(), req(&format!("/r/{hex}/write/{id}")))
+            .await
+            .text();
+        assert!(
+            !status.contains("value=\"remove-revoked\""),
+            "the page following the removal does not offer it again"
+        );
+        assert!(
+            status.contains("After the next sync checks it"),
+            "a round has not confirmed it yet"
+        );
+        let home = send(app.clone(), req(&format!("/r/{hex}"))).await.text();
+        assert!(
+            !home.contains("value=\"remove-revoked\""),
+            "the repo page stops offering it before the next round"
+        );
         let a = ring(&alice).await;
         assert_eq!(a.current().expect("epoch").0, e0 + 1, "one removal commit");
         let l = ring(&laptop).await;

@@ -268,6 +268,7 @@ impl<A: Arkiv> Ctx<A> {
                     if n == 0 {
                         return Err("nothing to remove: another admin removed it first".into());
                     }
+                    forget_revoked(&cfg.home, &d.rid);
                     continue;
                 }
                 op => {
@@ -333,6 +334,30 @@ impl<A: Arkiv> Ctx<A> {
         if let Err(e) = crate::spend::record(&self.cfg.home, entry) {
             charter_sync::warn(&format!("ui: spend ledger not updated: {e}"));
         }
+    }
+}
+
+/// Clears the cached count of revoked leaves after a removal, so the repo page stops
+/// offering it at once instead of after the next round, which confirms it.
+fn forget_revoked(home: &std::path::Path, rid: &charter_core::Rid) {
+    let path = home
+        .join("repos")
+        .join(charter_sync::ids::hex32(rid))
+        .join(crate::cache::VIEW);
+    let cleared = crate::cache::read::<crate::cache::RepoView>(&path).and_then(|v| match v {
+        Some(v) if v.revoked_leaves > 0 => crate::cache::write(
+            &path,
+            &crate::cache::RepoView {
+                revoked_leaves: 0,
+                ..v
+            },
+        ),
+        _ => Ok(()),
+    });
+    if let Err(e) = cleared {
+        charter_sync::warn(&format!(
+            "ui: cached view not updated after the removal: {e}"
+        ));
     }
 }
 

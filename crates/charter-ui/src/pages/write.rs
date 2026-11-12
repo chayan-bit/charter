@@ -68,7 +68,7 @@ fn ask(label: &str) -> (String, &'static str) {
         "Mark patch merged" => ("Mark this patch merged?", "Mark merged"),
         "Claim bounty" => ("Claim this bounty?", "Open patch"),
         "Fund bounty" => ("Fund this bounty?", "Fund"),
-        "Remove revoked devices" => ("Remove the revoked devices from the group?", "Remove"),
+        form::REMOVE_REVOKED => ("Remove the revoked devices from the group?", "Remove"),
         l if l.starts_with("Publish release") => return (format!("{l}?"), "Publish"),
         l => return (format!("{l}?"), "Send"),
     };
@@ -102,6 +102,9 @@ fn publishes(d: &Draft) -> String {
             return b;
         }
     }
+    if removes(d) {
+        return "A new group key that every revoked device is left out of".into();
+    }
     match d.steps.iter().find_map(|s| match s {
         Step::Deposit { amount, .. } => Some(*amount),
         _ => None,
@@ -111,6 +114,21 @@ fn publishes(d: &Draft) -> String {
             amount(a, false)
         ),
         None => d.label.clone(),
+    }
+}
+
+fn removes(d: &Draft) -> bool {
+    d.steps.iter().any(|s| matches!(s, Step::RemoveRevoked))
+}
+
+/// How long the write stays on Arkiv: ops are renewed, a group commit is applied once.
+fn kept_for(d: &Draft, blocks: u64) -> String {
+    match removes(d) {
+        true => format!(
+            "{} on Arkiv; members apply it on their next sync",
+            kept(blocks)
+        ),
+        false => format!("{}, then it needs a renewal", kept(blocks)),
     }
 }
 
@@ -212,7 +230,7 @@ fn dialog(app: &App, l: Layout, head: Head, id: String, d: &Draft, e: &Estimate)
         wallet_now: amount(e.wallet, false),
         wallet_after: amount(e.wallet.saturating_sub(e.from_wallet), false),
         takes: format!("about {} s", 2 * e.txs + 2),
-        kept: kept(e.lifetime),
+        kept: kept_for(d, e.lifetime),
         most,
         receipt,
         short_of,
@@ -380,6 +398,14 @@ impl Toast {
 
 /// Every op id of `s` is in the repo's `cobs.json`.
 fn visible(dir: &std::path::Path, s: &Status) -> bool {
+    if s.label == form::REMOVE_REVOKED {
+        // No op to find: a round that ran after the commit landed counts no revoked leaf.
+        let v = cache::read::<cache::RepoView>(&dir.join(cache::VIEW))
+            .ok()
+            .flatten();
+        return s.done_ms > 0
+            && v.is_some_and(|v| v.revoked_leaves == 0 && v.synced_ms > s.done_ms);
+    }
     if s.ids.is_empty() {
         return false;
     }
@@ -449,7 +475,11 @@ pub async fn status(
             let l = Layout::new(&app, &pref, "");
             return html(&Part { l, t });
         }
-        let (mut l, head) = frame(&app, &pref, &r, "", &t.s.label);
+        let (mut l, mut head) = frame(&app, &pref, &r, "", &t.s.label);
+        // The removal this page follows is what the repo's notice asks for.
+        if t.s.label == form::REMOVE_REVOKED && t.s.error.is_none() {
+            head.revoked_leaves = 0;
+        }
         l.crumbs.push((String::new(), "write".into()));
         html(&StatusPage { l, r: head, t })
     })

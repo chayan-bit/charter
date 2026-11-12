@@ -21,7 +21,9 @@ pub struct RepoRow {
     pub hex: String,
     pub name: String,
     pub description: String,
-    pub private: bool,
+    /// Private or public, once a round has seen it or this home holds its keyring; `None`
+    /// before the first sync of a repo it cannot tell.
+    pub private: Option<bool>,
     /// `Updated 12 min ago by ravi`, from the newest signed head.
     pub updated: Option<(String, String, String)>,
     pub issues: usize,
@@ -55,7 +57,10 @@ fn row(app: &App, pref: &Pref, rid: charter_core::Rid) -> RepoRow {
     RepoRow {
         name: v.map_or_else(|| short(&hex), |v| v.name.clone()),
         description: v.map(|v| v.description.clone()).unwrap_or_default(),
-        private: v.is_some_and(|v| v.private),
+        private: v.map(|v| v.private).or_else(|| {
+            let ring = app.home.join("private").join(format!("{hex}.json"));
+            ring.exists().then_some(true)
+        }),
         updated: last_push(v).map(|(b, nid)| (clock.when(b), clock.full(b), who.name(&nid))),
         issues: v.map_or(0, |v| v.issues),
         patches: v.map_or(0, |v| v.patches),

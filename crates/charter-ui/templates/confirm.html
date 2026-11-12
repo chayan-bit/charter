@@ -18,7 +18,7 @@
 <div><dt>Wallet now</dt><dd>{{ m::amt(wallet_now) }}</dd></div>
 <div><dt>After, at least</dt><dd>{{ m::amt(wallet_after) }}</dd></div>
 <div><dt>Takes</dt><dd class="tx">{{ takes }}</dd></div>
-<div><dt>Kept for</dt><dd class="tx">{{ kept }}, then it needs a renewal</dd></div>
+<div><dt>Kept for</dt><dd class="tx">{{ kept }}</dd></div>
 </dl>
 <details><summary>Breakdown and what will be signed</summary>
 <ul class="receipt">{% for (k, v, x) in receipt %}<li{% if loop.last %} class="tot"{% endif %}><span>{{ k }}</span><span>{% if let Some(a) = x %}{{ m::amtcol(a) }}{% else %}{{ v }}{% endif %}</span></li>{% endfor %}</ul>
