@@ -1,10 +1,16 @@
 //! Parity batch 3 through the real binaries on the fake chain: signing-key claims and
-//! signed-commit checks (#61).
+//! signed-commit checks (#61), labels (#40), code owners (#53), archive, rename and
+//! transfer (#63), sealed in private repos.
 
 mod common;
 
 use std::path::Path;
 
+use charter_cli::backend::MEM_CHAIN_ID;
+use charter_core::{AttrValue, Kind};
+use charter_store::fake::FileMemArkiv;
+use charter_sync::ids::parse_url;
+use charter_sync::observe;
 use common::e2e::*;
 use common::programs::*;
 
@@ -142,4 +148,165 @@ fn the_codeowners_program_needs_an_owner_approval_per_changed_path() {
     let dest = root.join("carol");
     carol.git(root, &["clone", "-q", &url, &dest.to_string_lossy()]);
     assert_eq!(carol.git(&dest, &["rev-parse", "HEAD"]), c1);
+}
+
+#[test]
+fn archive_rename_and_transfer_are_delegate_revisions() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root, log) = (tmp.path(), tmp.path().join("chain.log"));
+    let (alice, bob) = (user(root, "alice", &log), user(root, "bob", &log));
+    let (url, work, _) = repo_with_main(&alice, root, "keep");
+
+    let shown = alice.arkiv(&["id", "propose", &url, "--archive"]);
+    assert!(shown.contains("archived:       yes"), "{shown}");
+    let c1 = commit(&alice, &work, "v1\n");
+    let refused = alice.run("git", &work, &["push", &url, "main"]);
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success() && err.contains("E_ARCHIVED"),
+        "{err}"
+    );
+    let status = alice.arkiv(&["status", &url]);
+    assert!(!status.contains(&c1[..7]), "nothing pushed: {status}");
+    let shown = alice.arkiv(&["id", "propose", &url, "--unarchive"]);
+    assert!(!shown.contains("archived:"), "{shown}");
+    alice.git(&work, &["push", "-q", &url, "main"]);
+
+    let bob_nid = field(&bob.arkiv(&["keys", "show"]), "nid:").to_owned();
+    let alice_nid = field(&alice.arkiv(&["keys", "show"]), "nid:").to_owned();
+    let moved = alice.arkiv(&[
+        "id",
+        "propose",
+        &url,
+        "--name",
+        "kept",
+        "--add-delegate",
+        &bob_nid,
+        "--remove-delegate",
+        &alice_nid,
+    ]);
+    assert!(moved.contains("name:           kept"), "{moved}");
+    assert!(
+        moved.contains(&format!("delegates:      {bob_nid}")),
+        "{moved}"
+    );
+    // Alice is no delegate now: her revision never takes effect; bob's does.
+    let late = alice.arkiv(&["id", "propose", &url, "--archive"]);
+    assert!(!late.contains("archived:"), "{late}");
+    let bobs = bob.arkiv(&["id", "propose", &url, "--archive"]);
+    assert!(bobs.contains("archived:       yes"), "{bobs}");
+}
+
+/// Every row on the chain as `(kind, attributes)`.
+fn rows(log: &Path) -> Vec<(Kind, Vec<charter_core::Attribute>)> {
+    let kinds = [
+        Kind::Peer,
+        Kind::Bind,
+        Kind::Id,
+        Kind::IdAcc,
+        Kind::Refs,
+        Kind::Anchor,
+        Kind::Manifest,
+        Kind::Chunk,
+        Kind::Cob,
+        Kind::Mls,
+        Kind::Device,
+        Kind::Head,
+        Kind::HeadV3,
+    ];
+    charter_cli::block_on(async {
+        let mem = FileMemArkiv::open(log, MEM_CHAIN_ID).expect("open");
+        let mut out = vec![];
+        for k in kinds {
+            for o in observe::all(&mem, observe::kind(k)).await.expect("query") {
+                out.push((k, o.attributes));
+            }
+        }
+        out
+    })
+    .expect("runtime")
+}
+
+#[test]
+fn new_ops_and_the_archive_flag_stay_sealed_in_a_private_repo() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root, log) = (tmp.path(), tmp.path().join("chain.log"));
+    let (alice, bob) = (user(root, "alice", &log), user(root, "bob", &log));
+    let url = field(
+        &alice.arkiv(&["init", "--private", "--name", "vault"]),
+        "url:",
+    )
+    .to_owned();
+    let rid = parse_url(url.trim_start_matches("arkiv::"))
+        .expect("url")
+        .rid;
+    let kp = field(&bob.arkiv(&["member", "keypackage"]), "key package:").to_owned();
+    let add = [
+        "member",
+        "add",
+        "--repo",
+        &url,
+        "--key-package",
+        &kp,
+        "--role",
+        "write",
+    ];
+    alice.arkiv(&add);
+    let work = root.join("vault-work");
+    alice.git(root, &["init", "-q", &work.to_string_lossy()]);
+    let key = ssh_key(root, "alice_ed25519");
+    let c = signed_commit(&alice, &work, &key, "feat: signed");
+    alice.git(&work, &["push", "-q", &url, "main"]);
+    alice.arkiv(&["signing-key", "claim", "--repo", &url, "--key", &key]);
+    let issue = post(
+        &alice,
+        &url,
+        "xyz.arkiv.issue",
+        "create",
+        None,
+        r#"{"title":"t"}"#,
+    );
+    post(
+        &alice,
+        &url,
+        "xyz.arkiv.issue",
+        "label",
+        Some(&issue),
+        r#"{"labels":["secret-label"]}"#,
+    );
+    let shown = alice.arkiv(&["id", "propose", &url, "--archive"]);
+    assert!(shown.contains("archived:       yes"), "{shown}");
+
+    let nid = field(&alice.arkiv(&["keys", "show"]), "nid:").to_owned();
+    let dest = root.join("bob-clone");
+    bob.git(root, &["clone", "-q", &url, &dest.to_string_lossy()]);
+    let seen = bob.arkiv(&["signing-key", "verify", "--repo", &url, &c]);
+    assert!(
+        seen.starts_with(&format!("verified: signed by {nid}")),
+        "{seen}"
+    );
+    assert!(
+        bob.arkiv(&["id", "show", &url])
+            .contains("archived:       yes")
+    );
+    write(&dest, "B", b"b\n");
+    bob.git(&dest, &["add", "-A"]);
+    bob.git(&dest, &["commit", "-qm", "feat: b"]);
+    let refused = bob.run("git", &dest, &["push", &url, "main"]);
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("E_ARCHIVED"));
+
+    let (rid_hex, all) = (hex::encode(rid), rows(&log));
+    for (k, attrs) in &all {
+        for a in attrs {
+            let leak = match &a.value {
+                AttrValue::Bytes32(b) => *b == rid,
+                AttrValue::Bytes(b) => {
+                    b.windows(32).any(|w| w == rid) || b.windows(12).any(|w| w == b"secret-label")
+                }
+                AttrValue::Str(s) => s.contains(&rid_hex) || s.contains("secret-label"),
+                AttrValue::U64(v) => a.name == "ag.v" && *k == Kind::Id && *v == 2,
+            };
+            assert!(!leak, "{} {} is in plaintext", k.name(), a.name);
+        }
+    }
 }

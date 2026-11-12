@@ -145,6 +145,11 @@ pub struct ProposeArgs {
     pub lang: Option<String>,
     #[arg(long)]
     pub license: Option<String>,
+    /// Make the repo read only: helpers refuse pushes and the UI hides its write forms.
+    #[arg(long, conflicts_with = "unarchive")]
+    pub archive: bool,
+    #[arg(long)]
+    pub unarchive: bool,
 }
 
 #[derive(Debug, Args)]
@@ -227,6 +232,9 @@ fn print_identity(rid: &Rid, chain: &charter_core::IdentityChain) {
     if let Some(p) = &b.program {
         println!("program:        {} {}", p.engine, hex32(&p.hash));
     }
+    if b.is_archived() {
+        println!("archived:       yes");
+    }
 }
 
 fn edit(args: &ProposeArgs) -> Result<impl FnOnce(&IdBody) -> IdBody + use<>> {
@@ -246,6 +254,11 @@ fn edit(args: &ProposeArgs) -> Result<impl FnOnce(&IdBody) -> IdBody + use<>> {
         args.default_branch.clone(),
     );
     let (threshold, lang, license) = (args.threshold, args.lang.clone(), args.license.clone());
+    let archived = match (args.archive, args.unarchive) {
+        (true, _) => Some(Some(true)),
+        (_, true) => Some(None),
+        _ => None,
+    };
     Ok(move |h: &IdBody| {
         let mut b = h.clone();
         b.name = name.unwrap_or(b.name);
@@ -256,6 +269,7 @@ fn edit(args: &ProposeArgs) -> Result<impl FnOnce(&IdBody) -> IdBody + use<>> {
         b.threshold = threshold.unwrap_or(b.threshold);
         b.lang = lang.or(b.lang);
         b.license = license.or(b.license);
+        b.archived = archived.unwrap_or(b.archived);
         b
     })
 }
