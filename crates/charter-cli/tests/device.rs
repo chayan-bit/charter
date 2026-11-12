@@ -18,6 +18,34 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
+/// A peer that is not a delegate lists its own devices: `device list` syncs the caller's
+/// identity, as `device revoke` does, or it saw none of them.
+#[test]
+fn a_peer_that_is_not_a_delegate_lists_its_own_devices() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root, log) = (tmp.path(), tmp.path().join("chain.log"));
+    let [alice, bob] = ["alice", "bob"].map(|n| User::new(root, n, &log));
+    for u in [&alice, &bob] {
+        fund(&log, field(&u.arkiv(&["keys", "init"]), "wallet:"));
+    }
+    let url = field(&alice.arkiv(&["init", "--name", "peers"]), "url:").to_owned();
+    let work = root.join("work");
+    alice.git(root, &["init", "-q", &work.to_string_lossy()]);
+    write(&work, "README", b"v0\n");
+    alice.git(&work, &["add", "-A"]);
+    alice.git(&work, &["commit", "-q", "-m", "feat: v0"]);
+    alice.git(&work, &["push", "-q", &url, "main"]);
+    let mine = root.join("mine");
+    bob.git(root, &["clone", "-q", &url, &mine.to_string_lossy()]);
+    bob.git(&mine, &["checkout", "-q", "-b", "fork"]);
+    write(&mine, "B", b"b\n");
+    bob.git(&mine, &["add", "-A"]);
+    bob.git(&mine, &["commit", "-q", "-m", "feat: fork"]);
+    bob.git(&mine, &["push", "-q", "origin", "fork"]);
+    let list = bob.arkiv(&["device", "list", &url]);
+    assert!(list.contains("this machine"), "{list}");
+}
+
 #[test]
 fn the_identity_lists_and_revokes_a_device_and_the_device_can_no_longer_push() {
     let tmp = tempfile::tempdir().expect("tmp");

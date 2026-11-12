@@ -57,7 +57,13 @@ pub async fn run<A: Arkiv>(a: &A, cfg: &Config, cmd: &DeviceCmd) -> Result<()> {
     let repo = Repo::open(&cfg.home, &rid)?;
     match cmd {
         DeviceCmd::List { .. } => {
-            let view = Box::pin(charter_sync::sync(a, &repo, &Want::default())).await?;
+            // Its own identity too, as revoke does: a member that is not a delegate is
+            // not synced otherwise, and its devices would not be listed.
+            let want = Want {
+                must: [keys.nid()].into(),
+                ..Want::default()
+            };
+            let view = Box::pin(charter_sync::sync(a, &repo, &want)).await?;
             let devices = revoke::list(&view, &keys.nid());
             if devices.is_empty() {
                 println!("no devices: this identity has not pushed to the repo");
