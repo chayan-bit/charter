@@ -29,7 +29,7 @@ GitHub is a read-only mirror plus the host of the release binaries.
 
 ```sh
 # 1. install the prebuilt binaries (macOS arm64 or Linux x86_64), see docs/install.md
-TAG=v0.5.0 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
+TAG=v0.6.0 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 mkdir -p ~/.local/bin && curl -fsSL "https://github.com/chayan-bit/charter/releases/download/$TAG/charter-$TAG-$TARGET.tar.gz" | tar xz -C ~/.local/bin git-remote-arkiv chart chart-mcp
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -156,6 +156,15 @@ Never use real funds or mainnet keys.
 5. In any git repo: `git remote add arkiv arkiv::<rid>` and `git push arkiv main`.
 6. Anywhere else: `git clone arkiv::<rid> demo-clone`.
 7. `chart status arkiv::<rid>` shows each peer's head and the minimum expiry in days, and `chart keepalive arkiv::<rid> --dry-run` shows what it would extend.
+
+### Upgrading to v0.6.0
+
+v0.6.0 hardens private repos, adds `chart device revoke` and `chart member sync`, and keeps large ref lists in ref tables (format v4); `docs/install.md` has the full upgrade notes.
+A private repo moves to keyring format 2 on its first v0.6.0 membership change, which a delegate of the root identity must make, and from then on a v0.5.0 member stops with `E_UNSUPPORTED_VERSION`.
+`chart member sync --repo <url>` removes the MLS leaves of revoked devices in one commit and prints its cost.
+A revoke stops a device seed, not an identity: a stolen machine that also held `keys/` can still act as you, so follow "Lost or stolen machine" in `docs/p2/private-repos.md`.
+A device past about 550 to 900 refs now writes a format v4 head with a ref table instead of failing with `E_REFS_TOO_LARGE`.
+v0.5.0 stops with `E_UNSUPPORTED_VERSION` on a repo with a v4 head, a revoke record or a migrated private keyring, instead of showing stale refs, so upgrade every machine that reads the repo.
 
 ### Storage format v3 (v0.5.0)
 
