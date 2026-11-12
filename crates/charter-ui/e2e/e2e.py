@@ -4,7 +4,7 @@
 Run through run.sh, which starts the server on a fixture repo and sets:
   E2E_URL   the tokenized URL `chart ui` printed
   E2E_OUT   output directory (screenshots, report.json, report.md)
-  E2E_T0    epoch seconds just before the server was spawned
+  E2E_T0    time.monotonic() just before the server was spawned (every timing here is monotonic)
 `python3 e2e.py first-page` only times the first page (stdlib only, fast start).
 """
 import gzip
@@ -60,7 +60,7 @@ def first_page():
     """Time from server spawn to the first rendered repo page (fresh process, stdlib only)."""
     t0 = float(os.environ["E2E_T0"])
     cookie, *_ = session_cookie()
-    t_cookie = time.time() - t0
+    t_cookie = time.monotonic() - t0
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         s, _, body, _ = get("/", cookie)
@@ -72,7 +72,7 @@ def first_page():
         time.sleep(0.005)
     else:
         raise SystemExit("first page never rendered")
-    res = {"seconds_to_session": round(t_cookie, 3), "seconds_to_first_repo_page": round(time.time() - t0, 3)}
+    res = {"seconds_to_session": round(t_cookie, 3), "seconds_to_first_repo_page": round(time.monotonic() - t0, 3)}
     (OUT / "first-page.json").write_text(json.dumps(res))
     print(json.dumps(res))
 
@@ -507,10 +507,10 @@ def live_update(browser, pages):
     page.evaluate("window.__same = 1")
     work = Path(os.environ["E2E_WORK"]) / "fx" / "work"
     env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
-    t = time.time()
+    t = time.monotonic()
     subprocess.run(["git", "-C", str(work), "push", "-q", os.environ["REPO_URL"], "main:refs/heads/e2e-live"],
                    env=env, check=True, capture_output=True)
-    pushed = time.time()
+    pushed = time.monotonic()
     try:
         page.locator("#live code", has_text="e2e-live").first.wait_for(timeout=30000)
         shown = True
@@ -518,7 +518,7 @@ def live_update(browser, pages):
         shown = False
     rec("a push from another process shows on the open page without a reload", scope,
         shown and page.evaluate("window.__same === 1"),
-        f"push took {pushed - t:.1f} s, shown {time.time() - pushed:.1f} s after it" if shown else "never shown")
+        f"push took {pushed - t:.1f} s, shown {time.monotonic() - pushed:.1f} s after it" if shown else "never shown")
     state_checks(page, sink, scope)
     if shown:
         page.locator("#live code", has_text="e2e-live").first.scroll_into_view_if_needed()
