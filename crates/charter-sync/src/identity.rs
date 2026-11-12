@@ -130,16 +130,7 @@ pub async fn propose<A: Arkiv>(
     state: &State,
     edit: impl FnOnce(&IdBody) -> IdBody,
 ) -> Result<charter_core::Hash32> {
-    let chain = show(a, rid, state).await?;
-    let head = chain.head();
-    let mut body = edit(&head.body);
-    body.rid = Some(*rid);
-    body.rev = head.body.rev + 1;
-    body.parent = head.h;
-    body.nonce = None;
-    body.delegates.sort();
-    body.delegates.dedup();
-    body.validate()?;
+    let body = next_revision(&show(a, rid, state).await?, rid, edit)?;
     let s = sign(keys.sk(), &body)?;
     with_bind(
         a,
@@ -150,6 +141,24 @@ pub async fn propose<A: Arkiv>(
     )
     .await?;
     Ok(s.h)
+}
+
+/// The revision after `chain`'s head that `edit` makes, validated, unsigned.
+pub fn next_revision(
+    chain: &IdentityChain,
+    rid: &Rid,
+    edit: impl FnOnce(&IdBody) -> IdBody,
+) -> Result<IdBody> {
+    let head = chain.head();
+    let mut body = edit(&head.body);
+    body.rid = Some(*rid);
+    body.rev = head.body.rev + 1;
+    body.parent = head.h;
+    body.nonce = None;
+    body.delegates.sort();
+    body.delegates.dedup();
+    body.validate()?;
+    Ok(body)
 }
 
 /// Accepts revision `rev` of `rid` as a delegate.
