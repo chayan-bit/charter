@@ -168,11 +168,6 @@ impl Sim {
     }
 }
 
-/// Backstop rounds in an hour.
-fn backstops() -> u64 {
-    HOUR / charter_ui::pace::BACKSTOP_EVERY.as_secs()
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn with_no_page_open_only_the_first_sync_of_an_uncached_repo_runs() {
     let mut s = sim(40, true).await;
@@ -203,10 +198,9 @@ async fn the_repo_on_screen_with_no_changes_is_probed_every_ten_seconds() {
         "on screen, no changes: {q} queries/hour (one round = {})",
         s.round_cost
     );
-    // One round when the page opens (the cache may be stale), then one-query probes, and
-    // the backstop round every BACKSTOP_EVERY (probe-blinding rows, docs in pace.rs).
+    // One round when the page opens (the cache may be stale), then one-query probes.
     let probes = HOUR / 10;
-    assert!(q <= s.round_cost * (1 + backstops()) + 2 + probes, "{q}");
+    assert!(q <= s.round_cost + 2 + probes, "{q}");
     assert!(q >= probes, "{q}");
 }
 
@@ -218,7 +212,7 @@ async fn new_heads_alone_never_trigger_more_than_the_probe() {
     let _v = s.shared.viewer(s.rid);
     let q = s.run(0, HOUR).await;
     eprintln!("on screen with newHeads, no changes: {q} queries/hour");
-    assert!(q <= s.round_cost * (1 + backstops()) + 2 + HOUR / 10, "{q}");
+    assert!(q <= s.round_cost + 2 + HOUR / 10, "{q}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -313,10 +307,11 @@ async fn a_refs_only_push_from_another_device_reaches_the_open_page() {
     );
 }
 
-/// Anyone can blind the probe with rows carrying the repo's rid and a late `ag.dev`, which
-/// fill its tail; a refs-only push then reaches the open page through the backstop round.
+/// Anyone can fill the probe's tail with rows carrying the repo's rid and a late `ag.dev`;
+/// a refs-only push still reaches the open page, through the watched heads' query, and the
+/// probe still costs one query per check.
 #[tokio::test(flavor = "multi_thread")]
-async fn rows_that_blind_the_probe_delay_a_refs_only_push_only_until_the_backstop() {
+async fn rows_that_fill_the_probe_tail_do_not_hide_a_refs_only_push() {
     let mut s = sim(48, false).await;
     s.shared.focus(s.rid);
     let _v = s.shared.viewer(s.rid);
@@ -345,21 +340,19 @@ async fn rows_that_blind_the_probe_delay_a_refs_only_push_only_until_the_backsto
     .await
     .expect("junk");
     s.run(30, 60).await; // the junk's own creates are seen and settle into the tail
+    let quiet = s.run(60, 120).await;
+    assert!(quiet <= 6, "one query per check, every 10 s: {quiet}");
     git(&work, &["branch", "side"]);
     let mut events = s.shared.subscribe();
     push2(&s.c.net, &dev, &s.rid, &work, &["refs/heads/side"])
         .await
         .expect("push");
-    let end = 60 + charter_ui::pace::BACKSTOP_EVERY.as_secs() + 20;
-    s.run(60, end).await;
+    s.run(120, 150).await;
     let mut kinds = vec![];
     while let Ok(e) = events.try_recv() {
         kinds.push(e.kind);
     }
-    assert!(
-        kinds.contains(&Kind::Push),
-        "the backstop round caught the push"
-    );
+    assert!(kinds.contains(&Kind::Push), "the push reached the page");
 }
 
 #[tokio::test(flavor = "multi_thread")]

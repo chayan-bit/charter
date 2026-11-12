@@ -18,11 +18,12 @@
 //! probe sees. Sealed repos tag their entities with a blinded rid, so they skip the probe
 //! and get a full round at the interval of an idle repo, on screen or not.
 //!
-//! Anyone can write rows that carry the repo's `ag.rid` and an `ag.dev`, and about 100 of
-//! them push every real head out of the probe's tail, so a refs-only push (a head patch)
-//! would go unseen; no single query can tell real heads from those (only their creators
-//! do). So a public repo also gets a full round at least every [`BACKSTOP_EVERY`], whatever
-//! the probe says; a repo that changes gets one sooner anyway.
+//! Anyone can write rows that carry the repo's `ag.rid` and a late `ag.dev`, and 100 of them
+//! fill the probe's tail, so a refs-only push (a head patch) would go unseen. The probe
+//! sees when its tail holds no row without `ag.dev` ([`Probe::saturated`]); from then on
+//! every other check is one query for the heads the last round accepted, filtered by their
+//! devices' control addresses ([`Watch`]), which no one else can write. The query count
+//! stays one per check; a create waits at most one more interval.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -37,13 +38,11 @@ use charter_sync::{Config, SyncError};
 
 use crate::UiError;
 use crate::cache::{self, RepoView};
-use crate::sync_loop::{Kind, Outcome, Shared, round};
+use crate::head_watch::Watch;
+use crate::sync_loop::{Kind, Outcome, Shared, round_watched};
 
 pub const ON_SCREEN_EVERY: Duration = Duration::from_secs(10);
 pub const IDLE_EVERY: Duration = Duration::from_secs(300);
-/// The longest a public repo goes without a full round while pages are open, so rows that
-/// blind the probe delay a head patch by at most this.
-pub const BACKSTOP_EVERY: Duration = Duration::from_secs(1800);
 /// Background rounds stop at this much of the RPC quota used.
 pub const PAUSE_AT: f64 = 80.0;
 /// A 429 that names no `Retry-After` pauses this long.
@@ -59,6 +58,20 @@ const REFUSED_PAUSE: Duration = Duration::from_secs(60);
 pub struct Probe {
     pub count: u64,
     pub tail: Vec<(B256, u64)>,
+    /// A full page of rows that all carry `ag.dev`: heads may lie before the tail.
+    pub saturated: bool,
+}
+
+impl Probe {
+    fn of(count: u64, rows: Vec<(B256, u64, bool)>) -> Self {
+        let saturated = rows.len() == MAX_LIMIT as usize && rows.iter().all(|r| r.2);
+        let tail = rows.into_iter().map(|(k, up, _)| (k, up)).collect();
+        Self {
+            count,
+            tail,
+            saturated,
+        }
+    }
 }
 
 /// `(count, rows from offset)` of the repo's entities in `ag.dev` order: one `arkiv_query`.
@@ -106,17 +119,11 @@ async fn page<A: Arkiv>(
 /// A create or an expiry moves the count (or, both at once, the newest non-head row), a head
 /// patch a head's `$updatedAt`; then one more query reads the new tail.
 pub async fn probe<A: Arkiv>(a: &A, rid: &Rid, prev: Option<&Probe>) -> Result<Probe, StoreError> {
-    let keys = |rows: Vec<(B256, u64, bool)>| -> Vec<(B256, u64)> {
-        rows.into_iter().map(|(k, up, _)| (k, up)).collect()
-    };
     let count = match prev {
         Some(p) => {
             let n = p.tail.len() as u64;
             let (count, rows) = page(a, rid, p.count - n, n.max(1) as u32).await?;
-            let now = Probe {
-                count,
-                tail: keys(rows),
-            };
+            let now = Probe::of(count, rows);
             if now == *p || count == 0 {
                 return Ok(now);
             }
@@ -128,10 +135,7 @@ pub async fn probe<A: Arkiv>(a: &A, rid: &Rid, prev: Option<&Probe>) -> Result<P
     // heads and a create among older rows shows only in the count.
     let (count, rows) = page(a, rid, count.saturating_sub(MAX_LIMIT.into()), MAX_LIMIT).await?;
     let from = rows.iter().rposition(|r| !r.2).unwrap_or(0);
-    Ok(Probe {
-        count,
-        tail: keys(rows[from..].to_vec()),
-    })
+    Ok(Probe::of(count, rows[from..].to_vec()))
 }
 
 /// Interval multiplier as the quota drains: x1 under 50 % used, x2 under 65 %, x4 under
@@ -158,8 +162,9 @@ enum Step {
 struct State {
     probe: Option<Probe>,
     checked: Option<Instant>,
-    /// When the last full round ran.
-    full: Option<Instant>,
+    /// The heads the last round accepted, and whether the next check reads them.
+    watch: Option<Watch>,
+    heads_next: bool,
     /// The repo changed and no round has caught up yet (failed or lock busy).
     dirty: bool,
 }
@@ -220,14 +225,7 @@ impl Pacer {
         if on && no_block && now < t + 3 * every {
             return Step::Wait;
         }
-        let backstop = st
-            .and_then(|s| s.full)
-            .is_none_or(|f| now >= f + slow * BACKSTOP_EVERY);
-        if sealed || backstop {
-            Step::Full
-        } else {
-            Step::Check
-        }
+        if sealed { Step::Full } else { Step::Check }
     }
 
     /// Runs what is due at `now` for every repo the loop knows.
@@ -280,7 +278,12 @@ impl Pacer {
     ) -> Result<(), UiError> {
         let st = self.repos.entry(rid).or_default();
         st.checked = Some(now);
-        if private(&cfg.home, &rid) != Some(true) {
+        let saturated = st.probe.as_ref().is_some_and(|p| p.saturated);
+        let heads = step == Step::Check && saturated && st.watch.is_some() && st.heads_next;
+        st.heads_next = saturated && !heads;
+        if let (true, Some(w)) = (heads, &st.watch) {
+            st.dirty |= w.moved(a, &rid).await.map_err(SyncError::from)?;
+        } else if private(&cfg.home, &rid) != Some(true) {
             let p = probe(a, &rid, st.probe.as_ref())
                 .await
                 .map_err(SyncError::from)?;
@@ -292,8 +295,13 @@ impl Pacer {
             shared.emit(rid, Kind::Sync);
             return Ok(());
         }
-        st.full = Some(now);
-        let r = round(a, cfg, &rid).await;
+        let r = match Box::pin(round_watched(a, cfg, &rid)).await {
+            Ok((o, w)) => {
+                st.watch = w;
+                Ok(o)
+            }
+            Err(e) => Err(e),
+        };
         if r.as_ref().is_err_and(|e| retry_after(e).is_some()) {
             return r.map(|_| ());
         }

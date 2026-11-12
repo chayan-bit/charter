@@ -18,6 +18,7 @@ use charter_sync::{Config, Keys, Repo, Want, cob};
 
 use crate::UiError;
 use crate::cache::{self, Cobs, RepoView};
+use crate::head_watch::Watch;
 
 use crate::last::Last;
 use crate::pace::Pacer;
@@ -310,6 +311,15 @@ impl Outcome {
 
 /// One round for `rid`: private repos go through the member keyring, as in the CLI.
 pub async fn round<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<Outcome, UiError> {
+    Ok(round_watched(a, cfg, rid).await?.0)
+}
+
+/// [`round`], plus the heads it accepted for the probe ([`Watch`]; none for a private repo).
+pub async fn round_watched<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    rid: &Rid,
+) -> Result<(Outcome, Option<Watch>), UiError> {
     let keys = Keys::load(&cfg.home)?;
     match charter_private::ring_for(a, cfg, keys.as_ref(), rid).await? {
         None => locked_round(a, cfg, rid, 0).await,
@@ -318,7 +328,7 @@ pub async fn round<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<Outcome, 
             // confirms (`kind=remove-revoked`), never part of a round.
             let revoked = ring.revoked_leaves;
             let sealed = charter_private::Sealed::new(a, ring).caching(&cfg.home);
-            locked_round(&sealed, cfg, rid, revoked).await
+            Ok((locked_round(&sealed, cfg, rid, revoked).await?.0, None))
         }
     }
 }
@@ -328,9 +338,9 @@ async fn locked_round<A: Arkiv>(
     cfg: &Config,
     rid: &Rid,
     revoked: usize,
-) -> Result<Outcome, UiError> {
+) -> Result<(Outcome, Option<Watch>), UiError> {
     let Some(repo) = Repo::try_open(&cfg.home, rid)? else {
-        return Ok(Outcome::Busy);
+        return Ok((Outcome::Busy, None));
     };
     let view = charter_sync::sync(a, &repo, &Want::default()).await?;
     let cobs_path = repo.dir.join(cache::COBS);
@@ -360,10 +370,11 @@ async fn locked_round<A: Arkiv>(
     let pushed = was.is_none_or(|w| w.canonical != now.canonical || w.peers != now.peers);
     index_tips(&repo.dir, &now)?;
     cache::write(&view_path, &now)?;
-    Ok(Outcome::Synced(Changes {
+    let changes = Changes {
         pushed,
         ops: since.ops.len(),
-    }))
+    };
+    Ok((Outcome::Synced(changes), Watch::of(&view)))
 }
 
 /// Writes `last.json` for the view's ref tips before the view itself, so a page that reads

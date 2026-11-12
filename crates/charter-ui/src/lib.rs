@@ -12,6 +12,7 @@ pub mod cache;
 pub mod diff;
 pub mod fold;
 pub mod gitread;
+pub mod head_watch;
 pub mod highlight;
 pub mod last;
 pub mod markdown;
