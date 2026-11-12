@@ -576,9 +576,11 @@ pub async fn publish_epoch_keys<A: Arkiv>(
 ) -> Result<Vec<Grant>> {
     let held = lock(&cfg.home).await?;
     let (mut mls, ring) = member_ring_in(a, cfg, keys, rid).await?;
-    // The lock is kept for the sends only while a commit is pending, the one case a grant is
-    // recorded (`mls` saved); otherwise this run never saves, and a grant that takes a
-    // commit's nonce meanwhile is still found on chain ([`ready`]).
+    // The lock is kept for the sends while this home holds a commit record for the group, the
+    // one case a grant is recorded (`mls` saved); otherwise this run never saves, and a grant
+    // that takes a commit's nonce meanwhile is still found on chain ([`ready`]).
+    // A record is removed only when the next [`finish`] starts, so a home that has ever made
+    // a membership change in this group keeps the lock for the whole grant run.
     let group = hex::encode(&ring.group);
     let _held = mls.pending.contains_key(&group).then_some(held);
     ring.require(&keys.nid(), Role::Admin)?;
