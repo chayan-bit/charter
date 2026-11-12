@@ -68,26 +68,40 @@ pub struct Mls {
 }
 
 /// The control-address nonce of the tx carrying a pending commit, the hash of every tx
-/// signed at it with the commit, and of every other tx this home signed at it (a plug);
-/// none recorded means no tx carrying the commit was ever sent.
+/// signed at it with the commit, and of every other tx this home signed at it (a plug, a
+/// grant); none recorded means no tx carrying the commit was ever sent. No tx at that nonce
+/// is mined in block `from` or before it, and a search for the one that was
+/// ([`crate::taken`]) has read every block up to `cursor` (when above `from`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
     pub nonce: u64,
     pub txs: Vec<charter_store::TxHash>,
     #[serde(default)]
     pub others: Vec<charter_store::TxHash>,
+    #[serde(default)]
+    pub from: u64,
+    #[serde(default)]
+    pub cursor: u64,
 }
 
+/// How far below the head the commit's tx was signed at [`Pending::from`] starts: a node
+/// that served the nonce may lag the one that served the head by up to this many blocks.
+pub const LAG: u64 = 64;
+
 impl Pending {
-    /// `self` after the commit's tx `hash` at `nonce` is signed: a new nonce (a reverted
-    /// tx resent) starts over, the same one adds a hash.
-    pub fn signed(&self, nonce: u64, hash: charter_store::TxHash) -> Self {
-        let (mut txs, others) = match nonce == self.nonce {
-            true => (self.txs.clone(), self.others.clone()),
-            false => (vec![], vec![]),
+    /// `self` after the commit's tx `hash` at `nonce` is signed at head `at`: a new nonce (a
+    /// reverted tx resent) starts over, the same one adds a hash.
+    pub fn signed(&self, nonce: u64, hash: charter_store::TxHash, at: u64) -> Self {
+        let mut p = match nonce == self.nonce {
+            true => self.clone(),
+            false => Self {
+                nonce,
+                from: at.saturating_sub(LAG),
+                ..Self::default()
+            },
         };
-        txs.push(hash);
-        Self { nonce, txs, others }
+        p.txs.push(hash);
+        p
     }
 
     /// `self` after another tx `hash` (no commit in it) is signed at `nonce`: recorded only

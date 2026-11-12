@@ -6,7 +6,9 @@
 //! the removal lands; a revoke a stolen device makes removes nothing on its own; and a
 //! membership change interrupted after its tx went out is never dropped while that tx can
 //! still land, nor replaced once it landed (even when the job split or a revert moved the
-//! commit to a later nonce), so a retry cannot fork the admin off the group.
+//! commit to a later nonce), so a retry cannot fork the admin off the group; nor kept
+//! forever once any tx of the control address took its nonce, from this machine or another
+//! of the identity, with or without receipts.
 
 mod common;
 
@@ -480,6 +482,10 @@ struct Edge<'a> {
     armed: AtomicBool,
     lag: AtomicUsize,
     fail_estimates: AtomicBool,
+    /// Receipts of txs mined up to this block read as missing (pruned).
+    pruned: std::sync::atomic::AtomicU64,
+    /// Every block reads as empty (a node that does not have it yet).
+    blind: AtomicBool,
     /// Every send that reached the node through this edge.
     sent: Mutex<Vec<SignedTx>>,
 }
@@ -493,6 +499,8 @@ impl<'a> Edge<'a> {
             armed: AtomicBool::new(false),
             lag: AtomicUsize::new(0),
             fail_estimates: AtomicBool::new(false),
+            pruned: Default::default(),
+            blind: AtomicBool::new(false),
             sent: Mutex::new(vec![]),
         }
     }
@@ -576,7 +584,11 @@ impl Arkiv for Edge<'_> {
         self.net.mined_tx(h).await
     }
     async fn block_txs(&self, n: u64) -> Result<Vec<charter_store::MinedTx>, StoreError> {
-        self.net.block_txs(n).await
+        let txs = self.net.block_txs(n).await?;
+        Ok(match self.blind.load(Ordering::SeqCst) {
+            true => vec![],
+            false => txs,
+        })
     }
     async fn estimate(&self, from: Address, ops: &[Operation]) -> Result<u64, StoreError> {
         if self.fail_estimates.load(Ordering::SeqCst) {
@@ -611,10 +623,10 @@ impl Arkiv for Edge<'_> {
             .lag
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok();
-        if lagging {
-            return Ok(None);
-        }
-        self.net.receipt(h).await
+        // Read anyway: polling a receipt is what mines the fake chain's next block.
+        let r = self.net.receipt(h).await?;
+        let pruned = |r: &Receipt| r.block_number <= self.pruned.load(Ordering::SeqCst);
+        Ok(r.filter(|r| !lagging && !pruned(r)))
     }
 }
 
@@ -858,6 +870,186 @@ fn a_plug_that_landed_before_a_failed_retry_settles_the_old_commit() {
         charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &dan)
             .await
             .expect("the plug proves the old commit can never land");
+        one_epoch(&net, &alice, &carol, &rid, e0 + 1).await;
+    });
+}
+
+/// Alice's removal of bob: accepted by the node but never mined (evicted), then given up.
+async fn lost_removal(net: &Net, alice: &Peer, bob: &Peer, rid: &Rid) {
+    net.drop_sends_from(alice.keys.control_address(rid), 0);
+    let bob = bob.keys.nid();
+    let first = charter_private::remove_member(net, &alice.cfg, &alice.keys, rid, &bob);
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), first).await;
+    assert!(
+        !matches!(first, Ok(Ok(()))),
+        "the dropped removal did not land: {first:?}"
+    );
+    net.heal();
+}
+
+/// Alice's identity on a second machine (its own device and leaf, the same control
+/// address), joined, with the epoch it is on.
+async fn desktop(net: &Net, alice: &Peer, rid: &Rid) -> (Peer, u64) {
+    let desktop = Peer::new(net, 1);
+    let kp = charter_private::publish_key_package(net, &desktop.cfg, &desktop.keys)
+        .await
+        .expect("kp");
+    charter_private::add_device(net, &alice.cfg, &alice.keys, rid, &kp)
+        .await
+        .expect("add desktop");
+    let epoch = current(&ring(net, &desktop, rid).await.expect("desktop joins"));
+    ring(net, alice, rid).await.expect("alice");
+    assert_eq!(
+        desktop.keys.control_address(rid),
+        alice.keys.control_address(rid)
+    );
+    (desktop, epoch)
+}
+
+async fn remove<A: Arkiv>(a: &A, admin: &Peer, rid: &Rid, who: &Peer) -> charter_sync::Result<()> {
+    charter_private::remove_member(a, &admin.cfg, &admin.keys, rid, &who.keys.nid()).await
+}
+
+/// A grant this home sends at the lost commit's nonce is recorded, so its receipt settles it.
+#[test]
+fn a_grant_from_the_same_home_after_a_lost_removal_settles_the_old_commit() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let e0 = current(&ring(&net, &alice, &rid).await.expect("alice"));
+        lost_removal(&net, &alice, &bob, &rid).await;
+        charter_private::publish_epoch_key(&net, &alice.cfg, &alice.keys, &rid, e0)
+            .await
+            .expect("the grant takes the lost commit's nonce");
+        remove(&net, &alice, &rid, &dan)
+            .await
+            .expect("the grant proves the old commit can never land");
+        one_epoch(&net, &alice, &carol, &rid, e0 + 1).await;
+    });
+}
+
+/// A grant from the admin's other machine is recorded nowhere here: the tx at the lost
+/// commit's nonce is found from the block of the entity it created, in one block read.
+#[test]
+fn a_grant_from_the_admins_other_machine_after_a_lost_removal_settles_the_old_commit() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let (desktop, e0) = desktop(&net, &alice, &rid).await;
+        net.mine(64); // no earlier entity of the address is within the search's margin
+        lost_removal(&net, &alice, &bob, &rid).await;
+        charter_private::publish_epoch_key(&net, &desktop.cfg, &desktop.keys, &rid, e0)
+            .await
+            .expect("the desktop's grant takes the lost commit's nonce");
+        let reads = net.block_reads.load(Ordering::SeqCst);
+        remove(&net, &alice, &rid, &dan)
+            .await
+            .expect("the desktop's grant proves the old commit can never land");
+        assert_eq!(
+            net.block_reads.load(Ordering::SeqCst) - reads,
+            1,
+            "one block read"
+        );
+        one_epoch(&net, &alice, &carol, &rid, e0 + 1).await;
+    });
+}
+
+/// With every receipt gone the recorded grant is still found by the tx at the nonce.
+#[test]
+fn a_pruned_receipt_still_settles_the_old_commit_by_the_tx_at_its_nonce() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let e0 = current(&ring(&net, &alice, &rid).await.expect("alice"));
+        lost_removal(&net, &alice, &bob, &rid).await;
+        charter_private::publish_epoch_key(&net, &alice.cfg, &alice.keys, &rid, e0)
+            .await
+            .expect("grant");
+        let edge = Edge::new(&net);
+        edge.pruned
+            .store(net.head().await.expect("head"), Ordering::SeqCst);
+        remove(&edge, &alice, &rid, &dan)
+            .await
+            .expect("the tx at the nonce is the recorded grant");
+        one_epoch(&net, &alice, &carol, &rid, e0 + 1).await;
+    });
+}
+
+/// A node that does not have the block yet finds no tx at the nonce: refused, and found
+/// once it has the block (the search starts over after a pass to the head).
+#[test]
+fn a_node_without_the_block_refuses_until_it_has_it() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let (desktop, e0) = desktop(&net, &alice, &rid).await;
+        lost_removal(&net, &alice, &bob, &rid).await;
+        charter_private::publish_epoch_key(&net, &desktop.cfg, &desktop.keys, &rid, e0)
+            .await
+            .expect("grant");
+        let edge = Edge::new(&net);
+        edge.blind.store(true, Ordering::SeqCst);
+        let e = remove(&edge, &alice, &rid, &dan)
+            .await
+            .expect_err("no tx at the nonce is seen yet");
+        assert_eq!(e.code(), charter_core::ErrorCode::ConcurrentPush, "{e}");
+        edge.blind.store(false, Ordering::SeqCst);
+        remove(&edge, &alice, &rid, &dan)
+            .await
+            .expect("found once the node has the block");
+        one_epoch(&net, &alice, &carol, &rid, e0 + 1).await;
+    });
+}
+
+/// A plain transfer (no entity) from the other machine far past the lost commit: the blocks
+/// are read in bounded attempts that go on where the last one stopped.
+#[test]
+fn a_nonce_taken_far_past_the_commit_by_a_transfer_is_found_over_attempts() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let (desktop, e0) = desktop(&net, &alice, &rid).await;
+        lost_removal(&net, &alice, &bob, &rid).await;
+        net.mine(300);
+        let control = desktop.keys.control(&rid);
+        let chain = net.chain_id().await.expect("chain");
+        let pipeline = desktop.cfg.pipeline.clone();
+        charter_store::TxPipeline::new(&net, control.clone(), chain, pipeline)
+            .funded_by(desktop.keys.wallet())
+            .transfers(vec![(control.address(), U256::ZERO)])
+            .await
+            .expect("the transfer takes the lost commit's nonce");
+        let reads = net.block_reads.load(Ordering::SeqCst);
+        let e = remove(&net, &alice, &rid, &dan)
+            .await
+            .expect_err("one attempt reads a bounded number of blocks");
+        assert_eq!(e.code(), charter_core::ErrorCode::ConcurrentPush, "{e}");
+        assert_eq!(net.block_reads.load(Ordering::SeqCst) - reads, 256);
+        remove(&net, &alice, &rid, &dan)
+            .await
+            .expect("the next attempt goes on and finds it");
+        one_epoch(&net, &alice, &carol, &rid, e0 + 1).await;
+    });
+}
+
+/// The other machine's grant still in the pool when the retry runs: refused without a plug,
+/// then settled by that grant once it is mined.
+#[test]
+fn a_grant_in_the_pool_from_the_other_machine_is_waited_on_then_settles_the_commit() {
+    run(async {
+        let (net, [alice, carol, bob, dan], rid) = group().await;
+        let (desktop, e0) = desktop(&net, &alice, &rid).await;
+        lost_removal(&net, &alice, &bob, &rid).await;
+        net.hold_mining(true);
+        let grant = charter_private::publish_epoch_key(&net, &desktop.cfg, &desktop.keys, &rid, e0);
+        let retry = async {
+            pool_holds(&net, 1).await;
+            let e = remove(&net, &alice, &rid, &dan).await;
+            net.hold_mining(false);
+            e
+        };
+        let (grant, e) = tokio::join!(grant, retry);
+        grant.expect("the grant lands once mining resumes");
+        let e = e.expect_err("refused while the grant waits in the pool");
+        assert_eq!(e.code(), charter_core::ErrorCode::ConcurrentPush, "{e}");
+        remove(&net, &alice, &rid, &dan)
+            .await
+            .expect("the mined grant proves the old commit can never land");
         one_epoch(&net, &alice, &carol, &rid, e0 + 1).await;
     });
 }

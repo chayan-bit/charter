@@ -18,6 +18,7 @@ pub mod msg;
 pub mod revoked;
 pub mod seal;
 pub mod select;
+mod taken;
 
 pub use arkiv::Sealed;
 pub use group::{
