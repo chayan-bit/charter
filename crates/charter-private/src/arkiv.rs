@@ -241,6 +241,12 @@ impl<A: Arkiv> Arkiv for Sealed<'_, A> {
     fn seals(&self) -> bool {
         true
     }
+    fn incomplete_reason(&self) -> Option<&'static str> {
+        self.ring.removed.then_some(
+            "you were removed from this private repo, so what its members wrote since is \
+             sealed under keys this machine does not hold; an admin can add you again",
+        )
+    }
     fn seals_for(&self, rid: &[u8; 32]) -> bool {
         self.ring.rid == *rid
     }

@@ -56,6 +56,7 @@ pub(crate) async fn refresh_in<A: Arkiv>(
         if !member {
             member = rejoin(a, &mls, keys, r).await?;
         }
+        r.removed = !member;
         if member && r.role(&keys.nid()) == Some(Role::Admin) && !revokes.is_empty() {
             r.revoked_leaves = revoked::candidates(&mls.load(&r.group)?, &revokes).len();
         }

@@ -449,6 +449,9 @@ impl<A: Arkiv> Arkiv for Tap<A> {
     fn seals(&self) -> bool {
         self.a.seals()
     }
+    fn incomplete_reason(&self) -> Option<&'static str> {
+        self.a.incomplete_reason()
+    }
     fn seals_for(&self, rid: &[u8; 32]) -> bool {
         self.a.seals_for(rid)
     }

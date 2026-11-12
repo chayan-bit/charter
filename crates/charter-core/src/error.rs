@@ -190,7 +190,9 @@ pub enum VerifyError {
     #[error("required entity not live: {0:?}")]
     NotLive(Missing),
     #[error(
-        "control address {address:02x?} of peer {nid:02x?} created {created} entities, {live} live"
+        "control address 0x{} of peer {} created {created} entities, only {live} live",
+        hx(address),
+        hx(nid)
     )]
     ControlNotLive {
         nid: Nid,
@@ -199,7 +201,9 @@ pub enum VerifyError {
         live: u64,
     },
     #[error(
-        "device {device:02x?} control address {address:02x?} has nonce {nonce}, its head records {recorded}"
+        "device {} control address 0x{} has nonce {nonce}, its head records {recorded}",
+        hx(device),
+        hx(address)
     )]
     HeadRollback {
         device: Nid,
@@ -207,7 +211,7 @@ pub enum VerifyError {
         nonce: u64,
         recorded: u64,
     },
-    #[error("device {device:02x?} has {count} valid heads")]
+    #[error("device {} has {count} valid heads", hx(device))]
     DuplicateHead { device: Nid, count: usize },
     #[error("identity root or revision not live")]
     IdNotLive,
@@ -221,16 +225,26 @@ pub enum VerifyError {
     ChainGap { kind: Kind, seq: u64 },
     #[error("refs entity invalid: {0}")]
     BadRefs(String),
-    #[error("manifest requires anchor {anchor:02x?} of peer {nid:02x?}, not verified")]
+    #[error(
+        "manifest requires anchor {} of peer {}, not verified",
+        hx(anchor),
+        hx(nid)
+    )]
     MissingDependency { nid: Nid, anchor: Hash32 },
     #[error(
-        "entity {key:02x?} from a tracked control address has an unsupported version; upgrade charter"
+        "entity {} from a tracked control address has an unsupported version; upgrade charter",
+        hx(key)
     )]
     UnsupportedVersion { key: Hash32 },
     #[error("node view inconsistent (entityNonce changed or count above nonce)")]
     InconsistentView,
-    #[error("no completeness observation for control address {0:02x?}")]
+    #[error("no completeness observation for control address 0x{}", hx(.0))]
     MissingCompleteness(Address),
+}
+
+/// Lowercase hex of `b`, for messages a person reads (never byte-array debug output).
+fn hx(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 impl VerifyError {

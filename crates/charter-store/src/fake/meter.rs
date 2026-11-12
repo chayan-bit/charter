@@ -221,6 +221,9 @@ impl<A: Arkiv> Arkiv for Meter<'_, A> {
     fn seals(&self) -> bool {
         self.inner.seals()
     }
+    fn incomplete_reason(&self) -> Option<&'static str> {
+        self.inner.incomplete_reason()
+    }
     fn open_rows(&self, rows: Vec<EntityData>) -> Vec<EntityData> {
         self.inner.open_rows(rows)
     }

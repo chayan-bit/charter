@@ -570,3 +570,57 @@ fn a_root_delegates_record_for_epoch_zero_does_not_block_joins() {
         assert_eq!(b.role(&bob.keys.nid()), Some(Role::Read));
     });
 }
+
+/// A removed member whose fetch finds a peer's entries incomplete is told plainly that it
+/// was removed, under the stable `E_CONTROL_NOT_LIVE` code and with no raw byte arrays; a
+/// member seeing the same gets the plain completeness failure, in hex.
+#[test]
+fn a_removed_members_incomplete_fetch_says_it_was_removed() {
+    run(async {
+        let net = Net::new();
+        let [alice, bob, carol] = [1, 2, 3].map(|s| Peer::new(&net, s));
+        let rid = charter_private::init(&net, &alice.cfg, &alice.keys, &meta("secret"))
+            .await
+            .expect("init");
+        invite(&net, &alice, &bob, &rid, Role::Read).await;
+        invite(&net, &alice, &carol, &rid, Role::Read).await;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let work = work_repo(tmp.path(), "w");
+        commit(&work, &[("a.txt", b"one")], "c1");
+        private_push(&net, &alice, &rid, &work).await.expect("push");
+        let fetch = |p: &'static Peer| async {
+            let b = charter_private::for_repo(&net, &p.cfg, Some(&p.keys), &rid).await?;
+            charter_sync::sync(&b, &p.repo(&rid), &charter_sync::Want::default()).await
+        };
+        let (bob, carol): (&'static Peer, &'static Peer) =
+            (Box::leak(Box::new(bob)), Box::leak(Box::new(carol)));
+        fetch(bob).await.expect("bob reads while a member");
+        let ctl = alice.keys.control_address(&rid).into_array();
+        let q = charter_store::Query::from(observe::creators(&BTreeSet::from([ctl])));
+        let rows = charter_store::paging::offset_all(&net, &q, observe::full_select())
+            .await
+            .expect("rows");
+        let pushed = rows
+            .last()
+            .and_then(|r| r.key)
+            .expect("the push's last row");
+        charter_private::remove_member(&net, &alice.cfg, &alice.keys, &rid, &bob.keys.nid())
+            .await
+            .expect("remove bob");
+        net.mem.withhold(pushed);
+
+        assert!(
+            ring(&net, bob, &rid).await.expect("bob").removed,
+            "bob's refresh sees the removal"
+        );
+        let e = fetch(bob).await.expect_err("incomplete");
+        let text = e.to_string();
+        assert_eq!(e.code(), charter_core::ErrorCode::ControlNotLive, "{text}");
+        assert!(text.contains("removed from this private repo"), "{text}");
+        assert!(!text.contains('['), "no raw byte arrays: {text}");
+        let e = fetch(carol).await.expect_err("incomplete for a member too");
+        let text = e.to_string();
+        assert_eq!(e.code(), charter_core::ErrorCode::ControlNotLive, "{text}");
+        assert!(!text.contains("removed") && !text.contains('['), "{text}");
+    });
+}

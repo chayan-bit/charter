@@ -209,6 +209,21 @@ async fn observe_completeness<A: Arkiv>(
     observe::completeness(a, c).await
 }
 
+/// A completeness failure said as the backend's reason when it knows one (a removed member
+/// of a private repo), under the same code and without raw bytes.
+fn incomplete<A: Arkiv>(a: &A, nid: &Nid, e: SyncError) -> SyncError {
+    match a.incomplete_reason() {
+        Some(why) if e.code() == charter_core::ErrorCode::ControlNotLive => SyncError::coded(
+            charter_core::ErrorCode::ControlNotLive,
+            format!(
+                "peer {}'s entries look incomplete: {why}",
+                crate::ids::to_text(nid)
+            ),
+        ),
+        _ => e,
+    }
+}
+
 /// Bind chain, completeness, anchor chain and head acceptance for one peer (design 3.6).
 pub async fn verify_peer<A: Arkiv>(
     a: &A,
@@ -371,11 +386,10 @@ pub async fn build<A: Arkiv>(a: &A, rid: &Rid, state: &State, want: &Want) -> Re
             .filter_map(|(n, p)| p.map(|p| (n, p)))
             .collect();
         resolved.extend(found.iter().map(|(n, p)| (*n, p.clone())));
-        let verified = join_all(
-            found
-                .iter()
-                .map(|(n, p)| verify_peer(a, rid, n, p.clone(), &identity, state)),
-        )
+        let verified = join_all(found.iter().map(|(n, p)| async {
+            let r = verify_peer(a, rid, n, p.clone(), &identity, state).await;
+            r.map_err(|e| incomplete(a, n, e))
+        }))
         .await;
         for ((nid, _), r) in found.into_iter().zip(verified) {
             match r {

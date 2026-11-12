@@ -121,6 +121,9 @@ impl<A: Arkiv> Arkiv for ForRepo<'_, A> {
     fn seals(&self) -> bool {
         both!(self, b => b.seals())
     }
+    fn incomplete_reason(&self) -> Option<&'static str> {
+        both!(self, b => b.incomplete_reason())
+    }
     fn seals_for(&self, rid: &[u8; 32]) -> bool {
         both!(self, b => b.seals_for(rid))
     }

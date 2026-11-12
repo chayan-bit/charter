@@ -136,4 +136,10 @@ pub trait Arkiv: Send + Sync {
     fn open_rows(&self, rows: Vec<EntityData>) -> Vec<EntityData> {
         rows
     }
+    /// Why this backend's reader may see fewer of a peer's entities than it created, said in
+    /// place of the completeness failure (`E_CONTROL_NOT_LIVE`): a P2 private repo's member
+    /// that was removed. `None` by default.
+    fn incomplete_reason(&self) -> Option<&'static str> {
+        None
+    }
 }

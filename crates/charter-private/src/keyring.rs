@@ -81,6 +81,10 @@ pub struct Keyring {
     /// the records, so a write can offer [`crate::revoked::remove_revoked`]. Never saved.
     #[serde(skip)]
     pub revoked_leaves: usize,
+    /// The refresh found this member removed (and not added again): the keyring keeps the
+    /// old epochs for reading history. Never saved.
+    #[serde(skip)]
+    pub removed: bool,
 }
 
 impl Drop for Keyring {
@@ -107,6 +111,7 @@ impl Keyring {
             format: 0,
             group,
             revoked_leaves: 0,
+            removed: false,
         }
     }
 
