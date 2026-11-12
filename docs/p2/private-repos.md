@@ -88,7 +88,8 @@ Without it, anyone could copy an attested commit into a new row with the same an
 A copy of a welcome or a grant changes nothing: a member places an epoch's start only from the canonical commit, never from a welcome's block, and a grant carries no block of its own.
 A grant does make its epoch's key public, though, so for a grant reader a lockbox that opens under that key proves nothing about who wrote the row.
 So where the canonical chain does not reach (the commits before it expired), a grant reader places an epoch's start only from an attested commit row whose attestation verifies, with the row's creator, under a key it already looked up for the chain or the grants (no extra query); a row without an attestation places an epoch only in a repo that has no attested commit at all.
-An epoch whose start cannot be placed that way stays unplaced, and late writes of the epoch before it are not shown.
+An epoch whose start cannot be placed that way stays unplaced, so it cuts nothing off: a write of an earlier epoch counts if it landed before the next placed epoch's start plus `GRACE_BLOCKS`, which is looser than the unplaced start would be.
+If no later epoch is placed at all, only the newest epoch held is open, and late writes of every earlier epoch are not shown.
 A joiner replays the admin history from the root before it accepts a welcome for epoch E.
 It starts at the first commit signed by a delegate of the root identity (whose hash is the rid, and whose generation-0 blinding pins the welcome's generation-0 id key).
 At each epoch from there to E it takes the first commit in Arkiv order signed by an admin of the epoch before, as the previous commit's attested admin set names them, and requires that commit's admin set and `A` to match the welcome keyring's admin set and key for that epoch.
@@ -149,16 +150,20 @@ Leaves made before 0.6.0 name no device: a revoke cannot find them, `chart membe
 
 MLS state (`$CHARTER_HOME/private/mls.json`) is shared by every repo of a home, so every command that reads or changes it (add, remove, a revoked-leaf removal, the format migration, a refresh, a key package, init) takes the home's lock file (`private/lock`) for its whole run.
 Two commands on one machine therefore never both commit, and a refresh never saves over a commit made meanwhile.
-A membership change leaves its MLS commit pending instead of merging it, and saves it to disk together with the nonce its tx takes on the admin's control address before anything is sent, so a crash or Ctrl-C after the broadcast still finds it.
+A membership change leaves its MLS commit pending instead of merging it, and right before the tx that carries the commit row goes out, saves it to disk together with that tx's nonce on the admin's control address and its hash, so a crash or Ctrl-C after the broadcast still finds it.
+That is the tx actually carrying the row: when a job is too big for one tx and is split (a peer document and a commit with a large welcome), the row may ride a later part at a later nonce, and when a mined tx reverts and is sent again at the next nonce, the record moves there before the resend.
+No record means no tx carrying the commit was ever sent.
 The next refresh merges it only when its commit row is the first valid commit for that epoch (recognised by its lockbox opening under the pending epoch's key, since MLS cannot decrypt its own commit); when another admin's commit landed first, it drops its own and applies that one, so the group never forks.
 This costs no query: the refresh reads the commit rows anyway.
-A pending commit that the refresh did not settle is dropped only once another tx has taken that nonce on chain, since only then can it never land; a block count alone is not used, because a tx that timed out can still sit in the pool and land late.
-While the nonce is still free, the next membership change first sends a zero-value transfer from the control address at that nonce.
-If the node refuses it, the old commit is still waiting in the pool, and the change is refused with `E_CONCURRENT_PUSH` until it is mined; the next refresh then merges it.
-If the transfer is mined, the old commit can never land, so it is dropped and the new change is sent after it.
-That transfer is paid only after an interrupted or lost send; the normal path costs nothing extra (the nonce read replaces the one the send made anyway).
-Pricing a change in `chart ui` sends nothing and prices it as if the old commit is dropped.
-The commit tx is assumed to be one tx: a commit plus welcome is a few KB, far under the tx size limit.
+A pending commit that the refresh did not settle is dropped only when it provably can never land: no tx carrying it was sent, or another tx took the recorded nonce.
+A block count alone is not used, because a tx that timed out can still sit in the pool and land late.
+A used nonce alone is not enough either: the commit's own tx may have taken it, mined after the refresh read the chain or not yet in the node's query index.
+So once the nonce is used, the receipts of the recorded hashes are read; if one of them landed, the change is refused with `E_CONCURRENT_PUSH` and the next refresh merges that commit, and only if none did (none is mined, or the one mined reverted) is it dropped.
+While the nonce is still free, the next membership change first sends a zero-value transfer from the control address at every free nonce up to it.
+If the node refuses one, a tx of that address (the old commit) is still waiting in the pool, and the change is refused with `E_CONCURRENT_PUSH` until it is mined; the next refresh then merges it.
+If the transfers are mined, the old commit can never land, so it is dropped and the new change is sent after it.
+Those transfers are paid only after an interrupted or lost send, and the receipt reads happen only on that abnormal path; the normal path costs nothing extra (the nonce read replaces the one the send made anyway).
+Pricing a removal in `chart ui` sends nothing and counts those transfers when they would be needed, so the dialog shows the most it can cost.
 
 ### Key package claims (F5)
 
