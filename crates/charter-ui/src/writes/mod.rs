@@ -74,8 +74,36 @@ pub struct Estimate {
     pub value: U256,
     /// What the wallet and the repo's control address hold now.
     pub balance: U256,
+    /// What the wallet alone holds now.
+    pub wallet: U256,
+    /// At most this leaves the wallet itself: escrow deposits, top-ups and their fees.
+    pub from_wallet: U256,
+    /// It changes who can read the repo (a group removal), so it always asks.
+    pub regroups: bool,
     /// Blocks the written records are kept before they need a renewal.
     pub lifetime: u64,
+}
+
+/// Why [`Writer::confirm`] sent nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    /// Unknown, expired or already sent.
+    Unknown,
+    /// The wallet cannot pay for it ([`Estimate::covered`]).
+    Funds,
+}
+
+impl Estimate {
+    /// The most it moves: fees and escrow deposits.
+    pub fn need(&self) -> U256 {
+        self.cost + self.value
+    }
+
+    /// Whether it can be paid: the wallet covers what only the wallet can send (escrow
+    /// deposits, top-ups and their fees), and the wallet with the paying address the rest.
+    pub fn covered(&self) -> bool {
+        self.wallet >= self.from_wallet && self.balance >= self.need()
+    }
 }
 
 /// A sent write, as its status page shows it.
@@ -157,15 +185,19 @@ impl Writer {
         Ok((id, d, e))
     }
 
-    /// Signs and sends the draft `id` of repo `rid`, once; `false` if it is unknown,
-    /// expired or already sent. `skipped` records that no dialog was shown.
-    pub fn confirm(&self, rid: &Rid, id: &str, skipped: bool) -> bool {
+    /// Signs and sends the draft `id` of repo `rid`, once; refused if it is unknown, expired
+    /// or already sent, or if its price showed the wallet cannot pay for it (then nothing is
+    /// sent). `skipped` records that no dialog was shown.
+    pub fn confirm(&self, rid: &Rid, id: &str, skipped: bool) -> Result<(), Refused> {
         let taken = self.drafts.lock().ok().and_then(|mut m| m.remove(id));
         let fresh =
             |(at, d, _): &(Instant, Draft, Estimate)| at.elapsed() < DRAFT_TTL && d.rid == *rid;
         let Some((_, d, est)) = taken.filter(fresh) else {
-            return false;
+            return Err(Refused::Unknown);
         };
+        if !est.covered() {
+            return Err(Refused::Funds);
+        }
         let status = Arc::new(Mutex::new(Status {
             label: d.label.clone(),
             back: d.back.clone(),
@@ -177,7 +209,9 @@ impl Writer {
         if let Ok(mut w) = self.writes.lock() {
             w.insert(id.to_owned(), status.clone());
         }
-        self.jobs.send(Job::Send(d, status)).is_ok()
+        self.jobs
+            .send(Job::Send(d, status))
+            .map_err(|_| Refused::Unknown)
     }
 
     pub fn status(&self, id: &str) -> Option<Status> {

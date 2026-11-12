@@ -174,6 +174,7 @@ impl<A: Arkiv> Ctx<A> {
         self.keep_balance(w);
         let mut e = Estimate {
             balance: w + have,
+            wallet: w,
             lifetime: self.cfg.control_lifetime,
             ..Estimate::default()
         };
@@ -181,6 +182,7 @@ impl<A: Arkiv> Ctx<A> {
         for step in d.steps.clone() {
             let step = Self::resolve(step).await?;
             if step == Step::RemoveRevoked {
+                e.regroups = true;
                 let gas = self.removal_gas(&d.rid, &mut e).await?;
                 self.control_tx(&mut e, &mut have, gas, base_fee);
                 steps.push(step);
@@ -194,6 +196,7 @@ impl<A: Arkiv> Ctx<A> {
                     // The escrow transfer goes from the wallet itself: never topped up.
                     (e.value, e.txs) = (e.value + amount, e.txs + 1);
                     e.cost += price(TRANSFER_GAS, base_fee);
+                    e.from_wallet += *amount + price(TRANSFER_GAS, base_fee);
                     deposit_step(appt.appointment.object, *amount, purpose)?
                 }
                 _ => step.clone(),
@@ -227,6 +230,7 @@ impl<A: Arkiv> Ctx<A> {
         if let Some(amount) = PipelineConfig::top_up(*have, reserve, 1) {
             let fee = pc.top_up_fee(base_fee);
             e.top_ups.push(amount);
+            e.from_wallet += amount + fee;
             (e.top_up_fee, e.cost, e.txs) = (e.top_up_fee + fee, e.cost + fee, e.txs + 1);
             *have += amount;
         }

@@ -19,7 +19,7 @@ use charter_sync::units::fmt_glm;
 
 use super::money::{Amount, amount};
 use super::{App, Head, Layout, Pref, blocking, error_page, frame, html, open, short};
-use crate::writes::{Draft, Estimate, Status, Step, Writer, form};
+use crate::writes::{Draft, Estimate, Refused, Status, Step, Writer, form};
 use crate::{cache, prefs};
 
 pub const WRITES_OFF: &str = "Writes are off: there are no keys in $CHARTER_HOME. \
@@ -189,9 +189,32 @@ fn top_up(e: &Estimate) -> String {
     )
 }
 
+/// Why `e` cannot be paid, in the dialog's words, or `None` ([`Estimate::covered`]).
+fn short_of(e: &Estimate, most: &Amount) -> Option<String> {
+    let why = if e.balance < e.need() {
+        format!(
+            "Your wallet and this repo's paying address hold {} together, and this may cost \
+             up to {most}.",
+            amount(e.balance, false)
+        )
+    } else if e.wallet < e.from_wallet {
+        format!(
+            "Your wallet holds {}, and up to {} of this has to come from the wallet itself \
+             (the escrow deposit, top-ups and their fees).",
+            amount(e.wallet, false),
+            amount(e.from_wallet, true)
+        )
+    } else {
+        return None;
+    };
+    Some(format!(
+        "{why} Nothing was spent. Add funds with `chart fund`, then send again."
+    ))
+}
+
 /// The dialog of a priced draft.
 fn dialog(app: &App, l: Layout, head: Head, id: String, d: &Draft, e: &Estimate) -> Confirm {
-    let need = e.cost + e.value;
+    let need = e.need();
     let most = amount(need, true);
     let (q, verb) = ask(&d.label);
     let mut receipt = vec![
@@ -212,13 +235,7 @@ fn dialog(app: &App, l: Layout, head: Head, id: String, d: &Draft, e: &Estimate)
         ));
     }
     receipt.push(("Total, at most", String::new(), Some(amount(need, true))));
-    let short_of = (e.balance < need).then(|| {
-        format!(
-            "Your wallet holds {} and this may cost up to {most}. Nothing was spent. \
-             Add funds with `chart fund`, then send again.",
-            amount(e.balance, false)
-        )
-    });
+    let short_of = short_of(e, &most);
     Confirm {
         l,
         id,
@@ -294,7 +311,7 @@ pub async fn prepare(
         }
     };
     if prefs::skips(&pref.0, &e, app.shared.quota_wait().is_some())
-        && w.confirm(&id, &draft_id, true)
+        && w.confirm(&id, &draft_id, true).is_ok()
     {
         return to_status(&id, &draft_id);
     }
@@ -330,9 +347,17 @@ pub async fn confirm(
         let msg = format!("{q}; nothing was written, confirm again then.");
         return error_page(&app, &pref, StatusCode::SERVICE_UNAVAILABLE, &msg);
     }
-    if !w.confirm(&r, &id, false) {
-        let msg = "This confirmation is unknown, expired or already sent; nothing was written.";
-        return error_page(&app, &pref, StatusCode::NOT_FOUND, msg);
+    match w.confirm(&r, &id, false) {
+        Ok(()) => {}
+        Err(Refused::Unknown) => {
+            let msg = "This confirmation is unknown, expired or already sent; nothing was written.";
+            return error_page(&app, &pref, StatusCode::NOT_FOUND, msg);
+        }
+        Err(Refused::Funds) => {
+            let msg = "Your wallet cannot pay for this write; nothing was written. Add funds \
+                       with `chart fund`, then send it again.";
+            return error_page(&app, &pref, StatusCode::PAYMENT_REQUIRED, msg);
+        }
     }
     to_status(&r, &id)
 }

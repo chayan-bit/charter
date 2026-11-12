@@ -169,13 +169,13 @@ pub fn parse(bytes: &[u8]) -> Result<Prefs, String> {
 }
 
 /// The skip rule: a write skips the dialog only if the user opted in, it moves no funds
-/// besides fees, costs at most the threshold, the balance covers it and the RPC quota is
-/// not paused. Everything else shows the dialog.
+/// besides fees, costs at most the threshold, it can be paid, it does not change who can
+/// read the repo and the RPC quota is not paused. Everything else shows the dialog.
 pub fn skips(p: &Prefs, e: &Estimate, quota_paused: bool) -> bool {
     let Some(limit) = p.skip_wei() else {
         return false;
     };
-    !quota_paused && e.value == U256::ZERO && e.cost <= limit && e.balance >= e.cost
+    !quota_paused && !e.regroups && e.value == U256::ZERO && e.cost <= limit && e.covered()
 }
 
 /// The current prefs, shared by every request; `save` swaps them in without a restart.
@@ -335,6 +335,20 @@ mod tests {
             "moves funds"
         );
         assert!(!skips(&p, &cheap, true), "quota paused");
+        let regroups = Estimate {
+            regroups: true,
+            ..cheap.clone()
+        };
+        assert!(!skips(&p, &regroups, false), "a group removal always asks");
+        let top_up = Estimate {
+            from_wallet: U256::from(wei("0.5")),
+            wallet: U256::from(wei("0.1")),
+            ..cheap.clone()
+        };
+        assert!(
+            !skips(&p, &top_up, false),
+            "the wallet cannot send the top-up"
+        );
     }
 
     #[test]

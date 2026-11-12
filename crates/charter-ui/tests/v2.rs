@@ -491,3 +491,77 @@ async fn a_wallet_too_low_to_pay_disables_send_and_warns() {
     assert!(t.contains("Running low"), "{t}");
     assert!(t.contains("wallet low"), "the header chip warns: {t}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bounty_the_wallet_alone_cannot_send_is_refused_before_sending() {
+    let net = Arc::new(Net::new());
+    let alice = Peer::new(&net, 61);
+    let rid = init(&net, &alice, "bounty").await;
+    let esc = tempfile::tempdir().expect("escrow home");
+    let ek = charter_escrow::EscrowKeys::init(esc.path()).expect("escrow keys");
+    charter_escrow::ops::appoint(
+        &*net,
+        &alice.cfg,
+        &alice.keys,
+        &rid,
+        &ek.id.nid(),
+        ek.address(),
+    )
+    .await
+    .expect("appoint");
+    let issue = post(
+        &net,
+        &alice,
+        &rid,
+        "xyz.arkiv.issue",
+        "create",
+        charter_core::ZERO,
+        serde_json::json!({"title": "funded"}),
+    )
+    .await;
+    // Bob's wallet is nearly empty; his paying address for the repo holds plenty.
+    let bob = Peer::new(&net, 62);
+    let r = charter_ui::sync_loop::round(&*net, &bob.cfg, &rid).await;
+    assert!(r.is_ok(), "{r:?}");
+    let keys = Keys::from_seed(charter_crypto::MasterSeed::from_bytes([62; 32]));
+    let milli = charter_store::U256::from(10u128.pow(15));
+    net.mem.set_balance(keys.wallet().address(), milli);
+    net.fund(keys.control_address(&rid));
+    let w = writes::spawn(net.clone(), bob.cfg.clone(), keys);
+    let app = App::new(
+        bob.home.path().to_path_buf(),
+        Arc::new(Shared::default()),
+        CSRF.into(),
+    );
+    let app = router(
+        Arc::new(app.with_writer(w)),
+        Arc::new(Auth::with(PORT, TOKEN.into(), CSRF.into())),
+    );
+    let hex = hex32(&rid);
+    let kv = [
+        ("kind", "fund"),
+        ("issue", &hex32(&issue)),
+        ("amount", "0.25"),
+    ];
+    let r = send(app.clone(), form(&format!("/r/{hex}/write"), &kv)).await;
+    let html = r.text();
+    assert_eq!(r.status, StatusCode::OK, "{html}");
+    assert!(
+        html.contains("Not enough funds")
+            && html.contains("has to come from the wallet itself")
+            && html.contains("type=\"submit\" disabled"),
+        "{html}"
+    );
+    let at = html.find("/write/").expect("form") + 7;
+    let id = html[at..at + 64].to_owned();
+    let r = send(app.clone(), form(&format!("/r/{hex}/write/{id}"), &[])).await;
+    assert_eq!(r.status, StatusCode::PAYMENT_REQUIRED, "{}", r.text());
+    let ledger = charter_escrow::ledger::load(&*net, &rid)
+        .await
+        .expect("ledger");
+    assert!(
+        ledger.deposits.is_empty(),
+        "nothing was sent: {:?}",
+        ledger.deposits
+    );
+}
