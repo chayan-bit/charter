@@ -22,6 +22,7 @@ pub mod prefs;
 pub mod security;
 pub mod spend;
 pub mod sync_loop;
+pub mod triage;
 pub mod writes;
 
 use std::net::{Ipv4Addr, SocketAddr};

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 
@@ -31,6 +31,37 @@ fn infer_merged(r: &Repo, pref: &Pref, threads: &mut [Thread]) {
     }
 }
 
+/// `?label=`, `?assignee=` (peer hex) and `?milestone=` on a list: threads carrying it.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Filter {
+    pub label: Option<String>,
+    pub assignee: Option<String>,
+    pub milestone: Option<String>,
+}
+
+impl Filter {
+    fn keeps(&self, t: &Thread) -> bool {
+        let tr = &t.triage;
+        self.label.as_ref().is_none_or(|l| tr.labels.contains(l))
+            && self
+                .assignee
+                .as_ref()
+                .is_none_or(|a| tr.assignees.contains(a))
+            && self
+                .milestone
+                .as_ref()
+                .is_none_or(|m| tr.milestone.as_ref() == Some(m))
+    }
+
+    /// What the list is filtered by: `(what, value)`, the value a peer id for `assignee`.
+    fn active(&self) -> Option<(&'static str, String)> {
+        let pick = |w, v: &Option<String>| v.clone().map(|v| (w, v));
+        pick("label", &self.label)
+            .or_else(|| pick("assignee", &self.assignee))
+            .or_else(|| pick("milestone", &self.milestone))
+    }
+}
+
 #[derive(Template)]
 #[template(path = "threads.html")]
 pub struct Threads {
@@ -39,6 +70,22 @@ pub struct Threads {
     /// `issues` or `patches`.
     pub kind: &'static str,
     pub threads: Vec<Thread>,
+    /// The active filter, `(what, value)`.
+    pub filter: Option<(&'static str, String)>,
+}
+
+/// `?label=<l>` with the value escaped for a URL query.
+fn query(what: &str, v: &str) -> String {
+    format!(
+        "?{}",
+        serde_urlencoded::to_string([(what, v)]).unwrap_or_default()
+    )
+}
+
+impl Threads {
+    pub fn q(&self, what: &str, v: &str) -> String {
+        query(what, v)
+    }
 }
 
 #[derive(Template)]
@@ -72,6 +119,32 @@ impl ThreadPage {
     pub fn short(&self, s: &str) -> String {
         short(s)
     }
+    /// The list of this kind filtered by `what` = `v`.
+    pub fn q(&self, what: &str, v: &str) -> String {
+        format!("/r/{}/{}{}", self.r.hex, self.kind, query(what, v))
+    }
+    /// People the assignee form offers: maintainers, current assignees, and everyone who
+    /// wrote on this thread, each once, maintainers first.
+    pub fn assignable(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.r.verify.delegates.clone();
+        let more = self.t.triage.assignees.iter().cloned();
+        let authors = self.t.entries.iter().map(|e| e.author.clone());
+        for p in more.chain(authors) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+    /// The current labels as the form's comma list.
+    pub fn label_list(&self) -> String {
+        let l: Vec<&str> = self.t.triage.labels.iter().map(String::as_str).collect();
+        l.join(", ")
+    }
+    pub fn assignee_list(&self) -> String {
+        let a: Vec<&str> = self.t.triage.assignees.iter().map(String::as_str).collect();
+        a.join(",")
+    }
 }
 
 fn type_of(kind: &str) -> &'static str {
@@ -82,9 +155,10 @@ fn type_of(kind: &str) -> &'static str {
     }
 }
 
-fn list_page(app: &App, pref: &Pref, r: &Repo, kind: &'static str) -> Response {
+fn list_page(app: &App, pref: &Pref, r: &Repo, kind: &'static str, f: &Filter) -> Response {
     let ops = r.ops();
     let mut threads = fold::threads(&ops, type_of(kind), r.view.as_ref());
+    threads.retain(|t| f.keeps(t));
     if kind == "patches" {
         infer_merged(r, pref, &mut threads);
     }
@@ -100,6 +174,7 @@ fn list_page(app: &App, pref: &Pref, r: &Repo, kind: &'static str) -> Response {
         r: head,
         kind,
         threads,
+        filter: f.active(),
     })
 }
 
@@ -132,9 +207,9 @@ fn thread_page(app: &App, pref: &Pref, r: &Repo, kind: &'static str, id: &str) -
     })
 }
 
-async fn list(app: Arc<App>, pref: Pref, rid: String, kind: &'static str) -> Response {
+async fn list(app: Arc<App>, pref: Pref, rid: String, kind: &'static str, f: Filter) -> Response {
     blocking(move || match open(&app, &pref, &rid) {
-        Ok(r) => list_page(&app, &pref, &r, kind),
+        Ok(r) => list_page(&app, &pref, &r, kind, &f),
         Err(e) => e,
     })
     .await
@@ -148,12 +223,22 @@ async fn one(app: Arc<App>, pref: Pref, rid: String, id: String, kind: &'static 
     .await
 }
 
-pub async fn issues(State(a): State<Arc<App>>, t: Pref, Path(rid): Path<String>) -> Response {
-    list(a, t, rid, "issues").await
+pub async fn issues(
+    State(a): State<Arc<App>>,
+    t: Pref,
+    Path(rid): Path<String>,
+    Query(f): Query<Filter>,
+) -> Response {
+    list(a, t, rid, "issues", f).await
 }
 
-pub async fn patches(State(a): State<Arc<App>>, t: Pref, Path(rid): Path<String>) -> Response {
-    list(a, t, rid, "patches").await
+pub async fn patches(
+    State(a): State<Arc<App>>,
+    t: Pref,
+    Path(rid): Path<String>,
+    Query(f): Query<Filter>,
+) -> Response {
+    list(a, t, rid, "patches", f).await
 }
 
 pub async fn issue(

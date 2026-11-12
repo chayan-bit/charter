@@ -7,6 +7,7 @@
 <header class="thread-head">
 <h1>{{ t.title }}</h1>
 <p class="meta"><span class="chip">{{ t.state }}</span><span>Opened by <b>{{ r.who(t.author) }}</b> <time title="{{ r.full(t.block) }}">{{ r.when(t.block) }}</time></span>{% if t.inferred %}<span>{{ r.default_ref }} already contains its latest commit</span>{% endif %}<button class="copy js" type="button" data-copy="{{ t.id }}" aria-label="Copy id" title="Copy id">{{ m::i(l.v, "copy") }}</button></p>
+{% let tr = t.triage %}{% if !tr.labels.is_empty() || !tr.assignees.is_empty() || tr.milestone.is_some() %}<dl class="facts triage">{% if !tr.labels.is_empty() %}<dt>Labels</dt><dd class="lbls">{% for lb in tr.labels %}<a class="lbl" href="{{ self.q("label", lb) }}">{{ lb }}</a>{% endfor %}</dd>{% endif %}{% if !tr.assignees.is_empty() %}<dt>Assignees</dt><dd>{% for a in tr.assignees %}<a href="{{ self.q("assignee", a) }}">{{ r.who(a) }}</a>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}{% if let Some(ms) = tr.milestone %}<dt>Milestone</dt><dd><a href="{{ self.q("milestone", ms) }}">{{ ms }}</a></dd>{% endif %}</dl>{% endif %}
 {% if t.revisions.len() > 1 %}<p class="meta">Versions: {% for h in t.revisions %}<span class="nw">{{ loop.index }} <a class="hash" href="/r/{{ r.hex }}/commit/{{ h }}" title="{{ h }}">{{ r.short(h) }}</a></span>{% endfor %}</p>{% endif %}
 </header>
 <ol class="ledger">
@@ -58,6 +59,7 @@
 <div class="acts"><button class="btn btn-ink" type="submit">Mark merged</button></div>
 </form></details>
 {% endif %}
+{% if l.writes %}{% include "triage_form.html" %}{% endif %}
 </section>
 </article>
 {% endblock %}

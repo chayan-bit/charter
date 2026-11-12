@@ -11,6 +11,7 @@ use charter_sync::units::glm;
 use serde_json::{Value, json};
 
 use super::{Draft, Obj, Step};
+use crate::triage;
 
 pub const ISSUE: &str = "xyz.arkiv.issue";
 pub const PATCH: &str = "xyz.arkiv.patch";
@@ -103,6 +104,7 @@ fn steps(rid: &Rid, f: &Fields) -> Result<(String, Vec<Step>), String> {
             )
         }
         "review" => review(f)?,
+        "triage" => triage(f)?,
         "merge" => {
             let (patch, hex) = id(f, "patch")?;
             let mut p = json!({"patch": hex});
@@ -143,6 +145,84 @@ fn steps(rid: &Rid, f: &Fields) -> Result<(String, Vec<Step>), String> {
         }
         k => return Err(format!("unknown write {k:?}")),
     })
+}
+
+/// Comma-separated labels, cleaned and deduplicated in order.
+fn label_set(s: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = vec![];
+    for l in s.split(',').filter(|l| !l.trim().is_empty()) {
+        let c = triage::clean(l, triage::LABEL_MAX)
+            .ok_or_else(|| format!("label {l:?} must be 1 to {} characters", triage::LABEL_MAX))?;
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// `a` minus `b`, at most [`triage::MAX_PER_OP`] per op as readers keep.
+fn minus(a: &[String], b: &[String]) -> Result<Vec<String>, String> {
+    let d: Vec<String> = a.iter().filter(|x| !b.contains(x)).cloned().collect();
+    match d.len() <= triage::MAX_PER_OP {
+        true => Ok(d),
+        false => Err(format!("change at most {} at once", triage::MAX_PER_OP)),
+    }
+}
+
+/// The ops that move an issue's or patch's labels, assignees and milestone from the
+/// `cur_*` values the page showed to the submitted ones; only what changed is signed.
+fn triage(f: &Fields) -> Result<(String, Vec<Step>), String> {
+    let (obj, _) = id(f, "object")?;
+    let (ty, what) = match get(f, "on") {
+        "issues" => (ISSUE, "issue"),
+        "patches" => (PATCH, "patch"),
+        o => return Err(format!("unknown object kind {o:?}")),
+    };
+    let (new, cur) = (
+        label_set(get(f, "labels"))?,
+        label_set(get(f, "cur_labels"))?,
+    );
+    let mut who: Vec<String> = f
+        .keys()
+        .filter_map(|k| k.strip_prefix("assignee."))
+        .map(str::to_ascii_lowercase)
+        .collect();
+    who.sort();
+    if let Some(bad) = who.iter().find(|w| !triage::is_nid(w)) {
+        return Err(format!("assignee {bad:?} is not a peer id"));
+    }
+    let was: Vec<String> = get(f, "cur_assignees")
+        .split(',')
+        .filter(|w| triage::is_nid(w))
+        .map(str::to_owned)
+        .collect();
+    let mut steps = vec![];
+    let mut push = |action, key: &str, v: Vec<String>| {
+        if !v.is_empty() {
+            steps.push(op(ty, action, Obj::Id(obj), json!({ key: v })));
+        }
+    };
+    push("label", "labels", minus(&new, &cur)?);
+    push("unlabel", "labels", minus(&cur, &new)?);
+    push("assign", "assignees", minus(&who, &was)?);
+    push("unassign", "assignees", minus(&was, &who)?);
+    let ms = get(f, "milestone");
+    if ms != get(f, "cur_milestone") {
+        let v = match ms {
+            "" => Value::Null,
+            m => json!(triage::clean(m, triage::MILESTONE_MAX).ok_or_else(|| {
+                format!(
+                    "milestone must be 1 to {} characters",
+                    triage::MILESTONE_MAX
+                )
+            })?),
+        };
+        steps.push(op(ty, "milestone", Obj::Id(obj), json!({ "milestone": v })));
+    }
+    if steps.is_empty() {
+        return Err("nothing changed".into());
+    }
+    Ok((format!("Update {what}"), steps))
 }
 
 /// A review object, then its verdict (`approve` at a head, or a `comment`).
@@ -234,6 +314,48 @@ mod tests {
         );
         let want = op(REVIEW, "approve", Obj::Prev, json!({"patch": p, "head": h}));
         assert_eq!(d.steps[1], want);
+    }
+
+    #[test]
+    fn triage_signs_only_what_changed() {
+        let (obj, a, b) = ("cd".repeat(32), "aa".repeat(32), "bb".repeat(32));
+        let kb = format!("assignee.{b}");
+        let f = fields(&[
+            ("kind", "triage"),
+            ("on", "issues"),
+            ("object", &obj),
+            ("labels", "bug, docs , bug"),
+            ("cur_labels", "bug, ui"),
+            (&kb, "1"),
+            ("cur_assignees", &a),
+            ("milestone", ""),
+            ("cur_milestone", "v1"),
+        ]);
+        let d = draft(&RID, &f).expect("draft");
+        assert_eq!(d.label, "Update issue");
+        let id = Obj::Id(unhex32(&obj).expect("hex"));
+        let want = [
+            op(ISSUE, "label", id.clone(), json!({"labels": ["docs"]})),
+            op(ISSUE, "unlabel", id.clone(), json!({"labels": ["ui"]})),
+            op(ISSUE, "assign", id.clone(), json!({"assignees": [b]})),
+            op(ISSUE, "unassign", id.clone(), json!({"assignees": [a]})),
+            op(ISSUE, "milestone", id, json!({"milestone": null})),
+        ];
+        assert_eq!(d.steps, want);
+        let same = fields(&[
+            ("kind", "triage"),
+            ("on", "patches"),
+            ("object", &obj),
+            ("labels", "bug"),
+            ("cur_labels", "bug"),
+        ]);
+        assert_eq!(draft(&RID, &same).expect_err("no-op"), "nothing changed");
+        for bad in [("labels", "a\u{7}"), ("assignee.zz", "1"), ("on", "repos")] {
+            let mut f = same.clone();
+            f.insert("labels".into(), "new".into());
+            f.insert(bad.0.into(), bad.1.into());
+            assert!(draft(&RID, &f).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

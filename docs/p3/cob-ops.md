@@ -90,6 +90,26 @@ It walks the entities in Arkiv creation order and drops, never errors on, any op
 - `chart op list --repo <rid> [--object <id>] [--type <t>] [--json]` prints the verified ops in order, one line each, or one JSON array.
 - In JSON output, byte strings show as `{"$bytes": "<hex>"}`, non-text map keys as their JSON text, and integers outside the i64 and u64 ranges as decimal strings.
 
+## Labels, assignees and milestones (issue #40)
+
+An issue or patch carries labels, assignees and one milestone, folded in Arkiv order from its create op and five follow-up actions on the same object:
+
+| Action | Payload | Effect |
+| --- | --- | --- |
+| `label` | `{ labels: [tstr] }` | adds the labels |
+| `unlabel` | `{ labels: [tstr] }` | removes the labels |
+| `assign` | `{ assignees: [peer id hex] }` | adds the assignees |
+| `unassign` | `{ assignees: [peer id hex] }` | removes the assignees |
+| `milestone` | `{ milestone: tstr / null }` | sets the milestone; `null` or `""` clears it |
+
+- A create payload may carry `labels`, `assignees` and `milestone` as the initial values.
+- Readers check every value from the chain: a label or milestone is trimmed, 1 to 48 (label) or 64 (milestone) characters with no control characters, an assignee is 64 lowercase hex digits, and only the first 16 values of one op count; a thread keeps at most 64 labels and 64 assignees; anything else is dropped.
+- Labels are free text: there is no repo-level label set, and the labels already in use are the vocabulary; a milestone is a name with no due date.
+- Who may label or assign is a program rule, like who may close an issue: the UI shows every valid op, and a pinned program may fold only the ones it allows.
+- Old readers fold these ops as ordinary entries of the thread and ignore them for its state, so the change is safe for them; no format version changes.
+- `chart op post --action label --payload-json '{"labels":["bug"]}' ...` and the MCP `op_post` tool write them; the UI shows labels, assignees and the milestone on lists and threads, filters lists with `?label=`, `?assignee=` and `?milestone=`, and its edit form signs one op per kind of change.
+- Cost: one op (one transaction) per kind of change; reading costs nothing new, since the fold uses the ops the list already reads.
+
 ## Signing keys and signed commits (issue #61)
 
 Git commits signed with an SSH Ed25519 key (`gpg.format = ssh`) are checked in process, from the commit object in the local cache, with no `ssh-keygen` or `gpg` on the read path.

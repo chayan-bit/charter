@@ -25,7 +25,9 @@ const INSTRUCTIONS: &str = "Git repositories on Arkiv. A repo is named by its ur
 `arkiv::<rid>` (or the bare rid). Find work with op_list (issues with a `bounty` that no \
 patch names yet), clone with repo_clone, edit files in the clone, commit and push them with \
 git_push, then attach_proof to post the patch with its receipt. program_status shows \
-what the repo's pinned program decided; escrow_status audits payouts. Errors carry the \
+what the repo's pinned program decided; escrow_status audits payouts. Triage an issue or \
+patch with op_post actions label and unlabel ({labels: [..]}), assign and unassign \
+({assignees: [peer hex]}) and milestone ({milestone: name or null}). Errors carry the \
 stable Charter code (E_*).";
 
 #[derive(Debug, Deserialize, JsonSchema)]

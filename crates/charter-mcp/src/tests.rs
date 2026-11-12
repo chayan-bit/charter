@@ -129,6 +129,15 @@ async fn tools_dispatch_to_the_cli_on_the_fake_chain() {
     assert_eq!(issues[0]["payload"]["bounty"], 5);
     let none = ok(s.op_list(list(&url, None, Some("merged"))).await);
     assert_eq!(none, json!([]));
+    // Triage is a follow-up op on the issue (issue #40).
+    let label = Parameters(PostArgs {
+        object: Some(id.clone()),
+        parents: vec![id.clone()],
+        ..post("xyz.arkiv.issue", "label", json!({"labels": ["bug"]})).0
+    });
+    ok(s.op_post(label).await);
+    let labels = ok(s.op_list(list(&url, None, Some("label"))).await);
+    assert_eq!(labels[0]["payload"]["labels"], json!(["bug"]));
 
     let clone = tmp.path().join("clone");
     let cloned = s

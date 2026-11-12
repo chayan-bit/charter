@@ -1,0 +1,9 @@
+<details class="more-w"><summary>Labels, assignees and milestone</summary>
+<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="triage"><input type="hidden" name="on" value="{{ kind }}"><input type="hidden" name="object" value="{{ t.id }}"><input type="hidden" name="back" value="{{ back }}"><input type="hidden" name="cur_labels" value="{{ self.label_list() }}"><input type="hidden" name="cur_assignees" value="{{ self.assignee_list() }}"><input type="hidden" name="cur_milestone" value="{% if let Some(ms) = t.triage.milestone %}{{ ms }}{% endif %}">
+<label for="w-labels">Labels <span class="dim">comma separated</span></label><input id="w-labels" name="labels" value="{{ self.label_list() }}" autocomplete="off">
+<fieldset class="radios"><legend>Assignees</legend>{% for p in self.assignable() %}<label><input type="checkbox" name="assignee.{{ p }}" value="1"{% if t.triage.assignees.contains(p) %} checked{% endif %}> {{ r.who(p) }}</label>{% endfor %}</fieldset>
+<label for="w-ms">Milestone <span class="dim">empty for none</span></label><input id="w-ms" name="milestone" value="{% if let Some(ms) = t.triage.milestone %}{{ ms }}{% endif %}" maxlength="64" autocomplete="off" class="short">
+<p class="help">Only what changes is signed: one op for added labels, one for removed ones, and so on. You see the cost before anything is sent.</p>
+<div class="acts"><button class="btn btn-ink" type="submit">Save</button></div>
+</form></details>
