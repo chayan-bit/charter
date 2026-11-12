@@ -13,7 +13,7 @@
 {% if rows.is_empty() %}
 <p class="muted">No other repositories on Arkiv start with <b>{{ prefix }}</b>.</p>
 {% else %}
-<ul class="hits">
+<ul class="rows hits">
 {% for x in rows %}<li><span class="t">{{ x.hit.name }}</span>{% if !x.hit.description.is_empty() %}<p class="desc">{{ x.hit.description }}</p>{% endif %}<p class="meta"><span class="vis">{{ m::i(v, "globe-simple") }}On Arkiv, not on this computer</span>{% if let Some(l) = x.hit.lang %}<span>{{ l }}</span>{% endif %}{% if let Some(l) = x.hit.license %}<span>{{ l }}</span>{% endif %}<code title="{{ x.hit.hex }}">{{ x.short }}</code></p>
 {% if x.fetching %}<span class="act chip">Fetching</span>{% else %}<form class="act" method="post" action="/search/fetch" hx-boost="false"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="rid" value="{{ x.hit.hex }}"><input type="hidden" name="q" value="{{ q }}"><button class="btn btn-sm" type="submit" aria-label="Fetch {{ x.hit.name }}">Fetch</button></form>{% endif %}</li>
 {% endfor %}

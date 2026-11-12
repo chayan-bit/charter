@@ -563,8 +563,16 @@ Activity and large-file paging, the rest of slice 6, are not built.
   Local results come from the cache at once and never touch the chain: repo names and descriptions, issue and patch titles (read from the ops without rendering markdown), commit subjects (the newest 2,000 commits of each default branch) and file names (the default branch's tree, up to 20,000 paths).
   Every query word must match, case-insensitively, as a substring; each section shows 20 rows and says how many more matched.
   Private repos in this home are searched like any other cached repo.
-- "Jump to": a box in the header on every page but Search (`/` focuses it; below 900 px it is an icon and `/` opens `/search`; Esc blurs it).
+- "Jump to": a box in the header on every page but Search (`/` focuses it; Esc blurs it).
   It is a plain GET form, so it works without JavaScript.
+  Up to 900 px wide the box does not fit, so a "Search" link takes its place: in the header nav from 641 px, in the bottom tab bar on phones (a fourth tab); `/` opens `/search` there.
+  The header was made to fit at every width from 320 px up (the tGLM unit and, from 641 to 760 px, the ? button give way; at 340 px and below the ? button goes and a long balance shortens).
+- Page weight: the Search page's own CSS is `search.css`, linked by that page only, so other pages carry just the header box.
+  Every link into Search is `hx-boost="false"` (a full load), because htmx does not merge `<head>` links on a boosted swap.
+  Measured against `2907c34` on the e2e fixture, every page is 705 B larger raw and 460 to 470 B larger as HTML plus CSS gzipped (home 10,711 to 11,171 B, repo 12,777 to 13,246 B, blob 12,305 to 12,771 B; the long blob and commit pages, already over the 20 KB mark by nature, grow by 534 and 539 B).
+  That is the Jump to box and the Search links in the HTML (about 0.2 KB gzipped) and the header rules in `app.css` (about 0.25 KB gzipped); `search.css` is 0.6 KB gzipped and only the Search page loads it.
+  Server time did not move: three alternating runs of each build on the same machine gave the same spread (the base build alone drifted from 11 ms to 26 ms p50 on the long commit page as the machine got busier), so the two extra e2e timing warnings (blob max 51 ms against 50, long commit p50 20.6 ms against 20) are noise.
+  `budget` and `render_time` list `/search` and `/search?q=main`; `render_time` caps them at the section 6 limits (p50 under 20 ms, p99 under 50 ms).
 - Setting: `Search scope`, "Local only" (default) or "Local + Arkiv", in `ui/prefs.json` as `search`.
 - With "Local + Arkiv", the page renders the local results and a loading section; an htmx request then asks Arkiv.
   The request is made once per submitted search (Enter or the Search button) and never while typing, because typing sends nothing.

@@ -37,6 +37,7 @@ async fn page_render_times() {
         format!("/r/{h}/branches"),
         "/wallet".to_owned(),
         "/settings".to_owned(),
+        "/search?q=main".to_owned(),
     ];
     let app = app();
     for p in pages {
@@ -57,5 +58,9 @@ async fn page_render_times() {
             pct(&t, 50),
             pct(&t, 99)
         );
+        // The search page scans the cache on every request, so it carries the section 6 limits.
+        if p.starts_with("/search") {
+            assert!(pct(&t, 50) < 20.0 && pct(&t, 99) < 50.0, "{p} is too slow");
+        }
     }
 }

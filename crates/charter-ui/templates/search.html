@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% import "macros.html" as m %}
+{% block head %}<link rel="stylesheet" href="/assets/search.css?v={{ l.v }}">{% endblock %}
 {% block main %}
 <div class="page-head"><div><h1>Search</h1><p>Repositories, issue and patch titles, commit subjects and file names on this computer{% if arkiv_on %}, and repositories on Arkiv you have not fetched{% endif %}.</p></div></div>
 <form class="sform" role="search" action="/search" method="get">
 <label class="vh" for="q">Search</label>
-<input class="input" id="q" type="search" name="q" value="{{ q }}" placeholder="Name, title, commit subject or file" autocomplete="off" maxlength="100"{% if q.is_empty() %} autofocus{% endif %}>
+<input class="input" id="q" type="search" name="q" value="{{ q }}" placeholder="Name, title or file" autocomplete="off" maxlength="100"{% if q.is_empty() %} autofocus{% endif %}>
 <button class="btn btn-ink" type="submit">{{ m::i(l.v, "magnifying-glass") }}Search</button>
 </form>
 <p class="scope small muted">{% if arkiv_on %}<b>Local + Arkiv.</b> Arkiv is asked only when you press Enter or Search, never while you type.{% else %}<b>Local only.</b> Nothing leaves this computer.{% endif %} <a href="/settings#s-search">Change in Settings</a></p>
@@ -26,7 +27,7 @@
 <div data-list>
 {% if !local.repos.is_empty() %}
 <section class="sec" aria-labelledby="h-repos"><h2 class="h2" id="h-repos">Repositories <span class="n">{{ local.repos.total }}</span></h2>
-<ul class="hits">
+<ul class="rows hits">
 {% for x in local.repos.rows %}<li data-row data-copy="{{ x.hex }}"><a class="t" href="/r/{{ x.hex }}">{{ x.name }}</a>{% if x.private %}<span class="vis">{{ m::i(l.v, "lock-simple") }}Private</span>{% endif %}{% if !x.description.is_empty() %}<p class="desc">{{ x.description }}</p>{% endif %}</li>
 {% endfor %}
 </ul>
@@ -35,7 +36,7 @@
 {% endif %}
 {% if !local.issues.is_empty() %}
 <section class="sec" aria-labelledby="h-issues"><h2 class="h2" id="h-issues">Issues <span class="n">{{ local.issues.total }}</span></h2>
-<ul class="hits">
+<ul class="rows hits">
 {% for x in local.issues.rows %}<li data-row data-copy="{{ x.id }}"><a class="t" href="/r/{{ x.hex }}/issues/{{ x.id }}">{{ x.title }}</a><p class="meta"><span>{{ x.repo }}</span><span>Opened <time title="{{ x.full }}">{{ x.when }}</time></span></p></li>
 {% endfor %}
 </ul>
@@ -44,7 +45,7 @@
 {% endif %}
 {% if !local.patches.is_empty() %}
 <section class="sec" aria-labelledby="h-patches"><h2 class="h2" id="h-patches">Patches <span class="n">{{ local.patches.total }}</span></h2>
-<ul class="hits">
+<ul class="rows hits">
 {% for x in local.patches.rows %}<li data-row data-copy="{{ x.id }}"><a class="t" href="/r/{{ x.hex }}/patches/{{ x.id }}">{{ x.title }}</a><p class="meta"><span>{{ x.repo }}</span><span>Opened <time title="{{ x.full }}">{{ x.when }}</time></span></p></li>
 {% endfor %}
 </ul>
@@ -53,7 +54,7 @@
 {% endif %}
 {% if !local.commits.is_empty() %}
 <section class="sec" aria-labelledby="h-commits"><h2 class="h2" id="h-commits">Commits <span class="n">{{ local.commits.total }}</span></h2>
-<ul class="hits">
+<ul class="rows hits">
 {% for x in local.commits.rows %}<li data-row data-copy="{{ x.oid }}"><a class="t" href="/r/{{ x.hex }}/commit/{{ x.oid }}">{{ x.subject }}</a><p class="meta"><span>{{ x.repo }}</span><code title="{{ x.oid }}">{{ self.short(x.oid) }}</code><span>{{ x.age }}</span></p></li>
 {% endfor %}
 </ul>
@@ -62,7 +63,7 @@
 {% endif %}
 {% if !local.files.is_empty() %}
 <section class="sec" aria-labelledby="h-files"><h2 class="h2" id="h-files">Files <span class="n">{{ local.files.total }}</span></h2>
-<ul class="hits">
+<ul class="rows hits">
 {% for x in local.files.rows %}<li data-row data-copy="{{ x.dir }}{{ x.file }}"><a class="t mono" href="{{ x.href }}"><span class="dir">{{ x.dir }}</span>{{ x.file }}</a><p class="meta"><span>{{ x.repo }}</span></p></li>
 {% endfor %}
 </ul>

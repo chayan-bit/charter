@@ -76,8 +76,8 @@
       case "/":
         var f = d.querySelector("input[type=search]");
         if (f && f.offsetParent) { f.focus(); f.select(); break; }
-        var s = d.querySelector("a[data-search]");
-        if (!s || !s.offsetParent) return;
+        var s = [].filter.call(d.querySelectorAll("a[href='/search']"), function (a) { return a.offsetParent; })[0];
+        if (!s) return;
         go(s); break;
       case "y": copy(); break;
       case "v": toggle("#verify"); break;

@@ -23,11 +23,16 @@ use axum::extract::Path;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-const FILES: [(&str, &str, &[u8]); 9] = [
+const FILES: [(&str, &str, &[u8]); 10] = [
     (
         "app.css",
         "text/css; charset=utf-8",
         include_bytes!("../assets/app.css"),
+    ),
+    (
+        "search.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../assets/search.css"),
     ),
     (
         "keys.js",

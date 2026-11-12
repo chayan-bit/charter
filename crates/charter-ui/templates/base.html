@@ -7,6 +7,7 @@
 <meta name="csrf-token" content="{{ l.csrf }}">
 <title>{{ l.title }} - Charter</title>
 <link rel="stylesheet" href="/assets/app.css?v={{ l.v }}">
+{% block head %}{% endblock %}
 <link rel="icon" href="/assets/favicon.svg?v={{ l.v }}" type="image/svg+xml">
 <script src="/assets/htmx.min.js?v={{ l.v }}" defer></script>
 <script src="/assets/keys.js?v={{ l.v }}" defer></script>
@@ -20,9 +21,9 @@
 <a href="/"{% if l.nav == "repos" %} aria-current="page"{% endif %}>Repositories</a>
 <a href="/wallet"{% if l.nav == "wallet" %} aria-current="page"{% endif %}>Wallet</a>
 <a href="/settings"{% if l.nav == "settings" %} aria-current="page"{% endif %}>Settings</a>
+<a class="s" href="/search" hx-boost="false"{% if l.nav == "search" %} aria-current="page"{% endif %}>Search</a>
 </nav>
-{% if l.nav != "search" %}<form class="jump" role="search" action="/search" method="get"><label class="vh" for="jump">Jump to</label>{{ m::i(l.v, "magnifying-glass") }}<input id="jump" type="search" name="q" placeholder="Jump to" autocomplete="off" maxlength="100"><kbd class="js" aria-hidden="true">/</kbd></form>
-<a class="btn icon-btn jump-link" href="/search" data-search aria-label="Search">{{ m::i(l.v, "magnifying-glass") }}</a>{% endif %}
+{% if l.nav != "search" %}<form class="jump" role="search" action="/search" hx-boost="false"><label class="vh" for="jump">Jump to</label>{{ m::i(l.v, "magnifying-glass") }}<input id="jump" type="search" name="q" placeholder="Jump to" autocomplete="off" maxlength="100"><kbd class="js" aria-hidden="true">/</kbd></form>{% endif %}
 <div class="top-right">
 <span class="sync" role="status" title="{{ l.sync.text }}"><i class="dot {{ l.sync.state }}" aria-hidden="true"></i><span class="txt">{{ l.sync.text }}</span></span>
 <span id="wallet-slot">{% include "wallet_chip_a.html" %}</span>
@@ -39,6 +40,7 @@
 <a href="/"{% if l.nav == "repos" %} aria-current="page"{% endif %}>{{ m::i(l.v, "folder") }}Repositories</a>
 <a href="/wallet"{% if l.nav == "wallet" %} aria-current="page"{% endif %}>{{ m::i(l.v, "wallet") }}Wallet</a>
 <a href="/settings"{% if l.nav == "settings" %} aria-current="page"{% endif %}>{{ m::i(l.v, "gear-six") }}Settings</a>
+<a href="/search" hx-boost="false"{% if l.nav == "search" %} aria-current="page"{% endif %}>{{ m::i(l.v, "magnifying-glass") }}Search</a>
 </nav>
 <dialog id="help" class="help" aria-labelledby="help-title">
 <h2 id="help-title">Keyboard shortcuts</h2>

@@ -771,6 +771,7 @@ def security(cookie, rid, pages):
 def perf(cookie, pages):
     css = get("/assets/app.css", cookie)[2]
     gz_css = len(gzip.compress(css))
+    gz_search_css = len(gzip.compress(get("/assets/search.css", cookie)[2]))  # linked by the search page only
     for name, path, _, want in pages:
         lat, body = [], b""
         reps = 15
@@ -782,7 +783,7 @@ def perf(cookie, pages):
                 reps = 3  # slow page: three samples are enough to flag it
         lat.sort()
         p50, p99 = statistics.median(lat), lat[-1]
-        gz = len(gzip.compress(body)) + gz_css
+        gz = len(gzip.compress(body)) + gz_css + (gz_search_css if b"/assets/search.css" in body else 0)
         PAGE_STATS.setdefault(name, {}).update(
             {"p50_ms": round(p50, 1), "max_ms": round(p99, 1), "html_bytes": len(body), "html_css_gz_bytes": gz})
         big_ok = name in ("blob-long", "commit-long", "blob-wide")  # inherently large content
