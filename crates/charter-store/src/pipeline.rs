@@ -270,7 +270,7 @@ pub struct TxPipeline<'a, A: Arkiv> {
     /// A tx could not be sent or landed: send nothing more, let what is in flight land
     /// (gaps below it plugged), then fail with this.
     abort: Option<StoreError>,
-    /// Called with each `execute` tx right before it is first sent ([`TxPipeline::on_send`]).
+    /// Called with each tx of this sender right before it is first sent ([`TxPipeline::on_send`]).
     on_send: Option<std::sync::Mutex<OnSend<'a>>>,
 }
 
@@ -302,10 +302,11 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         }
     }
 
-    /// Calls `f` with the ops and the signed tx of every `execute` tx right before its first
-    /// send, a split job's parts and a reverted job's resend at a new nonce included (a
-    /// resend of the same bytes keeps its hash); an error sends nothing of that window and
-    /// fails the run. For a caller that must record which tx carries an op before it can land.
+    /// Calls `f` with the ops and the signed tx of every tx this sender signs, right before
+    /// its first send: a split job's parts, a reverted job's resend at a new nonce, a plain
+    /// transfer and a gap-plugging transfer (no ops) included; a resend of the same bytes
+    /// keeps its hash. An error sends nothing of that window (or that plug) and fails the
+    /// run. For a caller that must record which tx takes a nonce before it can land.
     pub fn on_send(
         mut self,
         f: impl FnMut(&[Operation], &SignedTx) -> Result<(), StoreError> + Send + 'a,
@@ -695,8 +696,9 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
         if let Some(f) = &self.on_send {
             let mut f = f.lock().unwrap_or_else(|p| p.into_inner());
             for (_, body, .., tx) in &signed {
-                if let Job::Execute(ops) = body {
-                    f(ops, tx)?;
+                match body {
+                    Job::Execute(ops) => f(ops, tx)?,
+                    Job::Transfer(..) => f(&[], tx)?,
                 }
             }
         }
@@ -1001,6 +1003,9 @@ impl<'a, A: Arkiv> TxPipeline<'a, A> {
             max_priority_fee_per_gas: tip,
         };
         let tx = SignedTx::sign(&self.signer, self.chain_id, params)?;
+        if let Some(f) = &self.on_send {
+            f.lock().unwrap_or_else(|p| p.into_inner())(&[], &tx)?;
+        }
         match send_retrying(self.arkiv, &tx).await {
             Ok(()) => Ok(Some(InFlight {
                 job: PLUG,

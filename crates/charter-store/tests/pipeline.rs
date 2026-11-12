@@ -575,7 +575,8 @@ async fn jobs_over_the_byte_cap_are_split() {
 }
 
 /// `on_send` sees each tx before it goes out (an error sends nothing): every part of a split
-/// job at its own nonce, and a reverted job's resend at the next nonce with a new hash.
+/// job at its own nonce, a reverted job's resend at the next nonce with a new hash, and
+/// plain transfers.
 #[tokio::test(start_paused = true)]
 async fn on_send_names_each_tx_and_its_ops_before_it_goes_out() {
     let (fake, key) = setup();
@@ -625,6 +626,26 @@ async fn on_send_names_each_tx_and_its_ops_before_it_goes_out() {
     assert_eq!(calls.len(), 2, "the resend is named too: {calls:?}");
     assert_eq!(calls[1].0, calls[0].0 + 1, "at the next nonce");
     assert_eq!(landed[0].receipt.tx_hash, calls[1].1);
+
+    let named = std::sync::Mutex::new(vec![]);
+    let to = vec![(key.address(), U256::ZERO); 2];
+    let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default()).on_send(
+        |ops, tx| {
+            named.lock().expect("named").push((ops.len(), tx.nonce()));
+            Ok(())
+        },
+    );
+    with_miner(fake.clone(), p.transfers(to))
+        .await
+        .expect("transfers");
+    drop(p);
+    let named = std::mem::take(&mut *named.lock().expect("named"));
+    assert_eq!(
+        named.len(),
+        2,
+        "transfers are named too, with no ops: {named:?}"
+    );
+    assert!(named.iter().all(|n| n.0 == 0) && named[1].1 == named[0].1 + 1);
 
     let mut p = TxPipeline::new(&*fake, key.clone(), CHAIN, PipelineConfig::default())
         .on_send(|_, _| Err(StoreError::InvalidOp("not recorded".into())));
