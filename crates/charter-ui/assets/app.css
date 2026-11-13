@@ -388,6 +388,7 @@ a.lbl:hover { border-color: var(--ink-2); color: var(--ink); }
 .radios { display: flex; flex-wrap: wrap; gap: 4px 18px; padding: 0; border: 0; }
 .radios legend { padding: 0; width: 100%; margin-bottom: 4px; }
 .radios label { display: inline-flex; align-items: center; gap: 8px; font-weight: 400; color: var(--ink); font-size: 14px; }
+.radios input { accent-color: var(--ink); }
 .acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 .more-w { margin-top: 18px; border-top: 1px solid var(--rule); padding-top: 12px; }
 .more-w > summary { width: fit-content; cursor: pointer; font-size: 14px; font-weight: 600; color: var(--ink-2); }
