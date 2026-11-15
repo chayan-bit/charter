@@ -11,15 +11,15 @@ https://github.com/chayan-bit/charter/releases/download/<tag>/charter-<tag>-<tar
 https://github.com/chayan-bit/charter/releases/download/<tag>/SHA256SUMS
 ```
 
-For v0.6.0 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.6.0/charter-v0.6.0-aarch64-apple-darwin.tar.gz`.
-For v0.6.0 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.6.0/charter-v0.6.0-x86_64-unknown-linux-gnu.tar.gz`.
+For v0.7.0 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.0/charter-v0.7.0-aarch64-apple-darwin.tar.gz`.
+For v0.7.0 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.0/charter-v0.7.0-x86_64-unknown-linux-gnu.tar.gz`.
 v0.1.0 predates the rename to Charter: its archives are named `arkiv-git-v0.1.0-<target>.tar.gz` and hold `git-remote-arkiv`, `arkiv-git` and `arkiv-git-mcp`.
 A combined `SHA256SUMS` file is attached to the release as well.
 
 ## Install snippet
 
 ```sh
-TAG=v0.6.0
+TAG=v0.7.0
 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 BASE=https://github.com/chayan-bit/charter/releases/download/$TAG
 curl -fsSLO "$BASE/charter-$TAG-$TARGET.tar.gz"
@@ -40,6 +40,38 @@ git clone arkiv::<rid>
 
 Files fetched with `curl` carry no quarantine flag, so the snippet above runs as is.
 If you download the archive in a browser and macOS refuses to open the binaries, clear the flag with `xattr -d com.apple.quarantine ~/.local/bin/git-remote-arkiv ~/.local/bin/chart ~/.local/bin/chart-mcp`.
+
+## Upgrading to v0.7.0
+
+v0.7.0 adds search to the web UI, signed-commit display, labels and milestones, code owners, inline review comments, and archive, rename and hand-over (`docs/p3/cob-ops.md`, `docs/p3/programs.md`, `docs/p1/design.md` section 2.2).
+It reads every repo v0.6.0 wrote and changes no storage format on its own, and the device seed, `keys/` and `private/` from v0.6.0 are kept; no new files are needed.
+
+### New commands
+
+`chart signing-key claim --repo <url> --key <ssh key file>` proves with `ssh-keygen` that you hold an Ed25519 SSH key and posts the claim, so commits you sign with it show as signed by you.
+`chart signing-key verify --repo <url> <commit>` checks one cached commit's SSH signature against the repo's claims and exits with `E_BAD_SIG` on a bad one.
+`chart id propose <url> --archive` and `--unarchive` mark a repo archived or not, `--name` renames it, and `--add-delegate` and `--remove-delegate` hand it over; each is an identity revision under the delegate quorum.
+A new delegate must already have a peer on Arkiv, and a revision that removes your own delegate seat needs `--confirm <current repo name>`.
+Labels, assignees and milestones (actions `label`, `unlabel`, `assign`, `unassign` and `milestone`) and inline review comments are ops: `chart op post`, the MCP `op_post` tool and the UI write them.
+`programs/codeowners.rhai` makes `main` need a code owner's approval for each changed path; `chart program pin` pins it on engine `rhai/2`, because it reads git.
+
+### Search
+
+The UI's search runs on the repos in `$CHARTER_HOME` only by default.
+Settings can switch it to Local + Arkiv, and even then Arkiv is asked only when you submit a search, never while you type.
+
+### Archive is advisory
+
+An archived repo is a rule honest clients keep, not one Arkiv enforces.
+Charter's helper refuses a push to an archived repo with `E_ARCHIVED` before it spends gas, and the UI hides its write forms, but anyone can still write ops to it, and a delegate quorum can unarchive it.
+
+### Old clients
+
+A program pinned on engine `rhai/2` (for example `codeowners.rhai`) makes v0.6.0 stop with `E_PROGRAM_MISSING`, because it does not know the engine, instead of folding the program differently; programs that read no git stay on `rhai/1`, which v0.6.0 reads.
+An archived repo carries an identity revision with `ag.v = 2`, and v0.6.0 stops on it with `E_UNSUPPORTED_VERSION` instead of rolling the identity back.
+A rename or a hand-over keeps `ag.v = 1`, so v0.6.0 reads it.
+v0.6.0 shows the new label, assign, milestone, signing-key and inline-comment ops as ordinary entries or ignores them, so they are safe for it, but it shows none of the new state.
+Upgrade every machine and CI runner that reads a repo before the repo pins a `rhai/2` program or is archived.
 
 ## Upgrading to v0.6.0
 

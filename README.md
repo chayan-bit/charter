@@ -29,7 +29,7 @@ GitHub is a read-only mirror plus the host of the release binaries.
 
 ```sh
 # 1. install the prebuilt binaries (macOS arm64 or Linux x86_64), see docs/install.md
-TAG=v0.6.0 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
+TAG=v0.7.0 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 mkdir -p ~/.local/bin && curl -fsSL "https://github.com/chayan-bit/charter/releases/download/$TAG/charter-$TAG-$TARGET.tar.gz" | tar xz -C ~/.local/bin git-remote-arkiv chart chart-mcp
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -161,6 +161,14 @@ Never use real funds or mainnet keys.
 5. In any git repo: `git remote add arkiv arkiv::<rid>` and `git push arkiv main`.
 6. Anywhere else: `git clone arkiv::<rid> demo-clone`.
 7. `chart status arkiv::<rid>` shows each peer's head and the minimum expiry in days, and `chart keepalive arkiv::<rid> --dry-run` shows what it would extend.
+
+### Upgrading to v0.7.0
+
+v0.7.0 adds UI search, signed-commit display (`chart signing-key`), labels, assignees and milestones, code owners (engine `rhai/2`), inline review comments, and archive, rename and hand-over through `chart id propose`; `docs/install.md` has the full upgrade notes.
+Search is Local only by default; Local + Arkiv is a Setting, and Arkiv is asked only when you submit a search.
+Archive is advisory: Charter's helper refuses pushes with `E_ARCHIVED` and the UI hides its write forms, but anyone can still write ops to an archived repo.
+A hand-over needs a delegate that already has a peer on Arkiv, and giving up your own seat needs `--confirm <repo name>`.
+v0.6.0 stops with `E_PROGRAM_MISSING` on a repo that pins a `rhai/2` program and with `E_UNSUPPORTED_VERSION` on an archived repo, and it shows the new issue and review ops as ordinary entries or ignores them, so upgrade every machine that reads such a repo.
 
 ### Upgrading to v0.6.0
 
