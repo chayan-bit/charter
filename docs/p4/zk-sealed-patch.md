@@ -30,7 +30,7 @@ A richer spec (a Rhai predicate or a pure function test) slots into `spec_holds`
 
 ## 2. Why RISC Zero
 
-RISC Zero (`risc0-zkvm` 3.0.6, the latest stable) and SP1 (`sp1-sdk` 6.10) were compared for this relation.
+RISC Zero (`risc0-zkvm` 3.0.6, then the latest stable; now pinned at 3.1.0) and SP1 (`sp1-sdk` 6.10) were compared for this relation.
 SP1's light verifier crate, `sp1-verifier`, only verifies Groth16 and Plonk wraps, which need a trusted setup and were ruled out.
 Verifying a plain SP1 STARK proof needs the SP1 prover stack on the verifying machine.
 RISC Zero verifies its succinct STARK receipts with `default-features = false`, so the CLI links a verifier without the prover.
@@ -44,6 +44,7 @@ Its toolchain installs without root (`rzup` from crates.io, components into `RIS
   `verify` checks the receipt against that constant, so a receipt for any other program fails.
   `zk/prover` refuses to prove when the built guest does not hash to the pinned id.
   The guest is built with the local RISC Zero toolchain, not the reproducible Docker build, so a third party that wants to rebuild the ELF and match the id must use the same toolchain (`rzup` rust 1.97.0) and sources.
+  The ELF also embeds the builder's cargo registry paths in panic locations, so the id matches only for the same `CARGO_HOME` path.
 - No trusted setup: receipts stay STARKs; there is no Groth16 wrap.
 - No dev mode: the verifier enables `risc0-zkvm/disable-dev-mode`, and `verify` also rejects any receipt that is not a succinct STARK receipt.
 
@@ -52,7 +53,7 @@ The proof says nothing about whether `S` is a good spec; a weak spec makes a wea
 
 ## 4. Measured numbers
 
-One real proof of the demo in `zk/demo/` (a one-line fix to a Rust `add` function), on an Apple Silicon MacBook Air (10 cores, 16 GB), 2026-11-07, while other cargo builds were running (load average about 10).
+One real proof of the demo in `zk/demo/` (a one-line fix to a Rust `add` function) with `risc0-zkvm` 3.0.6, on an Apple Silicon MacBook Air (10 cores, 16 GB), 2026-11-07, while other cargo builds were running (load average about 10).
 
 | What | Value |
 |---|---|
@@ -64,7 +65,19 @@ One real proof of the demo in `zk/demo/` (a one-line fix to a Rust `add` functio
 | `chart zk verify`, debug build, whole process | 0.64 s |
 | Image id | `IMAGE_ID` in `crates/charter-zk/src/lib.rs` |
 
-The fixture receipt is `crates/charter-zk/tests/fixtures/demo.receipt` (sha256 `040fb261c33e9462c06067b8cc97b9fe903021aa39388504e388a22adf068504`).
+The upgrade to `risc0-zkvm` 3.1.0 (2026-11-16) was measured on a shared Linux server (AMD EPYC 9454, CPU only, `RAYON_NUM_THREADS=16`), five interleaved runs of each version.
+These CPU numbers are not comparable with the Metal numbers above.
+
+| What | 3.0.6 | 3.1.0 |
+|---|---|---|
+| Prove wall, mean of 5 (range) | 14.87 s (14.72 to 15.06) | 14.88 s (14.79 to 15.01) |
+| Prove CPU, mean of 5 | 231.5 s | 231.4 s |
+| Peak memory (max RSS) | 1.44 GB | 1.44 GB |
+| Receipt (bincode succinct `Receipt`) | 223,898 bytes | 223,898 bytes |
+| Verify, release build (in `zk-prover`) | 15.0 ms | 15.0 ms |
+
+Receipts are tied to the verifier version: a 3.1.0 verifier rejects 3.0.6 receipts ("parameters digest" mismatch), so the upgrade re-proved the fixtures.
+The fixture receipt is `crates/charter-zk/tests/fixtures/demo.receipt` (sha256 `edfa56b819bbf237d455d0623b89d63ba1109cfd1244cbe94ddbf727f42e5e46`).
 Building the prover on macOS compiles RISC Zero's Metal kernels; that needs `scripts/macos-shims/xcrun` (nix xcrun cannot see the Metal toolchain, and risc0 kernels need a macOS 14 Metal language target), which `scripts/zk-prove.sh` puts on `PATH`.
 The verifier-only build links about 180 crates (`cargo tree -p charter-zk -e normal`), mostly the RISC Zero verifier and its field and hash code.
 
