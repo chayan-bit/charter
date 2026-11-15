@@ -9,14 +9,16 @@ use charter_program::{ENGINE_RHAI_V1, ENGINE_RHAI_V2, Event, Host, Program, engi
 use common::*;
 use serde_json::json;
 
-/// Commits 0x10 (base) and 0x11, 0x12 (heads); 0x13 has no objects.
+/// Commits 0x10 (base) and 0x11, 0x12, 0x14 (heads; 0x14 adds a non-UTF-8 path); 0x13
+/// has no objects.
 struct Fake;
 
 impl Host for Fake {
-    fn changed_paths(&self, a: &[u8], b: &[u8]) -> Option<Vec<String>> {
+    fn changed_paths(&self, a: &[u8], b: &[u8]) -> Option<Result<Vec<String>, String>> {
         match (a.first()?, b.first()?) {
-            (0x10, 0x11) => Some(vec!["src/lib.rs".into(), "README.md".into()]),
-            (0x10, 0x12) => Some(vec!["notes.txt".into()]),
+            (0x10, 0x11) => Some(Ok(vec!["src/lib.rs".into(), "README.md".into()])),
+            (0x10, 0x12) => Some(Ok(vec!["notes.txt".into()])),
+            (0x10, 0x14) => Some(Err("path \"latin1-\u{fffd}.txt\" is not UTF-8".into())),
             _ => None,
         }
     }
@@ -24,7 +26,7 @@ impl Host for Fake {
         let rules = format!("*.rs {}\n", hx(0xa1));
         match (*commit.first()?, path) {
             (0x10, ".github/CODEOWNERS") => Some(Some(rules.into_bytes())),
-            (0x10..=0x12, _) => Some(None),
+            (0x10..=0x12 | 0x14, _) => Some(None),
             _ => None,
         }
     }
@@ -128,6 +130,27 @@ fn missing_objects_reject_and_are_never_checkpointed() {
 }
 
 #[test]
+fn a_non_utf8_path_rejects_but_the_fold_stays_decided() {
+    let src = source();
+    let (o, cp) = program()
+        .fold_cached(
+            &src,
+            repo(),
+            BTreeMap::new(),
+            &events(0x14, 0xa1),
+            &|_, _| Some(true),
+            None,
+        )
+        .expect("fold");
+    let why = &o.rejected.first().expect("rejected").1;
+    assert!(why.contains("not UTF-8"), "{why}");
+    assert!(
+        cp.is_some(),
+        "every object is here, so the verdict is final"
+    );
+}
+
+#[test]
 fn without_a_host_or_on_rhai_1_the_functions_fail_closed() {
     let src = source();
     let dry = Program::load(ENGINE_RHAI_V2, &src).expect("load");
@@ -152,9 +175,9 @@ fn without_a_host_or_on_rhai_1_the_functions_fail_closed() {
 fn host_answers_are_memoized_and_capped() {
     struct Count(std::cell::Cell<u32>);
     impl Host for Count {
-        fn changed_paths(&self, _: &[u8], _: &[u8]) -> Option<Vec<String>> {
+        fn changed_paths(&self, _: &[u8], _: &[u8]) -> Option<Result<Vec<String>, String>> {
             self.0.set(self.0.get() + 1);
-            Some(vec![])
+            Some(Ok(vec![]))
         }
         fn file_at(&self, _: &[u8], _: &str) -> Option<Option<Vec<u8>>> {
             Some(None)

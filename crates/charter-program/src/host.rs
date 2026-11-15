@@ -21,8 +21,9 @@ const MAX_PATHS: usize = 10_000;
 /// The git a program may read, supplied by the client that folds it.
 pub trait Host {
     /// Repo paths that differ between commits `a` and `b` (every path of `b` when `a` is
-    /// empty); `None` when the objects are missing.
-    fn changed_paths(&self, a: &[u8], b: &[u8]) -> Option<Vec<String>>;
+    /// empty); `None` only when the objects are missing, and `Some(Err)` for a decided
+    /// answer that is not a path list (a path that is not UTF-8).
+    fn changed_paths(&self, a: &[u8], b: &[u8]) -> Option<Result<Vec<String>, String>>;
     /// The blob at `path` in commit `commit`: `Some(None)` when there is no such file,
     /// `None` when the objects are missing.
     fn file_at(&self, commit: &[u8], path: &str) -> Option<Option<Vec<u8>>>;
@@ -83,10 +84,12 @@ fn oid(s: &str, empty_ok: bool) -> Result<Vec<u8>, String> {
 fn changed(c: &Calls, a: &str, b: &str) -> Answer {
     let (ka, kb) = (oid(a, true)?, oid(b, false)?);
     c.ask(format!("diff {a} {b}"), |h| {
-        let paths = h.changed_paths(&ka, &kb)?;
-        Some(match paths.len() > MAX_PATHS {
-            true => Err(format!("more than {MAX_PATHS} changed paths")),
-            false => Ok(paths
+        Some(match h.changed_paths(&ka, &kb)? {
+            Err(e) => Err(e),
+            Ok(paths) if paths.len() > MAX_PATHS => {
+                Err(format!("more than {MAX_PATHS} changed paths"))
+            }
+            Ok(paths) => Ok(paths
                 .into_iter()
                 .map(Dynamic::from)
                 .collect::<Array>()

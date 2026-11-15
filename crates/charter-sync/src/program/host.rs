@@ -1,6 +1,7 @@
 //! The git a program on engine rhai/2 reads (`charter_program::Host`): the local cache,
 //! which holds every object a fold decides on (pushes are staged there before the check).
-//! Any git failure is "objects missing", so the fold fails closed and is not checkpointed.
+//! Any git failure is "objects missing", so the fold fails closed and is not checkpointed;
+//! a path that is not UTF-8 is a decided error instead, the same on every client.
 
 use charter_program::Host;
 
@@ -9,7 +10,7 @@ use crate::git::Git;
 pub struct GitHost(pub Git);
 
 impl Host for GitHost {
-    fn changed_paths(&self, a: &[u8], b: &[u8]) -> Option<Vec<String>> {
+    fn changed_paths(&self, a: &[u8], b: &[u8]) -> Option<Result<Vec<String>, String>> {
         let (a, b) = (hex::encode(a), hex::encode(b));
         let out = match a.is_empty() {
             true => self.0.run(&["ls-tree", "-r", "-z", "--name-only", &b], b""),
@@ -27,10 +28,15 @@ impl Host for GitHost {
             }
         };
         let out = out.ok()?;
-        out.split(|c| *c == 0)
-            .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8(p.to_vec()).ok())
-            .collect()
+        let paths = out.split(|c| *c == 0).filter(|p| !p.is_empty());
+        Some(
+            paths
+                .map(|p| {
+                    String::from_utf8(p.to_vec())
+                        .map_err(|_| format!("path {:?} is not UTF-8", String::from_utf8_lossy(p)))
+                })
+                .collect(),
+        )
     }
 
     fn file_at(&self, commit: &[u8], path: &str) -> Option<Option<Vec<u8>>> {
@@ -101,10 +107,10 @@ mod tests {
         git(d.path(), &["commit", "-qm", "two"]);
         let two = hex::decode(git(d.path(), &["rev-parse", "HEAD"])).expect("hex");
         let h = GitHost(Git::work(Some(d.path())));
-        let changed = h.changed_paths(&one, &two).expect("paths");
+        let changed = h.changed_paths(&one, &two).expect("paths").expect("utf8");
         assert_eq!(changed, ["new file", "src/a.rs"]);
         assert_eq!(
-            h.changed_paths(&[], &one).expect("all"),
+            h.changed_paths(&[], &one).expect("all").expect("utf8"),
             ["CODEOWNERS", "src/a.rs"]
         );
         assert_eq!(h.file_at(&one, "CODEOWNERS"), Some(Some(b"* x\n".to_vec())));
@@ -112,5 +118,36 @@ mod tests {
         assert_eq!(h.file_at(&one, "src"), Some(None), "a tree is not a file");
         assert_eq!(h.file_at(&[7; 20], "CODEOWNERS"), None, "missing commit");
         assert_eq!(h.changed_paths(&one, &[7; 20]), None);
+    }
+
+    /// A file name that is not UTF-8 (as a patch made on Linux would arrive) is a decided
+    /// error, not "objects missing", which would leave the fold undecided for good.
+    #[test]
+    fn a_non_utf8_path_is_a_decided_error_not_missing_objects() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().expect("dir");
+        git(d.path(), &["init", "-q"]);
+        std::fs::write(d.path().join("a"), "a").expect("write");
+        git(d.path(), &["add", "-A"]);
+        git(d.path(), &["commit", "-qm", "one"]);
+        let one = hex::decode(git(d.path(), &["rev-parse", "HEAD"])).expect("hex");
+        // APFS refuses non-UTF-8 file names, so the tree is built with plumbing.
+        let blob = git(d.path(), &["hash-object", "-w", "a"]);
+        let mut info = format!("100644,{blob},latin1-").into_bytes();
+        info.extend_from_slice(b"\xe9.txt");
+        let st = std::process::Command::new("git")
+            .args(["update-index", "--add", "--cacheinfo"])
+            .arg(std::ffi::OsStr::from_bytes(&info))
+            .current_dir(d.path())
+            .status()
+            .expect("git");
+        assert!(st.success());
+        git(d.path(), &["commit", "-qm", "two"]);
+        let two = hex::decode(git(d.path(), &["rev-parse", "HEAD"])).expect("hex");
+        let h = GitHost(Git::work(Some(d.path())));
+        let got = h.changed_paths(&one, &two).expect("objects are all here");
+        assert!(got.expect_err("decided").contains("not UTF-8"));
+        let all = h.changed_paths(&[], &two).expect("objects are all here");
+        assert!(all.is_err());
     }
 }
