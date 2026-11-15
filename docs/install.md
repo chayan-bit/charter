@@ -72,7 +72,7 @@ The recovery is in `docs/p2/private-repos.md`, "Lost or stolen machine": revoke 
 
 ### Format v4 ref tables
 
-A device whose refs no longer fit the head body (about 550 to 900 refs) used to fail with `E_REFS_TOO_LARGE`.
+A device whose refs no longer fit the 62 KB head body used to fail with `E_REFS_TOO_LARGE`; how many fit depends on the ref names, and in a measured run 1,500 short tags on one commit still fit while 3,000 did not.
 v0.6.0 keeps most of those refs in a ref table and writes a format v4 head that lists only the entries that differ from the table.
 Nothing migrates eagerly: a device switches to v4 on the first push whose refs do not fit and back to v3 when they fit again, so a repo whose devices stay under the cap keeps its format.
 

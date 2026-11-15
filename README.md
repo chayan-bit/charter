@@ -168,7 +168,7 @@ v0.6.0 hardens private repos, adds `chart device revoke` and `chart member sync`
 A private repo moves to keyring format 2 on its first v0.6.0 membership change, which a delegate of the root identity must make, and from then on a v0.5.0 member stops with `E_UNSUPPORTED_VERSION`.
 `chart member sync --repo <url>` removes the MLS leaves of revoked devices in one commit and prints its cost.
 A revoke stops a device seed, not an identity: a stolen machine that also held `keys/` can still act as you, so follow "Lost or stolen machine" in `docs/p2/private-repos.md`.
-A device past about 550 to 900 refs now writes a format v4 head with a ref table instead of failing with `E_REFS_TOO_LARGE`.
+A device whose refs no longer fit the 62 KB head body (1,500 short tags still fit, 3,000 did not) now writes a format v4 head with a ref table instead of failing with `E_REFS_TOO_LARGE`.
 v0.5.0 stops with `E_UNSUPPORTED_VERSION` on a repo with a v4 head, a revoke record or a migrated private keyring, instead of showing stale refs, so upgrade every machine that reads the repo.
 
 ### Storage format v3 (v0.5.0)

@@ -86,6 +86,7 @@ Pack = [pack_id: bstr .size 32, pieces: [* [tx: bstr .size 32, sha256: bstr .siz
 - `base` is the merged oid this entry fast-forwards, signed by the writer, or empty when the entry creates the ref, deletes it or is not a fast-forward (section 8).
 - The head body has the byte cap of every signed body (`max_body_len`: 65,536 B minus the 3,417 B envelope, so 62,119 B), which its refs and piece list share.
   With sha1 oids and 20-byte names an entry is about 60 B (about 81 B for an entry updated by this body, which carries a base) and a piece about 70 B, so one device can list about 550 refs next to a full 256-piece list and about 900 with few pieces (DERIVED); the v1 refs entity held about 1,100 under the same cap.
+  Measured on v0.6.0 (`mem:` backend, sha1 oids, one commit, few pieces), 1,500 tags named `refs/tags/t1` to `refs/tags/t1500` still fit a v3 body and 3,000 named `refs/tags/v00001` to `refs/tags/v03000` needed v4, so the estimate above is low for short names (MEASURED).
   Before format v4 a push past it failed with `E_REFS_TOO_LARGE` and wrote nothing; since then the writer keeps most entries in a ref table named by the signed body (section 14).
 - The writer sends a pack inline only when an upper bound of the body plus the 16 KiB of inline bytes fits one transaction (131,030 B); otherwise the pack goes as bulk pieces, so a large head never makes the head transaction too big.
 - `pack_id = SHA-256(pack bytes)`; a pack is the concatenation of its pieces in order; each piece is at most 65,536 B.
@@ -347,7 +348,7 @@ What remains noticeable: a snapshot push is slower and costs more (entity chunks
 
 Known limits not handled in v0.4.0:
 
-- Until format v4 a device's head held at most about 550 to 900 refs (section 4.2) and a push past that failed with `E_REFS_TOO_LARGE`; v4 moves the bulk of a large ref list into a ref table (section 14), which bounds a device at the table cap of 4 MiB stored (tens of thousands of refs).
+- Until format v4 a device's head held only what fits the 62,119 B body (section 4.2: 1,500 short tags still fit a v3 head and 3,000 needed v4 (MEASURED on v0.6.0)) and a push past that failed with `E_REFS_TOO_LARGE`; v4 moves the bulk of a large ref list into a ref table (section 14), which bounds a device at the table cap of 4 MiB stored (tens of thousands of refs).
 - A pack that cannot be indexed is downloaded once per change of the peer's heads, and by every fresh clone (section 5.5); until v0.5.0 it was downloaded on every fetch.
 - A copied `device/seed` makes two machines one device; they serialise on the confirmed nonce of `C_d`, and a push that loses gets `E_CONCURRENT_PUSH` or `E_LOST_RACE` (section 7.4); the retry reuses the bulk pieces the refused push landed.
 - Several devices of one identity pay their top-ups from the one identity wallet, so two devices topping up at the same moment can sign the same wallet nonce (issue #28).
@@ -468,7 +469,7 @@ PieceRun = [block: uint, index: uint, count: uint]
 ## 14. Ref tables: heads past the body cap (issue #24, format v4)
 
 Status: designed 2026-11-11 on branch `fix/issues-batch-1`.
-Before it, a device whose refs did not fit the 62,119 B head body (about 550 to 900 refs, section 4.2) could not push at all: the push failed with `E_REFS_TOO_LARGE` and wrote nothing.
+Before it, a device whose refs did not fit the 62,119 B head body (section 4.2: 1,500 short tags still fit a v3 head and 3,000 needed v4 (MEASURED on v0.6.0)) could not push at all: the push failed with `E_REFS_TOO_LARGE` and wrote nothing.
 
 ### 14.1 Goal and budget
 
