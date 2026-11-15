@@ -151,8 +151,9 @@ impl<'a, A: Arkiv> Session<'a, A> {
             None => self.sync([keys.nid()].into()).await?,
         };
         if view.identity.head().body.is_archived() {
-            let msg = "this repo is archived and read only; a delegate unarchives it with \
-                       `chart id propose <repo> --unarchive`";
+            let msg = "this repo is archived, so Charter does not push to it (archived is \
+                       advisory: Arkiv still accepts writes from other clients); a delegate \
+                       unarchives it with `chart id propose <repo> --unarchive`";
             return Err(SyncError::coded(ErrorCode::Archived, msg).into());
         }
         let repo = self

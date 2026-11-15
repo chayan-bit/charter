@@ -145,11 +145,15 @@ pub struct ProposeArgs {
     pub lang: Option<String>,
     #[arg(long)]
     pub license: Option<String>,
-    /// Make the repo read only: helpers refuse pushes and the UI hides its write forms.
+    /// Mark the repo archived. Advisory: Charter's helpers stop pushing and the UI hides its
+    /// write forms, but nothing on Arkiv stops another client from writing.
     #[arg(long, conflicts_with = "unarchive")]
     pub archive: bool,
     #[arg(long)]
     pub unarchive: bool,
+    /// The repo's current name, needed when the revision removes your own delegate seat.
+    #[arg(long)]
+    pub confirm: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -283,7 +287,23 @@ async fn id_cmd<A: Arkiv>(a: &A, cfg: &Config, cmd: &IdCmd) -> Result<()> {
         }
         IdCmd::Propose(args) => {
             let (rid, keys) = (rid_of(&args.repo)?, Keys::require(&cfg.home)?);
-            let h = identity::propose(a, cfg, &keys, &rid, &st, edit(args)?).await?;
+            let (edit, me, confirm) = (edit(args)?, keys.nid(), args.confirm.clone());
+            let h = identity::propose_with(a, cfg, &keys, &rid, &st, |h: &IdBody| {
+                let next = edit(h);
+                let leaves = h.delegates.contains(&me) && !next.delegates.contains(&me);
+                match leaves && confirm.as_deref() != Some(h.name.as_str()) {
+                    true => Err(charter_sync::SyncError::coded(
+                        charter_core::ErrorCode::BadFormat,
+                        format!(
+                            "this revision removes your own delegate seat; pass --confirm {} \
+                             to go ahead",
+                            h.name
+                        ),
+                    )),
+                    false => Ok(next),
+                }
+            })
+            .await?;
             println!("proposed revision {}", hex32(&h));
             print_identity(&rid, &identity::show(a, &rid, &st).await?);
         }

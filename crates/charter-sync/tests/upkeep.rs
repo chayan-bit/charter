@@ -81,6 +81,8 @@ async fn a_revision_needs_a_majority_of_the_current_delegates() {
     let rid = init(&net, &alice, "alpha-one").await;
     let st = State::default();
     let bob_nid = bob.keys.nid();
+    // A new delegate must have a peer on Arkiv: bob's first write gives him one.
+    let bobs_own = init(&net, &bob, "bobs-own").await;
     identity::propose(&net, &alice.cfg, &alice.keys, &rid, &st, |h| {
         let mut b = h.clone();
         b.delegates.push(bob_nid);
@@ -129,8 +131,16 @@ async fn a_revision_needs_a_majority_of_the_current_delegates() {
         limit: 10,
         ..Default::default()
     };
-    let hits = search(&net, &by_peer).await.expect("search");
-    assert_eq!(hits.iter().map(|h| h.rid).collect::<Vec<_>>(), vec![rid]);
+    let mut hits: Vec<_> = search(&net, &by_peer)
+        .await
+        .expect("search")
+        .iter()
+        .map(|h| h.rid)
+        .collect();
+    let mut want = vec![rid, bobs_own];
+    hits.sort();
+    want.sort();
+    assert_eq!(hits, want, "bob delegates alpha and his own repo");
     assert!(identity::delegates_text(&chain.head().body.delegates).contains(", "));
 }
 

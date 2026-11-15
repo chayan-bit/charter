@@ -173,7 +173,7 @@ IdBody = {
   ? 11: tstr .size (1..64),    ; licence, SPDX id (search)
   ? 12: bstr .size 16,         ; nonce, required iff rev = 0, random
   ? 13: { 1: tstr, 2: bstr .size 32 }, ; program pin (docs/p3/programs.md)
-  ? 14: true,                  ; archived (read only), present only when true
+  ? 14: true,                  ; archived (advisory), present only when true
 }
 ```
 
@@ -188,9 +188,11 @@ An archived revision carries field 14 and its entity carries `ag.v = 2`, while e
 A client that predates the flag therefore stops on the first archived revision with `E_UNSUPPORTED_VERSION` instead of skipping it (it would reject the unknown key 14 as malformed, and a skipped revision rolls the identity back).
 A reader checks that `ag.v` is 2 exactly when field 14 is present, like every other derived attribute.
 In a private repo the sealer moves that `ag.v = 2` into the sealed body and shows the ordinary `ag.v = 1`, so outsiders cannot tell that a repo is archived; a member's client restores it before verification.
-The helper refuses a push to an archived repo with `E_ARCHIVED` before it spends gas, and the UI hides its write forms and shows the repo as archived; this is a rule honest clients keep, like the program's local push check.
+Archived is advisory, and Charter says so in the CLI and the UI: the helper refuses a push to an archived repo with `E_ARCHIVED` before it spends gas, and the UI hides its write forms and shows the repo as archived, but this is only a rule honest clients keep, like the program's local push check; anyone can still write ops to an archived repo.
 Readers do not drop writes that a modified client sends anyway: canonical heads still need the delegate quorum, and a quorum could unarchive first.
 Unarchiving is another revision without field 14.
+Before it signs a revision, a client requires that every delegate the revision adds has a `peer` document on Arkiv, which every peer publishes with its first write, so a mistyped peer id cannot strand the repo with no delegate who can sign; this read happens only when delegates are added.
+A revision that removes the signer's own delegate seat must be confirmed by typing the repo's current name (`chart id propose --confirm <name>`, or the confirm box of the UI's Manage page).
 
 #### `idacc`
 
@@ -777,7 +779,7 @@ One `thiserror` enum per crate (`CryptoError`, `FormatError`, `VerifyError`, `St
 | `E_REFS_TOO_LARGE` | refs body over the cap | no |
 | `E_RPC`, `E_RATE_LIMITED`, `E_INCONSISTENT_VIEW`, `E_PAGING` | transport and node issues | yes, with backoff |
 | `E_WRONG_CHAIN` | RPC chain id differs from the repo's | no |
-| `E_ARCHIVED` | the repo is archived (read only); a delegate quorum can unarchive it | no |
+| `E_ARCHIVED` | the repo is archived, so honest clients do not push (advisory: Arkiv still accepts anyone's writes); a delegate quorum can unarchive it | no |
 | `E_INTERNAL` | a revert that indicates our bug | no |
 
 Mapping to git: fetch-side errors print `fatal: chart <CODE>: <message>` on stderr and exit 128; push-side errors are reported per ref as `error <dst> <CODE> <message>`; the `chart` CLI exits 1 for verification errors, 2 for usage, 3 for transport, 4 for funds.

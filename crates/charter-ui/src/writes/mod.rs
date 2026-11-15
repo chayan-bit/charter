@@ -91,7 +91,7 @@ impl IdChange {
             parts.push(format!("handed over to {}", &z[..z.len().min(12)]));
         }
         match self.archived {
-            Some(true) => parts.push("archived, so it is read only".into()),
+            Some(true) => parts.push("archived (advisory: honest clients stop writing)".into()),
             Some(false) => parts.push("unarchived".into()),
             None => {}
         }

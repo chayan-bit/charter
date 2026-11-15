@@ -93,7 +93,9 @@ fn id_keepalive_and_status_work_sealed_on_a_private_repo() {
         "keepalive extended nothing: {kept}"
     );
 
-    // A two-delegate proposal from alice, accepted by bob: both write control rows.
+    // A two-delegate proposal from alice, accepted by bob: both write control rows. A new
+    // delegate must have a peer on Arkiv, which bob gets with his first write (a repo).
+    bob.arkiv(&["init", "--name", "bobs-own"]);
     let bob_nid = field(&bob.arkiv(&["keys", "show"]), "nid:").to_owned();
     let proposed = alice.arkiv(&[
         "id",

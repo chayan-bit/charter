@@ -344,6 +344,10 @@ fn identity(f: &Fields) -> Result<(String, Vec<Step>), String> {
                 .map_err(|_| "hand over to: not a peer id (z... or 64 hex digits)")?,
         ),
     };
+    // A hand-over removes the signer's own delegate seat, so it is typed out, not clicked.
+    if hand_to.is_some() && get(f, "confirm").trim() != get(f, "cur_name") {
+        return Err("to hand the repo over, type its current name in the confirm box".into());
+    }
     let archived = get(f, "archived") == "1";
     let c = super::IdChange {
         name: (!name.is_empty() && name != get(f, "cur_name")).then(|| name.to_owned()),
@@ -410,9 +414,16 @@ mod tests {
         };
         assert_eq!(d.steps, [Step::Identity(want)]);
         assert_eq!(d.label, "Update repository");
+        let unconfirmed = [&base[..], &[("hand_to", to.as_str())]].concat();
+        let e = draft(&RID, &fields(&unconfirmed)).expect_err("a hand-over is typed out");
+        assert!(e.contains("type its current name"), "{e}");
         let kv = [
             &base[..],
-            &[("hand_to", to.as_str()), ("cur_archived", "1")],
+            &[
+                ("hand_to", to.as_str()),
+                ("cur_archived", "1"),
+                ("confirm", "demo"),
+            ],
         ]
         .concat();
         let Step::Identity(c) = &draft(&RID, &fields(&kv)).expect("draft").steps[0] else {

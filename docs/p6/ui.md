@@ -111,6 +111,7 @@ Each fact links to the block or entity it came from.
   It always shows the cost dialog, even under the small-write setting, since it changes who can read the repo and not only money.
 - A maintainer's Manage page (`/r/<rid>/manage`, linked from the Maintainers panel of the repo home and from the archived banner) renames the repo, hands it to another peer or archives it, as one priced identity revision (`chart id propose`'s code; issue #63).
   An archived repo shows an "Archived" chip and banner, and every write form is hidden until a maintainer unarchives it.
+  Archived is advisory: Charter stops writing to the repo, but other clients can still write ops, and the banner says so.
 - The funds check takes each source on its own: the wallet must cover what only the wallet sends (an escrow deposit for "Fund bounty", top-ups of the repo's paying address, and their fees), and the wallet with the paying address must cover the whole; a confirm the price showed cannot be paid is refused and sends nothing.
 
 ### 4.5 Live updates (slice 3)

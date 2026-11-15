@@ -162,6 +162,10 @@ impl<A: Arkiv> Ctx<A> {
             .map_err(err)?;
         let me = self.keys.nid();
         let body = identity::next_revision(&chain, &d.rid, |h| c.apply(h, &me)).map_err(err)?;
+        // Refused here too, so the cost dialog never offers a hand-over to an unknown peer.
+        identity::require_known_delegates(&*self.a, &chain.head().body, &body)
+            .await
+            .map_err(err)?;
         let s = sign(tmp.sk(), &body).map_err(err)?;
         let mut ops: Vec<Operation> = match std::mem::take(bind) {
             true => first_write_ops(tmp, &d.rid, &self.cfg).map_err(err)?,

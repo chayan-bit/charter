@@ -432,7 +432,8 @@ async fn a_maintainer_archives_and_renames_from_the_manage_page() {
     let confirm = write_on(&app, &hex, &kv).await;
     assert!(
         confirm.contains("Update repository?")
-            && confirm.contains("Renamed to shelved; archived, so it is read only"),
+            && confirm
+                .contains("Renamed to shelved; archived (advisory: honest clients stop writing)"),
         "{confirm}"
     );
     round().await;
@@ -449,7 +450,7 @@ async fn a_maintainer_archives_and_renames_from_the_manage_page() {
     );
     let new = get(format!("/r/{hex}/issues/new")).await;
     assert!(
-        new.contains("This repository is archived, so it is read only."),
+        new.contains("so Charter writes nothing to it (advisory: other clients can)."),
         "{new}"
     );
     assert!(!new.contains(r#"value="issue""#), "no write form");
@@ -465,6 +466,32 @@ async fn a_maintainer_archives_and_renames_from_the_manage_page() {
     round().await;
     let home = get(format!("/r/{hex}")).await;
     assert!(!home.contains("Archived."), "{home}");
+
+    // A hand-over to an id that never wrote (a typo) is refused before anything is signed.
+    let typo = "ab".repeat(32);
+    let hand = |to: &str| {
+        [
+            ("kind", "identity"),
+            ("cur_name", "shelved"),
+            ("name", "shelved"),
+            ("hand_to", to),
+            ("confirm", "shelved"),
+        ]
+        .map(|(k, v)| (k, v.to_owned()))
+    };
+    let kv = hand(&typo);
+    let kv: Vec<(&str, &str)> = kv.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let refused = send(app.clone(), form(&format!("/r/{hex}/write"), &kv))
+        .await
+        .text();
+    assert!(refused.contains("never written to Arkiv"), "{refused}");
+    // A peer with a peer document (it made a repo) can take it over.
+    let bob = Peer::new(&net, 5);
+    init(&net, &bob, "elsewhere").await;
+    let kv = hand(&hex32(&bob.keys.nid()));
+    let kv: Vec<(&str, &str)> = kv.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let confirm = write_on(&app, &hex, &kv).await;
+    assert!(confirm.contains("Handed over to"), "{confirm}");
 }
 
 #[tokio::test]

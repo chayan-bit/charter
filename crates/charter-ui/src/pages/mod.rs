@@ -223,7 +223,8 @@ impl Layout {
     }
 }
 
-pub const ARCHIVED_OFF: &str = "This repository is archived, so it is read only.";
+pub const ARCHIVED_OFF: &str =
+    "This repository is archived, so Charter writes nothing to it (advisory: other clients can).";
 
 /// Seven hex digits, as every hash is shown.
 pub fn short(h: &str) -> String {
@@ -348,7 +349,7 @@ pub struct Head {
     pub people: People,
     /// The newest signed head: `(block, peer)`, the last push.
     pub pushed: Option<(u64, String)>,
-    /// Archived: read only (issue #63).
+    /// Archived (issue #63): advisory, so honest clients stop writing to it.
     pub archived: bool,
 }
 
@@ -453,8 +454,8 @@ pub fn frame(app: &App, pref: &Pref, r: &Repo, tab: &'static str, title: &str) -
             kind: "off",
             icon: "archive",
             lead: "Archived.".into(),
-            text: "This repository is read only: its maintainers stopped taking pushes, \
-                   issues and patches."
+            text: "Its maintainers stopped taking pushes, issues and patches, so Charter \
+                   writes nothing to it. This is advisory: other clients can still write."
                 .into(),
             link: head
                 .maintains()

@@ -174,17 +174,50 @@ fn archive_rename_and_transfer_are_delegate_revisions() {
 
     let bob_nid = field(&bob.arkiv(&["keys", "show"]), "nid:").to_owned();
     let alice_nid = field(&alice.arkiv(&["keys", "show"]), "nid:").to_owned();
-    let moved = alice.arkiv(&[
-        "id",
-        "propose",
+    let hand_over = |extra: &[&str]| {
+        let mut args = vec![
+            "id",
+            "propose",
+            &url,
+            "--name",
+            "kept",
+            "--add-delegate",
+            &bob_nid,
+            "--remove-delegate",
+            &alice_nid,
+        ];
+        args.extend(extra);
+        alice.run(env!("CARGO_BIN_EXE_chart"), &alice.home, &args)
+    };
+    // Bob never wrote, so his id may be a typo: refused before anything is signed.
+    let unknown = hand_over(&["--confirm", "keep"]);
+    let err = String::from_utf8_lossy(&unknown.stderr);
+    assert!(
+        !unknown.status.success() && err.contains("never written to Arkiv"),
+        "{err}"
+    );
+    post(
+        &bob,
         &url,
-        "--name",
-        "kept",
-        "--add-delegate",
-        &bob_nid,
-        "--remove-delegate",
-        &alice_nid,
-    ]);
+        "xyz.arkiv.issue",
+        "create",
+        None,
+        r#"{"title":"hi"}"#,
+    );
+    // Leaving the delegate seat is typed out.
+    let unconfirmed = hand_over(&[]);
+    let err = String::from_utf8_lossy(&unconfirmed.stderr);
+    assert!(
+        !unconfirmed.status.success() && err.contains("--confirm keep"),
+        "{err}"
+    );
+    let moved = hand_over(&["--confirm", "keep"]);
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    let moved = String::from_utf8_lossy(&moved.stdout).into_owned();
     assert!(moved.contains("name:           kept"), "{moved}");
     assert!(
         moved.contains(&format!("delegates:      {bob_nid}")),

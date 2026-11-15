@@ -45,7 +45,7 @@ pub struct IdBody {
     /// so bodies without a pin encode exactly as before.
     #[n(13)]
     pub program: Option<ProgramPin>,
-    /// The repo is archived (read only; issue #63). Only `Some(true)` is valid: an
+    /// The repo is archived (issue #63; advisory, honest clients stop writing). Only `Some(true)` is valid: an
     /// unarchived revision omits key 14, so it encodes exactly as before.
     #[n(14)]
     pub archived: Option<bool>,
