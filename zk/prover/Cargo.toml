@@ -8,7 +8,7 @@ publish = false
 charter-zk = { path = "../../crates/charter-zk" }
 bincode = "1.3"
 # The prover lives here, outside the root workspace, so CI never builds it.
-risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["std", "prove"] }
+risc0-zkvm = { version = "=3.1.0", default-features = false, features = ["std", "prove"] }
 arkiv-git-zk-core = { path = "../../crates/arkiv-git-zk-core" }
 getrandom = "0.3"
 methods = { path = "../methods" }

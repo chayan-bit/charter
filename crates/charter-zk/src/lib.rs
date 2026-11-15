@@ -11,7 +11,7 @@ use risc0_zkvm::{InnerReceipt, Receipt};
 /// Image id of `zk/methods/guest` (the `sealed_patch` guest), pinned.
 /// `zk/prover` refuses to prove when the built guest does not match it.
 pub const IMAGE_ID: [u32; 8] = [
-    3285259048, 1873335759, 3459761104, 162765425, 1108785410, 3000095769, 112750350, 86684526,
+    679861512, 1888773841, 4071570303, 424257670, 4114113251, 713973540, 404068347, 3373500248,
 ];
 
 #[derive(Debug, thiserror::Error)]
