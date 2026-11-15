@@ -5,6 +5,12 @@
 <p class="wait" role="status">{{ m::i(v, "spinner-gap") }}<span>Asking Arkiv for repositories named <b>{{ prefix }}</b>. This takes a few seconds.</span></p>
 <noscript><p class="muted small"><a href="{{ href }}">Ask Arkiv</a></p></noscript>
 </section>
+{% when ArkivState::Offer { href } %}
+<section id="arkiv" class="sec arkiv" aria-labelledby="h-arkiv">
+<h2 class="h2" id="h-arkiv">On Arkiv</h2>
+<p class="muted small lead">Arkiv can also be asked for repositories named <b>{{ prefix }}</b>. It takes a few seconds and uses RPC quota.</p>
+<a class="btn" href="{{ href }}" hx-get="{{ href }}" hx-target="#arkiv" hx-swap="outerHTML">{{ m::i(v, "magnifying-glass") }}Search Arkiv</a>
+</section>
 {% when ArkivState::Found { rows, hidden, stopped } %}
 <section id="arkiv" class="sec arkiv" aria-labelledby="h-arkiv">
 <h2 class="h2" id="h-arkiv">On Arkiv{% if !rows.is_empty() %} <span class="n">{{ rows.len() }}</span>{% endif %}</h2>
@@ -14,7 +20,7 @@
 <p class="muted">No other repositories on Arkiv start with <b>{{ prefix }}</b>.</p>
 {% else %}
 <ul class="rows hits">
-{% for x in rows %}<li><span class="t">{{ x.hit.name }}</span>{% if !x.hit.description.is_empty() %}<p class="desc">{{ x.hit.description }}</p>{% endif %}<p class="meta"><span class="vis">{{ m::i(v, "globe-simple") }}On Arkiv, not on this computer</span>{% if let Some(l) = x.hit.lang %}<span>{{ l }}</span>{% endif %}{% if let Some(l) = x.hit.license %}<span>{{ l }}</span>{% endif %}<code title="{{ x.hit.hex }}">{{ x.short }}</code></p>
+{% for x in rows %}<li><span class="t">{{ x.hit.name }}</span>{% if !x.hit.description.is_empty() %}<p class="desc">{{ x.hit.description }}</p>{% endif %}<p class="meta"><span class="vis">{{ m::i(v, "globe-simple") }}On Arkiv, not on this computer</span>{% if x.hit.archived %}<span class="vis">{{ m::i(v, "archive") }}Archived</span>{% endif %}{% if let Some(l) = x.hit.lang %}<span>{{ l }}</span>{% endif %}{% if let Some(l) = x.hit.license %}<span>{{ l }}</span>{% endif %}<code title="{{ x.hit.hex }}">{{ x.short }}</code></p>
 {% if x.fetching %}<span class="act chip">Fetching</span>{% else %}<form class="act" method="post" action="/search/fetch" hx-boost="false"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="rid" value="{{ x.hit.hex }}"><input type="hidden" name="q" value="{{ q }}"><button class="btn btn-sm" type="submit" aria-label="Fetch {{ x.hit.name }}">Fetch</button></form>{% endif %}</li>
 {% endfor %}
 </ul>

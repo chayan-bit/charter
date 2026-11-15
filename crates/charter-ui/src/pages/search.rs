@@ -1,8 +1,10 @@
 //! `/search` (docs/p6/ui-v2.md 7.1): repos, issue and patch titles, commit subjects and file
 //! names from the cache on this computer, rendered at once and never touching the chain.
-//! With Settings on "Local + Arkiv" a submitted search also asks Arkiv for repos by name,
-//! in a second section that loads after the page (an htmx fragment), once per submitted
-//! query: typing asks nothing, and neither the sync loop nor `pace.rs` ever searches.
+//! With Settings on "Local + Arkiv" a search submitted from this page's form also asks
+//! Arkiv for repos by name, in a second section that loads after the page (an htmx
+//! fragment), once per submitted query. Any other GET of `/search?q=` (a link, Jump to)
+//! only offers a "Search Arkiv" button: typing asks nothing, and neither the sync loop nor
+//! `pace.rs` ever searches.
 
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
@@ -38,6 +40,7 @@ pub struct RepoRow {
     pub name: String,
     pub description: String,
     pub private: bool,
+    pub archived: bool,
 }
 
 pub struct ThreadRow {
@@ -143,6 +146,7 @@ fn scan(app: &App, terms: Option<&Terms>) -> Local {
                 name: name.clone(),
                 description: desc,
                 private: view.as_ref().is_some_and(|v| v.private),
+                archived: view.as_ref().is_some_and(|v| v.archived),
             });
         }
         let ops = cache::read::<Cobs>(&dir.join(cache::COBS))
@@ -213,8 +217,13 @@ pub struct ArkivRow {
 }
 
 pub enum ArkivState {
-    /// The page rendered; the fragment at `href` asks Arkiv.
+    /// The search form was just submitted; the fragment at `href` asks Arkiv.
     Loading {
+        href: String,
+    },
+    /// The page was opened without a submit (a link, Jump to, a reload of one): Arkiv is
+    /// asked only when the button to `href` is pressed.
+    Offer {
         href: String,
     },
     Found {
@@ -275,6 +284,8 @@ pub struct Params {
     pub q: Option<String>,
     /// Ask Arkiv now (the fragment's request, or the link without JavaScript).
     pub arkiv: Option<u8>,
+    /// Set by the Search page's own form: a submit there asks Arkiv at once.
+    pub submitted: Option<u8>,
     pub fetching: Option<String>,
 }
 
@@ -390,8 +401,10 @@ pub async fn page(
             Some(part(&app, t, state))
         }
         Some(t) => {
-            let state = ArkivState::Loading {
-                href: href(&t.text(), "&arkiv=1"),
+            let href = href(&t.text(), "&arkiv=1");
+            let state = match p.submitted.is_some() {
+                true => ArkivState::Loading { href },
+                false => ArkivState::Offer { href },
             };
             Some(part(&app, t, state))
         }

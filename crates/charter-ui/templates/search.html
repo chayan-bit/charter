@@ -7,6 +7,7 @@
 <label class="vh" for="q">Search</label>
 <input class="input" id="q" type="search" name="q" value="{{ q }}" placeholder="Name, title or file" autocomplete="off" maxlength="100"{% if q.is_empty() %} autofocus{% endif %}>
 <button class="btn btn-ink" type="submit">{{ m::i(l.v, "magnifying-glass") }}Search</button>
+{% if arkiv_on %}<input type="hidden" name="submitted" value="1">{% endif %}
 </form>
 <p class="scope small muted">{% if arkiv_on %}<b>Local + Arkiv.</b> Arkiv is asked only when you press Enter or Search, never while you type.{% else %}<b>Local only.</b> Nothing leaves this computer.{% endif %} <a href="/settings#s-search">Change in Settings</a></p>
 {% if let Some(f) = fetching %}<div class="notice off" role="status">{{ m::i(l.v, "check-circle") }}<p><b>Fetching {{ self.short(f) }}.</b> It is checked here first, then it shows under <a href="/">Repositories</a>.</p></div>{% endif %}
@@ -28,7 +29,7 @@
 {% if !local.repos.is_empty() %}
 <section class="sec" aria-labelledby="h-repos"><h2 class="h2" id="h-repos">Repositories <span class="n">{{ local.repos.total }}</span></h2>
 <ul class="rows hits">
-{% for x in local.repos.rows %}<li data-row data-copy="{{ x.hex }}"><a class="t" href="/r/{{ x.hex }}">{{ x.name }}</a>{% if x.private %}<span class="vis">{{ m::i(l.v, "lock-simple") }}Private</span>{% endif %}{% if !x.description.is_empty() %}<p class="desc">{{ x.description }}</p>{% endif %}</li>
+{% for x in local.repos.rows %}<li data-row data-copy="{{ x.hex }}"><a class="t" href="/r/{{ x.hex }}">{{ x.name }}</a>{% if x.private %}<span class="vis">{{ m::i(l.v, "lock-simple") }}Private</span>{% endif %}{% if x.archived %}<span class="vis">{{ m::i(l.v, "archive") }}Archived</span>{% endif %}{% if !x.description.is_empty() %}<p class="desc">{{ x.description }}</p>{% endif %}</li>
 {% endfor %}
 </ul>
 {% if local.repos.more() > 0 %}<p class="more">{{ local.repos.more() }} more. Add a word to narrow the search.</p>{% endif %}

@@ -213,15 +213,24 @@ async fn arkiv_runs_once_per_submitted_search_and_never_while_typing() {
     let h = home();
     let r = rig(h.path());
     choose(&r, "arkiv").await;
-    // Typing: pages for a growing query render local results and a loading section, and
-    // ask the chain nothing.
+    // Typing, links and Jump to: pages for a growing query render local results and only
+    // offer a "Search Arkiv" button; nothing loads on its own.
     for q in ["d", "de", "dem", "demo"] {
         let t = text(&r, &format!("/search?q={q}")).await;
-        assert!(
-            t.contains("aria-busy=\"true\"") && t.contains("hx-get=\"/search?q="),
-            "{t}"
-        );
+        assert!(t.contains(">Search Arkiv</a>"), "{t}");
+        assert!(!t.contains("hx-trigger=\"load\""), "{t}");
     }
+    // A submit from the Search page's own form loads the section at once.
+    let submitted = text(&r, "/search?q=demo&submitted=1").await;
+    assert!(
+        submitted.contains("aria-busy=\"true\"") && submitted.contains("hx-trigger=\"load\""),
+        "{submitted}"
+    );
+    assert!(
+        text(&r, "/search")
+            .await
+            .contains(r#"name="submitted" value="1""#)
+    );
     assert!(text(&r, "/search").await.contains("Local + Arkiv"));
     assert_eq!(
         r.meter.metrics().queries,

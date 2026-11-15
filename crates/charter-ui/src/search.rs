@@ -125,6 +125,8 @@ pub struct ArkivHit {
     pub description: String,
     pub lang: Option<String>,
     pub license: Option<String>,
+    /// The repo's head revision is archived (advisory).
+    pub archived: bool,
 }
 
 /// What one Arkiv search found.
@@ -145,7 +147,7 @@ fn tag(s: &Option<String>) -> Option<String> {
 }
 
 /// A verified hit as a row, or `None` when its head does not look like a repo: a name
-/// outside `[a-z0-9._-]` or over 64 bytes. The description is stripped of control
+/// outside `[a-z0-9._-]` or over 64 bytes. The description is stripped of control and bidi
 /// characters and cut; language and licence must look like short tags.
 pub fn arkiv_hit(h: &Hit) -> Option<ArkivHit> {
     let b = &h.head;
@@ -159,11 +161,12 @@ pub fn arkiv_hit(h: &Hit) -> Option<ArkivHit> {
         description: b
             .description
             .chars()
-            .filter(|c| !c.is_control())
+            .filter(|c| !crate::plain::hidden(*c))
             .take(MAX_DESC)
             .collect(),
         lang: tag(&b.lang),
         license: tag(&b.license),
+        archived: b.is_archived(),
     })
 }
 
