@@ -111,16 +111,16 @@ pub enum SigError {
 
 /// Checks an armored SSH signature over `msg` under `namespace`; returns its key.
 pub fn verify_sshsig(armored: &str, namespace: &[u8], msg: &[u8]) -> Result<SshKey, SigError> {
-    if armored.len() > MAX_ARMOR {
-        return Err(SigError::Bad);
-    }
-    let body: String = armored
+    let armor = armored
         .trim()
         .strip_prefix("-----BEGIN SSH SIGNATURE-----")
         .and_then(|s| s.strip_suffix("-----END SSH SIGNATURE-----"))
-        .ok_or(SigError::Unsupported)?
-        .split_whitespace()
-        .collect();
+        .ok_or(SigError::Unsupported)?;
+    // After the armor check, so a large OpenPGP or X.509 signature is "not checked", not bad.
+    if armored.len() > MAX_ARMOR {
+        return Err(SigError::Bad);
+    }
+    let body: String = armor.split_whitespace().collect();
     let raw = STANDARD.decode(body).map_err(|_| SigError::Bad)?;
     let mut r = Reader(&raw);
     let bad = SigError::Bad;
@@ -156,30 +156,34 @@ pub fn verify_sshsig(armored: &str, namespace: &[u8], msg: &[u8]) -> Result<SshK
     }
 }
 
-/// A raw commit object split into what git signs (the object without its `gpgsig` header)
-/// and the signature text; `None` for an unsigned commit.
+/// A raw commit object split into what git signs (the object without its `gpgsig` and
+/// `gpgsig-sha256` headers, as git strips both) and the text of the first signature;
+/// `None` for an unsigned commit.
 pub fn split_commit(raw: &[u8]) -> Option<(Vec<u8>, String)> {
     let head_end = raw
         .windows(2)
         .position(|w| w == b"\n\n")
         .map_or(raw.len(), |i| i + 1);
     let (head, rest) = raw.split_at(head_end);
-    let (mut payload, mut sig, mut in_sig) = (Vec::with_capacity(raw.len()), None, false);
+    let mut payload = Vec::with_capacity(raw.len());
+    // `in_sig`: inside a signature header (dropped); `keep`: it is the one returned.
+    let (mut sig, mut in_sig, mut keep) = (None::<Vec<u8>>, false, false);
     for line in head.split_inclusive(|b| *b == b'\n') {
-        let cont = line.first() == Some(&b' ');
         let value = line
             .strip_prefix(b"gpgsig ")
             .or_else(|| line.strip_prefix(b"gpgsig-sha256 "));
-        match (value, cont && in_sig) {
-            (Some(v), _) if sig.is_none() => {
+        if let Some(v) = value {
+            (in_sig, keep) = (true, sig.is_none());
+            if keep {
                 sig = Some(v.to_vec());
-                in_sig = true;
             }
-            (_, true) => sig.get_or_insert_default().extend_from_slice(&line[1..]),
-            _ => {
-                in_sig = false;
-                payload.extend_from_slice(line);
+        } else if in_sig && line.first() == Some(&b' ') {
+            if let Some(s) = sig.as_mut().filter(|_| keep) {
+                s.extend_from_slice(&line[1..]);
             }
+        } else {
+            in_sig = false;
+            payload.extend_from_slice(line);
         }
     }
     payload.extend_from_slice(rest);
@@ -230,10 +234,13 @@ pub fn claims(ops: &[VerifiedOp]) -> Claims {
                 by_obj.insert(o.id, (k, o.author));
             }
         } else if o.body.action == "revoke"
-            && let Some((k, by)) = by_obj.get(&o.object())
-            && *by == o.author
+            && by_obj
+                .get(&o.object())
+                .is_some_and(|(_, by)| *by == o.author)
+            && let Some((k, _)) = by_obj.remove(&o.object())
         {
-            out.0.remove(k);
+            // Removed from `by_obj` too, so a stale revoke of it can never drop a later claim.
+            out.0.remove(&k);
         }
     }
     out

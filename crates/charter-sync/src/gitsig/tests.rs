@@ -244,9 +244,15 @@ fn claims_need_proof_first_wins_and_only_the_claimer_revokes() {
     assert_eq!(claims(&[first.clone(), foreign]).signer(&k), Some(alice));
     let revoke = op(7, alice, "revoke", id, json!({}));
     assert_eq!(
-        claims(&[first, revoke, later]).signer(&k),
+        claims(&[first.clone(), revoke.clone(), later.clone()]).signer(&k),
         Some(mallory),
         "free again"
+    );
+    let stale = op(8, alice, "revoke", id, json!({}));
+    assert_eq!(
+        claims(&[first, revoke, later, stale]).signer(&k),
+        Some(mallory),
+        "a second revoke of the dropped claim leaves the later claim alone"
     );
 }
 
@@ -273,7 +279,39 @@ fn malformed_input_is_refused() {
         Err(SigError::Unsupported)
     );
     assert_eq!(
+        verify_sshsig(&armor(&"A".repeat(5000)), b"git", b"m"),
+        Err(SigError::Bad),
+        "an oversized SSH signature"
+    );
+    assert_eq!(
         verify_sshsig(&"x".repeat(5000), b"git", b"m"),
-        Err(SigError::Bad)
+        Err(SigError::Unsupported)
+    );
+}
+
+#[test]
+fn a_large_foreign_signature_is_unchecked_not_bad() {
+    for (begin, end, kind) in [
+        ("BEGIN PGP SIGNATURE", "END PGP SIGNATURE", "OpenPGP"),
+        ("BEGIN SIGNED MESSAGE", "END SIGNED MESSAGE", "X.509"),
+    ] {
+        let mut raw = format!("tree 1\ngpgsig -----{begin}-----\n ").into_bytes();
+        raw.extend_from_slice("A".repeat(5000).as_bytes());
+        raw.extend_from_slice(format!("\n -----{end}-----\n\nmsg\n").as_bytes());
+        assert_eq!(
+            commit_sig(&raw, &Claims::default()),
+            CommitSig::Unchecked(kind)
+        );
+    }
+}
+
+#[test]
+fn both_signature_headers_are_left_out_of_the_payload() {
+    let raw = b"tree 1\ngpgsig -----BEGIN PGP SIGNATURE-----\n abc\n -----END PGP SIGNATURE-----\ngpgsig-sha256 -----BEGIN PGP SIGNATURE-----\n def\n -----END PGP SIGNATURE-----\nauthor t\n\nmsg\n";
+    let (payload, sig) = split_commit(raw).expect("signed");
+    assert_eq!(payload, b"tree 1\nauthor t\n\nmsg\n");
+    assert_eq!(
+        sig,
+        "-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----\n"
     );
 }
