@@ -11,15 +11,15 @@ https://github.com/chayan-bit/charter/releases/download/<tag>/charter-<tag>-<tar
 https://github.com/chayan-bit/charter/releases/download/<tag>/SHA256SUMS
 ```
 
-For v0.7.0 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.0/charter-v0.7.0-aarch64-apple-darwin.tar.gz`.
-For v0.7.0 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.0/charter-v0.7.0-x86_64-unknown-linux-gnu.tar.gz`.
+For v0.7.1 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.1/charter-v0.7.1-aarch64-apple-darwin.tar.gz`.
+For v0.7.1 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.1/charter-v0.7.1-x86_64-unknown-linux-gnu.tar.gz`.
 v0.1.0 predates the rename to Charter: its archives are named `arkiv-git-v0.1.0-<target>.tar.gz` and hold `git-remote-arkiv`, `arkiv-git` and `arkiv-git-mcp`.
 A combined `SHA256SUMS` file is attached to the release as well.
 
 ## Install snippet
 
 ```sh
-TAG=v0.7.0
+TAG=v0.7.1
 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 BASE=https://github.com/chayan-bit/charter/releases/download/$TAG
 curl -fsSLO "$BASE/charter-$TAG-$TARGET.tar.gz"
@@ -40,6 +40,13 @@ git clone arkiv::<rid>
 
 Files fetched with `curl` carry no quarantine flag, so the snippet above runs as is.
 If you download the archive in a browser and macOS refuses to open the binaries, clear the flag with `xattr -d com.apple.quarantine ~/.local/bin/git-remote-arkiv ~/.local/bin/chart ~/.local/bin/chart-mcp`.
+
+## Upgrading to v0.7.1
+
+v0.7.1 is a security fix for the Markdown sanitizer of `chart ui`: it moves to ammonia 4.2.5 for RUSTSEC-2026-0533, a mutation XSS through embedded SVG and MathML.
+v0.6.0 and v0.7.0 ship the affected ammonia 4.2.4, so upgrade every machine that runs `chart ui`.
+Charter's sanitizer config allows none of the tags the advisory needs, and the UI's CSP allows only its own scripts, but the fixed version is the only supported one.
+Nothing else changes: no format, command or file differs from v0.7.0.
 
 ## Upgrading to v0.7.0
 

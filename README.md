@@ -29,7 +29,7 @@ GitHub is a read-only mirror plus the host of the release binaries.
 
 ```sh
 # 1. install the prebuilt binaries (macOS arm64 or Linux x86_64), see docs/install.md
-TAG=v0.7.0 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
+TAG=v0.7.1 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 mkdir -p ~/.local/bin && curl -fsSL "https://github.com/chayan-bit/charter/releases/download/$TAG/charter-$TAG-$TARGET.tar.gz" | tar xz -C ~/.local/bin git-remote-arkiv chart chart-mcp
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -161,6 +161,11 @@ Never use real funds or mainnet keys.
 5. In any git repo: `git remote add arkiv arkiv::<rid>` and `git push arkiv main`.
 6. Anywhere else: `git clone arkiv::<rid> demo-clone`.
 7. `chart status arkiv::<rid>` shows each peer's head and the minimum expiry in days, and `chart keepalive arkiv::<rid> --dry-run` shows what it would extend.
+
+### Upgrading to v0.7.1
+
+v0.7.1 is a security fix for the Markdown sanitizer of `chart ui` (ammonia 4.2.5, RUSTSEC-2026-0533, a mutation XSS through embedded SVG and MathML).
+v0.6.0 and v0.7.0 are affected, so upgrade; nothing else changes from v0.7.0.
 
 ### Upgrading to v0.7.0
 
