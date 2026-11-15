@@ -136,6 +136,53 @@ mod tests {
         assert!(!h.contains("/r/ab12"), "{h}");
     }
 
+    /// RUSTSEC-2026-0533 (GHSA-934p-vp7m-gx3c): a MathML text integration point or SVG
+    /// `foreignObject` holding the other namespace's tags, with a raw-text gadget inside.
+    const FOREIGN_MXSS: &[&str] = &[
+        "<svg><style><img src=x onerror=alert(1)></style></svg>",
+        "<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>",
+        "<math><mi><svg><style><img src=x onerror=alert(1)></style></svg></mi></math>",
+        "<math><mo><svg><title><img src=x onerror=alert(1)></title></svg></mo></math>",
+        "<math><mtext><svg><textarea><img src=x onerror=alert(1)></textarea></svg></mtext></math>",
+        "<math><ms><svg><xmp><img src=x onerror=alert(1)></xmp></svg></ms></math>",
+        "<math><mn><svg><noscript><img src=x onerror=alert(1)></noscript></svg></mn></math>",
+        "<math><mi><svg><iframe><img src=x onerror=alert(1)></iframe></svg></mi></math>",
+        "<math><mi><svg><noembed><img src=x onerror=alert(1)></noembed></svg></mi></math>",
+        "<math><mi><svg><noframes><img src=x onerror=alert(1)></noframes></svg></mi></math>",
+        "<math><mi><svg><script>alert(1)</script></svg></mi></math>",
+        "<svg><foreignObject><math><mi><style><img src=x onerror=alert(1)></style></mi></math></foreignObject></svg>",
+        "<svg><foreignObject><math><mtext><title><img src=x onerror=alert(1)></title></mtext></math></foreignObject></svg>",
+        "<math><mtext><svg><plaintext><img src=x onerror=alert(1)></svg></mtext></math>",
+    ];
+
+    #[test]
+    fn foreign_content_mutation_xss_never_survives() {
+        for p in FOREIGN_MXSS {
+            for h in [render(p), render_in(p, &AT)] {
+                let low = h.to_ascii_lowercase();
+                for bad in [
+                    "<script",
+                    "onerror",
+                    "onload",
+                    "javascript:",
+                    "<svg",
+                    "<math",
+                    "<style",
+                ] {
+                    assert!(!low.contains(bad), "{bad} survives {p:?}: {h}");
+                }
+            }
+            // A browser re-parses the output: sanitizing it again must change nothing, or
+            // the HTML and foreign parses of it differ (the mutation XSS shape).
+            let h = render(p);
+            let again = ammonia::Builder::default()
+                .link_rel(Some("noopener noreferrer nofollow"))
+                .clean(&h)
+                .to_string();
+            assert_eq!(again, h, "output of {p:?} mutates on re-parse");
+        }
+    }
+
     #[test]
     fn resolved_readmes_are_still_sanitized() {
         let h = render_in(

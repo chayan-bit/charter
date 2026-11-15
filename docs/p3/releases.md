@@ -68,6 +68,21 @@ It reads the release from `chart program status`, downloads each artifact with `
 Artifacts this key already attested with the same payload are skipped; a mismatch is reported and not attested.
 Run it with `CHARTER_HOME` set to a key listed in `attesters()`, for Charter the CI runner.
 
+## Release gates
+
+Before a release is tagged, these run on the merged `main` and must all pass:
+
+- `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+- The performance gate, exact: `cargo test --workspace --all-features --test bench_gate`.
+- The private-repo query counts: `cargo test -p charter-private --all-features --test query_counts`.
+- The workspace tests: `cargo test --workspace --all-features -- --skip bench_gate`.
+- The UI e2e (`crates/charter-ui/e2e/run.sh`) under `caffeinate -dims`, on AC power.
+- `cargo audit` on the workspace `Cargo.lock` (`nix-shell -p cargo-audit --run 'cargo audit'`), which must find no vulnerability; accepted advisories live in `.cargo/audit.toml`, each with its reason and exit condition.
+
+GitHub CI runs `cargo audit` on every push as well.
+The Arkiv CI runner does not (docs/p3/arkiv-ci.md, "Known limits"), so the local audit is what stops a release with a known advisory.
+`zk/` is outside the workspace and not in the release archives, so its lockfile is not part of this gate.
+
 ## Trust model
 
 A valid release proves that a delegate signed the record, that the listed CI runners said the suite passed at that commit, that the commit reached `main` through the gate, and that the runners downloaded bytes with exactly these hashes.
