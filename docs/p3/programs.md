@@ -39,6 +39,7 @@ Engine `rhai/2` adds three functions (issue #53).
 `changed_paths(a, b)` returns the repo paths that differ between commits `a` and `b`, with renames as a delete plus an add; when `a` is "" it returns every path of `b`.
 A path that is not UTF-8 makes it an error; that is a decided answer, the same on every client, so the fold is still checkpointed (only missing objects leave a fold undecided).
 `file_at(commit, path)` returns the UTF-8 text of the file at `path` in `commit`, or `()` when there is no such file; a file over 64 KiB or not UTF-8 is an error.
+"No such file" means a tree the client holds lacks a name on the path; a missing commit, tree or blob is missing objects, never an absent file, so an unfetched CODEOWNERS cannot read as "no owners".
 `codeowners(text, path)` returns the owners of `path` under the CODEOWNERS rules `text`, as sorted hex peer ids; it is pure.
 Git objects are content addressed, so the first two answer the same on every client that holds the objects.
 A client folds with its local git cache, which holds every pushed commit before the fold that decides on it, and every push is staged there before its local check.

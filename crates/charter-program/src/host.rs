@@ -24,8 +24,8 @@ pub trait Host {
     /// empty); `None` only when the objects are missing, and `Some(Err)` for a decided
     /// answer that is not a path list (a path that is not UTF-8).
     fn changed_paths(&self, a: &[u8], b: &[u8]) -> Option<Result<Vec<String>, String>>;
-    /// The blob at `path` in commit `commit`: `Some(None)` when there is no such file,
-    /// `None` when the objects are missing.
+    /// The blob at `path` in commit `commit`: `Some(None)` only when a held tree lacks a
+    /// name on the path, `None` when any object on the way (commit, tree, blob) is missing.
     fn file_at(&self, commit: &[u8], path: &str) -> Option<Option<Vec<u8>>>;
 }
 
