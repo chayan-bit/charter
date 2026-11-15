@@ -20,6 +20,7 @@ charter-program = { path = "../charter-program" }
 charter-store = { path = "../charter-store" }
 charter-zk = { path = "../charter-zk" }
 alloy-signer-local = "2.5"
+base64 = "0.22"
 bs58 = "0.5"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 hex = "0.4"

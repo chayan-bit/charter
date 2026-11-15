@@ -135,11 +135,26 @@ fn matches(q: &SearchQuery, head: &IdBody) -> bool {
 
 /// Verified search hits, newest first for recency queries, else by name.
 pub async fn search<A: Arkiv>(a: &A, q: &SearchQuery) -> Result<Vec<Hit>> {
+    Ok(search_until(a, q, || false).await?.0)
+}
+
+/// [`search`] that asks `stop` before each candidate's verification (3 queries for a
+/// one-maintainer repo) and, once it says so, verifies no more; the flag is whether it did.
+pub async fn search_until<A: Arkiv>(
+    a: &A,
+    q: &SearchQuery,
+    stop: impl Fn() -> bool,
+) -> Result<(Vec<Hit>, bool)> {
     let mut hits = vec![];
     let mut seen = BTreeSet::new();
+    let mut stopped = false;
     for (rid, at) in candidates(a, q).await? {
         if !seen.insert(rid) {
             continue;
+        }
+        if stop() {
+            stopped = true;
+            break;
         }
         let Ok((chain, _)) = view::identity(a, &rid, &State::default()).await else {
             continue;
@@ -151,5 +166,5 @@ pub async fn search<A: Arkiv>(a: &A, q: &SearchQuery) -> Result<Vec<Hit>> {
         }
     }
     hits.sort_by(|x, y| y.at.cmp(&x.at).then_with(|| x.head.name.cmp(&y.head.name)));
-    Ok(hits)
+    Ok((hits, stopped))
 }

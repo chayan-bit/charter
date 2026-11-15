@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use charter_core::{Hash32, Rid};
+use charter_core::{Hash32, IdBody, Rid};
 use charter_store::{Address, Arkiv, TxHash, U256};
 use charter_sync::release::Publish;
 use charter_sync::{Config, Keys};
@@ -46,6 +46,61 @@ pub enum Step {
     /// One MLS commit removing every revoked device's leaf from a private repo's group
     /// (`chart member sync`'s code), priced from the commit it would send.
     RemoveRevoked,
+    /// One identity revision (`chart id propose`'s code): rename, hand over, archive.
+    Identity(IdChange),
+}
+
+/// What an identity revision changes (issue #63); `None` keeps the current value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdChange {
+    pub name: Option<String>,
+    /// Make this peer a delegate in place of the signer.
+    pub hand_to: Option<Hash32>,
+    pub archived: Option<bool>,
+}
+
+impl IdChange {
+    /// The revision body after `h`, as signed by `me`; a hand-over keeps the threshold
+    /// within the new delegate count.
+    pub fn apply(&self, h: &IdBody, me: &Hash32) -> IdBody {
+        let mut b = h.clone();
+        if let Some(n) = &self.name {
+            b.name.clone_from(n);
+        }
+        if let Some(to) = self.hand_to {
+            b.delegates.retain(|d| d != me);
+            b.delegates.push(to);
+            b.delegates.sort();
+            b.delegates.dedup();
+            b.threshold = b.threshold.min(b.delegates.len() as u64).max(1);
+        }
+        if let Some(a) = self.archived {
+            b.archived = a.then_some(true);
+        }
+        b
+    }
+
+    /// `Renamed to kept; archived`, for the confirm dialog.
+    pub fn summary(&self) -> String {
+        let mut parts = vec![];
+        if let Some(n) = &self.name {
+            parts.push(format!("renamed to {n}"));
+        }
+        if let Some(to) = &self.hand_to {
+            let z = charter_sync::ids::to_text(to);
+            parts.push(format!("handed over to {}", &z[..z.len().min(12)]));
+        }
+        match self.archived {
+            Some(true) => parts.push("archived (advisory: honest clients stop writing)".into()),
+            Some(false) => parts.push("unarchived".into()),
+            None => {}
+        }
+        let text = parts.join("; ");
+        let mut c = text.chars();
+        c.next()
+            .map(|f| f.to_uppercase().chain(c).collect())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

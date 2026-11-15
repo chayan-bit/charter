@@ -4,11 +4,13 @@
 use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
 
-use charter_core::Nid;
+use charter_core::{ErrorCode, Nid};
 use charter_store::Arkiv;
 use charter_sync::git::Git;
 use charter_sync::ids::{RemoteUrl, parse_id};
-use charter_sync::{Config, HeadPush, Keys, Repo, Update, View, Want, listing, own_refs, sync};
+use charter_sync::{
+    Config, HeadPush, Keys, Repo, SyncError, Update, View, Want, listing, own_refs, sync,
+};
 
 use crate::{CliError, Result};
 
@@ -148,6 +150,12 @@ impl<'a, A: Arkiv> Session<'a, A> {
             Some(v) => v,
             None => self.sync([keys.nid()].into()).await?,
         };
+        if view.identity.head().body.is_archived() {
+            let msg = "this repo is archived, so Charter does not push to it (archived is \
+                       advisory: Arkiv still accepts writes from other clients); a delegate \
+                       unarchives it with `chart id propose <repo> --unarchive`";
+            return Err(SyncError::coded(ErrorCode::Archived, msg).into());
+        }
         let repo = self
             .repo
             .as_ref()

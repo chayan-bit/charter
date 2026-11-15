@@ -168,6 +168,16 @@ pub struct Blob {
     pub hidden: usize,
     pub picker: Picker,
     pub last: Option<CommitRow>,
+    /// Peer ids (hex) that own `path` by the CODEOWNERS file of this revision.
+    pub owners: Vec<String>,
+}
+
+/// The owners of `path` at `commit` by its first CODEOWNERS file (issue #53).
+fn code_owners(r: &Repo, commit: &str, path: &str) -> Vec<String> {
+    let files = charter_program::codeowners::FILES;
+    let text = files.iter().find_map(|f| gitread::blob(&r.git, commit, f));
+    text.map(|t| charter_program::codeowners::owners(&String::from_utf8_lossy(&t), path))
+        .unwrap_or_default()
 }
 
 impl Blob {
@@ -214,6 +224,7 @@ fn blob_page(app: &App, pref: &Pref, r: &Repo, rev: &str, path: &str, all: bool)
         lines,
         binary,
         last: r.last.get(&at.commit, &at.path),
+        owners: code_owners(r, &at.commit, &at.path),
         rev: at.rev,
         path: at.path,
     })

@@ -10,6 +10,8 @@ pub mod money;
 pub mod people;
 pub mod program;
 pub mod repos;
+pub mod review;
+pub mod search;
 pub mod settings;
 mod verify;
 pub mod wallet;
@@ -48,6 +50,11 @@ pub struct App {
     pub writer: Option<Arc<crate::writes::Writer>>,
     /// Local preferences (`ui/prefs.json`).
     pub prefs: Store,
+    /// The Arkiv source of a submitted search ([`crate::search::arkiv`]); `None` in tests
+    /// that read no chain.
+    pub arkiv: Option<crate::search::ArkivSearch>,
+    /// Arkiv results by query for a few minutes, so a reload or Back costs no queries.
+    arkiv_seen: Mutex<HashMap<String, (std::time::Instant, Arc<crate::search::ArkivFound>)>>,
     /// One gix handle and last-commit index per repo, keyed by the `synced_ms` of the view
     /// they were read under.
     repos: Mutex<HashMap<Rid, Opened>>,
@@ -61,7 +68,17 @@ impl App {
             shared,
             csrf,
             writer: None,
+            arkiv: None,
+            arkiv_seen: Mutex::default(),
             repos: Mutex::default(),
+        }
+    }
+
+    /// Submitted searches may also ask Arkiv, through `f`.
+    pub fn with_arkiv(self, f: crate::search::ArkivSearch) -> Self {
+        Self {
+            arkiv: Some(f),
+            ..self
         }
     }
 
@@ -156,9 +173,11 @@ pub struct Layout {
     pub theme: &'static str,
     /// System fonts instead of the embedded ones (Settings).
     pub sysfont: bool,
-    /// Write forms are shown (keys are loaded).
+    /// Write forms are shown (keys are loaded and the repo is not archived).
     pub writes: bool,
-    /// Which main destination this page is under: `repos`, `wallet` or `settings`.
+    /// The repo is archived, which is why write forms are hidden.
+    pub archived: bool,
+    /// Which main destination this page is under: `repos`, `wallet`, `search` or `settings`.
     pub nav: &'static str,
     pub sync: SyncChip,
     pub wallet: Option<WalletChip>,
@@ -185,6 +204,7 @@ impl Layout {
             theme: pref.0.theme.attr(),
             sysfont: pref.0.fonts == Fonts::System,
             writes: app.writer.is_some(),
+            archived: false,
             nav: "repos",
             sync: SyncChip::of(&app.shared),
             wallet: app.writer.as_deref().map(wallet::chip),
@@ -196,9 +216,15 @@ impl Layout {
 
     /// Why write forms are missing.
     pub fn off(&self) -> &'static str {
-        write::WRITES_OFF
+        match self.archived {
+            true => ARCHIVED_OFF,
+            false => write::WRITES_OFF,
+        }
     }
 }
+
+pub const ARCHIVED_OFF: &str =
+    "This repository is archived, so Charter writes nothing to it (advisory: other clients can).";
 
 /// Seven hex digits, as every hash is shown.
 pub fn short(h: &str) -> String {
@@ -323,6 +349,8 @@ pub struct Head {
     pub people: People,
     /// The newest signed head: `(block, peer)`, the last push.
     pub pushed: Option<(u64, String)>,
+    /// Archived (issue #63): advisory, so honest clients stop writing to it.
+    pub archived: bool,
 }
 
 /// The newest signed head of a view: `(block, peer)`.
@@ -355,8 +383,15 @@ impl Head {
             addr: to_text(&r.rid),
             clock: Clock::of(v),
             pushed: last_push(v),
+            archived: v.is_some_and(|v| v.archived),
             people,
         }
+    }
+
+    /// This computer's identity is one of the repo's maintainers.
+    pub fn maintains(&self) -> bool {
+        let you = self.people.you.as_ref();
+        you.is_some_and(|y| self.verify.delegates.contains(y))
     }
 
     /// A peer's name (alias, nickname or short id, per Settings).
@@ -410,6 +445,21 @@ pub fn frame(app: &App, pref: &Pref, r: &Repo, tab: &'static str, title: &str) -
                    Don't merge or release until a maintainer explains."
                 .into(),
             link: Some((format!("/r/{}#verify", head.hex), "See details".into())),
+        });
+    }
+    if head.archived {
+        // Archive is a convention honest clients keep: the helper refuses pushes, the UI writes.
+        (l.writes, l.archived) = (false, true);
+        l.banners.push(Banner {
+            kind: "off",
+            icon: "archive",
+            lead: "Archived.".into(),
+            text: "Its maintainers stopped taking pushes, issues and patches, so Charter \
+                   writes nothing to it. This is advisory: other clients can still write."
+                .into(),
+            link: head
+                .maintains()
+                .then(|| (format!("/r/{}/manage", head.hex), "Manage".into())),
         });
     }
     (l, head)

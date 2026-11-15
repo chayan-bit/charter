@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use charter_core::{ProgramPin, Rid};
-use charter_program::{ENGINE_RHAI_V1, Event, Outcome, Program, RepoInfo};
+use charter_program::{Event, Outcome, Program, RepoInfo, engine_for};
 use charter_store::Arkiv;
 use charter_sync::ids::to_text;
 use charter_sync::{Config, Repo, Want, sync};
@@ -55,9 +55,10 @@ fn read(path: &Path) -> Result<String> {
 /// Loads (so a broken program is never pinned) and returns the pin and source of `path`.
 pub fn pin_for(path: &Path) -> Result<(ProgramPin, String)> {
     let src = read(path)?;
-    Program::load(ENGINE_RHAI_V1, &src).map_err(|e| CliError::Usage(e.to_string()))?;
+    let engine = engine_for(&src);
+    Program::load(engine, &src).map_err(|e| CliError::Usage(e.to_string()))?;
     let pin = ProgramPin {
-        engine: ENGINE_RHAI_V1.into(),
+        engine: engine.into(),
         hash: Program::hash(&src),
     };
     Ok((pin, src))
@@ -93,8 +94,8 @@ pub async fn status<A: Arkiv>(a: &A, cfg: &Config, rid: &Rid) -> Result<()> {
 
 /// Runs the dry-run fold for `program check`.
 pub fn check(args: &CheckArgs) -> Result<Outcome> {
-    let prog = Program::load(ENGINE_RHAI_V1, &read(&args.file)?)
-        .map_err(|e| CliError::Usage(e.to_string()))?;
+    let src = read(&args.file)?;
+    let prog = Program::load(engine_for(&src), &src).map_err(|e| CliError::Usage(e.to_string()))?;
     let input: EventsFile = serde_json::from_str(&read(&args.events)?)
         .map_err(|e| CliError::Usage(format!("{}: {e}", args.events.display())))?;
     prog.fold(input.repo, input.events)

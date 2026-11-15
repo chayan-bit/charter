@@ -220,6 +220,9 @@ pub struct RepoView {
     /// group, which the repo page offers to remove as a priced write. Zero otherwise.
     #[serde(default)]
     pub revoked_leaves: usize,
+    /// The identity head is archived (issue #63); left out of the file when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
 }
 
 impl Cobs {
@@ -240,7 +243,7 @@ impl RepoView {
             v: VERSION,
             rid: hex32(&view.rid),
             name: id.name.clone(),
-            description: id.description.clone(),
+            description: crate::plain::strip(&id.description),
             default_branch: id.default_branch.clone(),
             delegates: delegates.iter().map(hex32).collect(),
             threshold: id.threshold,
@@ -260,11 +263,17 @@ impl RepoView {
             aliases: view
                 .peers
                 .keys()
-                .filter_map(|n| Some((hex32(n), charter_sync::cob::alias_of(n)?)))
+                .filter_map(|n| {
+                    Some((
+                        hex32(n),
+                        crate::plain::strip(&charter_sync::cob::alias_of(n)?),
+                    ))
+                })
                 .collect(),
             issues: 0,
             patches: 0,
             revoked_leaves: 0,
+            archived: id.is_archived(),
         }
     }
 }

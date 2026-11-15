@@ -211,3 +211,12 @@ impl core::fmt::Debug for SecretKey {
 fn hex_prefix(b: &[u8]) -> String {
     b.iter().take(6).map(|x| format!("{x:02x}")).collect()
 }
+
+/// A plain Ed25519 check (RFC 8032, strict), for keys outside Charter's composite identity
+/// such as a git SSH signing key; `false` for a malformed key.
+pub fn ed25519_verify(pk: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> bool {
+    ed25519_dalek::VerifyingKey::from_bytes(pk).is_ok_and(|k| {
+        k.verify_strict(msg, &ed25519_dalek::Signature::from_bytes(sig))
+            .is_ok()
+    })
+}

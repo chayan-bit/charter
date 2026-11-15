@@ -122,6 +122,32 @@ pub fn tree(git: &Git, commit: &str, path: &str) -> Option<Vec<Entry>> {
     Some(v)
 }
 
+/// Paths of the files under `commit`'s root, breadth first (shallow files first), at most
+/// `cap`, for search; paths [`clean_path`] would refuse are skipped.
+pub fn paths(git: &Git, commit: &str, cap: usize) -> Vec<String> {
+    let root = oid(commit).and_then(|o| git.find_commit(o).ok()?.tree().ok());
+    let mut queue: std::collections::VecDeque<(String, gix::Tree<'_>)> =
+        root.map(|t| (String::new(), t)).into_iter().collect();
+    let mut out = vec![];
+    while let Some((dir, t)) = queue.pop_front() {
+        let Ok(d) = t.decode() else { continue };
+        for e in &d.entries {
+            let path = format!("{dir}{}", e.filename.to_str_lossy());
+            if e.mode.is_tree() {
+                if let Ok(sub) = git.find_tree(e.oid) {
+                    queue.push_back((format!("{path}/"), sub));
+                }
+            } else if !e.mode.is_commit() && clean_path(&path).is_some() {
+                out.push(path);
+                if out.len() >= cap {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Bytes of the blob at `<commit>:<path>`.
 pub fn blob(git: &Git, commit: &str, path: &str) -> Option<Vec<u8>> {
     let root = git.find_commit(oid(commit)?).ok()?.tree().ok()?;
@@ -217,6 +243,11 @@ pub fn commit(git: &Git, oid_hex: &str) -> Option<CommitInfo> {
         message: d.message.to_str_lossy().into_owned(),
         git_signed: d.extra_headers().pgp_signature().is_some(),
     })
+}
+
+/// The raw commit object `oid_hex` (headers and message, no object header), what git signs.
+pub fn raw_commit(git: &Git, oid_hex: &str) -> Option<Vec<u8>> {
+    Some(git.find_commit(oid(oid_hex)?).ok()?.data.clone())
 }
 
 /// Whether `a` is an ancestor of (or equal to) `b`.

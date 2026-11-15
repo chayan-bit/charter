@@ -126,7 +126,11 @@ def discover(cookie):
         ("release-new", f"{r}/releases/new", ["New release", "Artifacts"], 200),
         ("program", f"{r}/rules", ["Rules and CI", "Bounties"], 200),
         ("wallet", "/wallet", ["Balance", "Spent from this computer"], 200),
-        ("settings", "/settings", ["Peer names", "Small writes", "Theme"], 200),
+        ("settings", "/settings", ["Peer names", "Small writes", "Search scope", "Theme"], 200),
+        ("search", "/search", ["Search", "Local only", "Search 1 repository"], 200),
+        ("search-results", "/search?q=smaller", ["Commits", "smaller main", "Local only"], 200),
+        ("search-files", "/search?q=long.rs", ["Files", "long.rs"], 200),
+        ("search-none", "/search?q=zzzznothing", ["Nothing on this computer matches"], 200),
         ("not-found", f"{r}/nope", ["Nothing here"], 404),
     ]
 
@@ -462,6 +466,27 @@ def sent_status(page, sink, scope, theme, vp, axe_src):
         run_axe(page, axe_src, "write-confirmed", theme)
 
 
+def write_error(browser, pages):
+    """A boosted write the server refuses (400) shows its error page, not a silent no-op."""
+    repo_path = next(p for n, p, *_ in pages if n == "repo")
+    for vp in VIEWPORTS:
+        scope = f"write-error/light/{vp}"
+        ctx, page, sink = context(browser, "light", vp)
+        page.goto(f"http://{HOST}:{PORT}{repo_path}/manage", wait_until="load")
+        page.fill("#m-to", "ab" * 32)
+        page.click("button:has-text('Save changes')")
+        try:
+            page.wait_for_selector("text=type its current name", timeout=10000)
+            shown = True
+        except Exception:
+            shown = False
+        rec("a refused boosted write shows why", scope, shown, page.url)
+        m = page.evaluate(OVERFLOW_JS)  # not state_checks: the 400 is the expected answer
+        rec("no horizontal scroll", scope, m["sw"] <= m["iw"], f'scrollWidth {m["sw"]} > innerWidth {m["iw"]}')
+        shot(page, "write-error", "light", vp, full=False)
+        ctx.close()
+
+
 def writes_nojs(browser, pages, cookie):
     """With JS off the same write works as plain form posts and reloads."""
     issue_path = next(p for n, p, *_ in pages if n == "issue")
@@ -523,6 +548,74 @@ def live_update(browser, pages):
     if shown:
         page.locator("#live code", has_text="e2e-live").first.scroll_into_view_if_needed()
     shot(page, "branches-live", "light", "desktop", full=False)
+    ctx.close()
+
+
+def search_flow(browser, axe_src):
+    """ui-v2 7.1: search is Local only until Settings says otherwise; with Local + Arkiv one
+    submitted search asks Arkiv once and typing asks nothing; chain text is escaped; Fetch
+    starts the first sync of a repo that is only on Arkiv."""
+    base = f"http://{HOST}:{PORT}"
+    asked = []
+    ctx, page, sink = context(browser, "light", "desktop")
+    page.on("request", lambda r: asked.append(r.url) if "arkiv=1" in r.url else None)
+    scope = "search/light/desktop"
+    page.goto(base + "/", wait_until="load")
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    page.keyboard.press("/")
+    focused = page.evaluate("document.activeElement && document.activeElement.id")
+    rec("/ focuses the Jump to box", scope, focused == "jump", str(focused))
+    page.keyboard.type("smaller")
+    page.keyboard.press("Enter")
+    page.wait_for_url(re.compile(r".*/search\?q=smaller"))
+    page.wait_for_selector("#h-commits")
+    rec("Jump to finds a commit subject, Local only asks Arkiv nothing", scope,
+        "smaller main" in page.inner_text("main") and page.locator("#arkiv").count() == 0 and not asked, str(asked))
+    page.goto(f"{base}/settings", wait_until="load")
+    page.check("input[name=search][value=arkiv]")
+    page.click("button:has-text('Save settings')")
+    page.wait_for_selector("text=Saved.")
+    for vp in VIEWPORTS:
+        vscope = f"search/light/{vp}"
+        c2, pg, sk = context(browser, "light", vp)
+        reqs = []
+        pg.on("request", lambda r, q=reqs: q.append(r.url) if "arkiv=1" in r.url else None)
+        pg.goto(f"{base}/search", wait_until="load")
+        pg.type("#q", "charter", delay=40)
+        pg.wait_for_timeout(400)
+        rec("typing asks Arkiv nothing", vscope, not reqs, str(reqs))
+        shot(pg, "search-typed", "light", vp)
+        pg.keyboard.press("Enter")
+        pg.wait_for_selector("#arkiv:not([aria-busy])", timeout=30000)
+        txt = pg.inner_text("main")
+        rec("one submitted search asks Arkiv once and lists repos only on Arkiv", vscope,
+            len(reqs) == 1 and "charter-elsewhere" in txt and "On Arkiv, not on this computer" in txt, f"{reqs} {txt[:200]}")
+        rec("hostile Arkiv text is shown as text, never markup", vscope,
+            "<img src=x" in txt and pg.locator("main img").count() == 0 and pg.evaluate("window.__pwned") is None, txt[:300])
+        state_checks(pg, sk, vscope)
+        shot(pg, "search-arkiv", "light", vp)
+        if vp == "desktop":
+            run_axe(pg, axe_src, "search-arkiv", "light")
+        c2.close()
+    page.goto(f"{base}/search?q=charter", wait_until="load")
+    rec("a search link only offers Arkiv, asking it nothing", scope,
+        page.get_by_role("link", name="Search Arkiv").count() == 1 and page.locator("#arkiv[aria-busy]").count() == 0, "")
+    page.goto(f"{base}/search?q=charter&submitted=1", wait_until="load")
+    page.wait_for_selector("#arkiv:not([aria-busy])", timeout=30000)
+    page.get_by_role("button", name="Fetch charter-elsewhere").click()
+    page.wait_for_selector("text=Fetching")
+    cookie = session_cookie()[0]
+    deadline = time.monotonic() + 30
+    listed = False
+    while time.monotonic() < deadline and not listed:
+        listed = b"charter-elsewhere" in get("/", cookie)[2]
+        time.sleep(0.2)
+    rec("Fetch starts the first sync, and the repo shows under Repositories", scope, listed, "")
+    page.goto(f"{base}/settings", wait_until="load")
+    page.check("input[name=search][value=local]")
+    page.click("button:has-text('Save settings')")
+    page.wait_for_selector("text=Saved.")
+    state_checks(page, sink, scope)
     ctx.close()
 
 
@@ -702,6 +795,7 @@ def security(cookie, rid, pages):
 def perf(cookie, pages):
     css = get("/assets/app.css", cookie)[2]
     gz_css = len(gzip.compress(css))
+    gz_search_css = len(gzip.compress(get("/assets/search.css", cookie)[2]))  # linked by the search page only
     for name, path, _, want in pages:
         lat, body = [], b""
         reps = 15
@@ -713,7 +807,7 @@ def perf(cookie, pages):
                 reps = 3  # slow page: three samples are enough to flag it
         lat.sort()
         p50, p99 = statistics.median(lat), lat[-1]
-        gz = len(gzip.compress(body)) + gz_css
+        gz = len(gzip.compress(body)) + gz_css + (gz_search_css if b"/assets/search.css" in body else 0)
         PAGE_STATS.setdefault(name, {}).update(
             {"p50_ms": round(p50, 1), "max_ms": round(p99, 1), "html_bytes": len(body), "html_css_gz_bytes": gz})
         big_ok = name in ("blob-long", "commit-long", "blob-wide")  # inherently large content
@@ -757,7 +851,9 @@ def main():
         visit_all(browser, pages, axe_src, cookie, rid)
         writes(browser, pages, axe_src, cookie)  # last: the comments change the issue page
         writes_nojs(browser, pages, cookie)
+        write_error(browser, pages)
         live_update(browser, pages)  # last: it adds a branch
+        search_flow(browser, axe_src)  # after the visits: Fetch adds a repo to the list
         browser.close()
     write_reports(first)
     fails = [c for c in CHECKS if c["status"] == "fail"]

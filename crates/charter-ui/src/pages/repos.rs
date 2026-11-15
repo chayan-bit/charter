@@ -29,6 +29,7 @@ pub struct RepoRow {
     pub issues: usize,
     pub patches: usize,
     pub verify: Verify,
+    pub archived: bool,
 }
 
 #[derive(Template)]
@@ -65,6 +66,7 @@ fn row(app: &App, pref: &Pref, rid: charter_core::Rid) -> RepoRow {
         issues: v.map_or(0, |v| v.issues),
         patches: v.map_or(0, |v| v.patches),
         verify: Verify::new(v, &app.shared.round(&rid)),
+        archived: v.is_some_and(|v| v.archived),
         hex,
     }
 }

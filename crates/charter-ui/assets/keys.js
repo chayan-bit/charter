@@ -1,5 +1,6 @@
-// Keyboard map of docs/p6/ui-design.md section 6, the theme toggle (saved through
-// POST /settings/theme), copy buttons and popover closing.
+// Keyboard map of docs/p6/ui-design.md section 6 (`/` jumps to the search box, or to /search
+// where the header has no room for it), the theme toggle (saved through
+// POST /settings/theme), copy buttons, popover closing and boosted error pages.
 // Every action is also a plain link, so pages read the same with JavaScript off.
 (function () {
   "use strict";
@@ -38,6 +39,30 @@
   var gTo = { h: "[data-go=h]", c: "[data-go=c]", l: "[data-go=l]", i: "[data-go=i]",
     p: "[data-go=p]", r: "[data-go=r]" };
 
+  // The shortcut list lives here, not in every page: only a script opens it.
+  function help() {
+    var h = d.getElementById("help");
+    if (!h) {
+      h = d.createElement("dialog");
+      h.id = "help"; h.className = "help"; h.setAttribute("aria-labelledby", "help-title");
+      h.innerHTML = '<h2 id="help-title">Keyboard shortcuts</h2><table class="keys">' +
+                '<tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>Repositories</td></tr>' +
+        '<tr><td><kbd>g</kbd> then <kbd>c</kbd> <kbd>l</kbd> <kbd>i</kbd> <kbd>p</kbd> <kbd>r</kbd></td><td>Code, Commits, Issues, Patches, Releases</td></tr>' +
+        '<tr><td><kbd>g</kbd> <kbd>v</kbd></td><td>What was verified</td></tr>' +
+        '<tr><td><kbd>/</kbd></td><td>Jump to: search repos, issues, patches, commits, files</td></tr>' +
+        '<tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>Move down, up a list</td></tr>' +
+        '<tr><td><kbd>Enter</kbd> <kbd>o</kbd></td><td>Open the row</td></tr>' +
+        '<tr><td><kbd>u</kbd></td><td>Up one folder</td></tr>' +
+        '<tr><td><kbd>y</kbd></td><td>Copy the hash or path</td></tr>' +
+        '<tr><td><kbd>x</kbd></td><td>Fold or unfold a file in a diff</td></tr>' +
+        '<tr><td><kbd>Esc</kbd></td><td>Close</td></tr>' +
+        '<tr><td><kbd>?</kbd></td><td>This help</td></tr>' +
+        '</table><form method="dialog"><button class="btn">Close</button></form>';
+      d.body.appendChild(h);
+    }
+    h.showModal();
+  }
+
   function key(e) {
     var t = e.target, k = e.key;
     var send = d.querySelector("form[data-confirm]");
@@ -72,11 +97,16 @@
       case "k": mark(cur - 1); break;
       case "Enter": case "o": if (!row()) return; go(row().querySelector("a")); break;
       case "u": go(d.querySelector("a[rel=up]")); break;
-      case "/": var f = d.querySelector("input[type=search]"); if (!f) return; f.focus(); break;
+      case "/":
+        var f = d.querySelector("input[type=search]");
+        if (f && f.offsetParent) { f.focus(); f.select(); break; }
+        var s = [].filter.call(d.querySelectorAll("a[href='/search']"), function (a) { return a.offsetParent; })[0];
+        if (!s) return;
+        go(s); break;
       case "y": copy(); break;
       case "v": toggle("#verify"); break;
       case "x": toggle(file()); break;
-      case "?": var h = d.getElementById("help"); if (h) h.showModal(); break;
+      case "?": help(); break;
       default: return;
     }
     e.preventDefault();
@@ -142,7 +172,7 @@
     if (t.matches && t.matches("input[readonly]")) t.select();
     if (!b) return;
     if (b.hasAttribute("data-copy")) copyBtn(b);
-    else if (b.hasAttribute("data-help")) d.getElementById("help").showModal();
+    else if (b.hasAttribute("data-help")) help();
     else theme(b);
   });
   // A confirmed toast hides after 6 s unless hovered or focused; a failed one stays.
@@ -157,6 +187,14 @@
     })();
   }
   d.addEventListener("htmx:afterSettle", function () { cur = -1; arrive(); toast(); });
+  // A boosted form post that fails answers with a full error page, which htmx drops for 4xx
+  // and 5xx by default; show it, as the same post without JavaScript would.
+  d.addEventListener("htmx:beforeSwap", function (e) {
+    if (e.detail.boosted && e.detail.xhr.status >= 400) {
+      e.detail.shouldSwap = true;
+      e.detail.isError = false;
+    }
+  });
   window.addEventListener("hashchange", arrive);
   window.addEventListener("resize", function () { fade(d.querySelector(".tabs")); });
   arrive();

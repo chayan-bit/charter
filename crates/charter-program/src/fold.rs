@@ -47,7 +47,7 @@ impl<'a> Folder<'a> {
         seed: BTreeMap<String, Vec<u8>>,
         ancestry: Ancestry<'a>,
     ) -> Result<Self, ProgramError> {
-        let rt = Runtime::new();
+        let rt = Runtime::new(prog.calls());
         let state = repo_map(repo)
             .and_then(|r| rt.call(&prog.ast, "init", (r,)))
             .map_err(ProgramError::Init)?;
@@ -69,7 +69,7 @@ impl<'a> Folder<'a> {
         Self {
             prog,
             ancestry,
-            rt: Runtime::resumed(cp.logs.clone(), cp.spent),
+            rt: Runtime::resumed(cp.logs.clone(), cp.spent, prog.calls()),
             state: cp.state.to_dynamic(),
             heads: cp.heads.clone(),
             accepted: cp.accepted.clone(),
@@ -99,7 +99,7 @@ impl<'a> Folder<'a> {
     /// The fold so far as a checkpoint, before `obligations` runs; `None` when it could
     /// not be restored exactly.
     pub(crate) fn checkpoint(&self, base: Checkpoint) -> Option<Checkpoint> {
-        if self.undecided {
+        if self.undecided || self.rt.undecided() {
             return None;
         }
         Some(Checkpoint {

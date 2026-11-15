@@ -4,6 +4,9 @@ use crate::types::{Hash32, Nid, Rid, ZERO};
 use crate::{FormatError, Kind, field};
 
 pub const MAX_DELEGATES: usize = 16;
+/// `ag.v` of an archived identity revision (key 14 present): a client that predates the
+/// archive flag stops on it with `E_UNSUPPORTED_VERSION` instead of skipping the revision.
+pub const ID_ARCHIVED_LAYOUT_VERSION: u64 = 2;
 
 /// `id`: an identity revision; the root has `rev = 0`.
 #[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
@@ -42,6 +45,10 @@ pub struct IdBody {
     /// so bodies without a pin encode exactly as before.
     #[n(13)]
     pub program: Option<ProgramPin>,
+    /// The repo is archived (issue #63; advisory, honest clients stop writing). Only `Some(true)` is valid: an
+    /// unarchived revision omits key 14, so it encodes exactly as before.
+    #[n(14)]
+    pub archived: Option<bool>,
 }
 
 /// `{ 1: engine tag, 2: H("program", source) }`.
@@ -82,6 +89,10 @@ impl IdBody {
         self.rev == 0
     }
 
+    pub fn is_archived(&self) -> bool {
+        self.archived == Some(true)
+    }
+
     fn validate_root_fields(&self) -> Result<(), FormatError> {
         let root = self.is_root();
         require(
@@ -118,6 +129,7 @@ impl IdBody {
 
 impl Body for IdBody {
     const KIND: Kind = Kind::Id;
+    const AG_V_MAX: u64 = ID_ARCHIVED_LAYOUT_VERSION;
     cbor_codec!();
 
     fn validate(&self) -> Result<(), FormatError> {
@@ -152,7 +164,18 @@ impl Body for IdBody {
                 .as_ref()
                 .is_none_or(|p| (1..=32).contains(&p.engine.len())),
             field("id", "program", "engine tag 1..32 B"),
+        )?;
+        require(
+            self.archived != Some(false),
+            field("id", "archived", "absent or true"),
         )
+    }
+
+    fn ag_v(&self) -> u64 {
+        match self.is_archived() {
+            true => ID_ARCHIVED_LAYOUT_VERSION,
+            false => Self::AG_V,
+        }
     }
 
     fn extra_attributes(&self, signer: &Nid, h: &Hash32) -> Vec<Attribute> {

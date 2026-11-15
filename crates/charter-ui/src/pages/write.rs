@@ -70,6 +70,7 @@ fn ask(label: &str) -> (String, &'static str) {
         "Fund bounty" => ("Fund this bounty?", "Fund"),
         form::REMOVE_REVOKED => ("Remove the revoked devices from the group?", "Remove"),
         l if l.starts_with("Publish release") => return (format!("{l}?"), "Publish"),
+        l if l.starts_with("Update ") => return (format!("{l}?"), "Save"),
         l => return (format!("{l}?"), "Send"),
     };
     (q.to_owned(), verb)
@@ -102,6 +103,15 @@ fn publishes(d: &Draft) -> String {
             return b;
         }
     }
+    if let Some(t) = triage_summary(d) {
+        return t;
+    }
+    if let Some(c) = d.steps.iter().find_map(|s| match s {
+        Step::Identity(c) => Some(c),
+        _ => None,
+    }) {
+        return c.summary();
+    }
     if removes(d) {
         return "A new group key that every revoked device is left out of".into();
     }
@@ -115,6 +125,37 @@ fn publishes(d: &Draft) -> String {
         ),
         None => d.label.clone(),
     }
+}
+
+/// `Labels added: docs; milestone cleared` for a draft of label, assignee and milestone ops.
+fn triage_summary(d: &Draft) -> Option<String> {
+    let mut parts = vec![];
+    for s in &d.steps {
+        let Step::Op {
+            action, payload, ..
+        } = s
+        else {
+            return None;
+        };
+        let list = |k: &str| {
+            let v = payload[k].as_array().map(Vec::as_slice).unwrap_or_default();
+            v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>()
+        };
+        parts.push(match *action {
+            "label" => format!("labels added: {}", list("labels").join(", ")),
+            "unlabel" => format!("labels removed: {}", list("labels").join(", ")),
+            "assign" => format!("{} assigned", list("assignees").len()),
+            "unassign" => format!("{} unassigned", list("assignees").len()),
+            "milestone" => match payload["milestone"].as_str() {
+                Some(m) => format!("milestone set to {m}"),
+                None => "milestone cleared".into(),
+            },
+            _ => return None,
+        });
+    }
+    let text = parts.join("; ");
+    let mut c = text.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect())
 }
 
 fn removes(d: &Draft) -> bool {
@@ -166,6 +207,7 @@ fn signed_ops(d: &Draft) -> Vec<(String, String)> {
                 ),
             ],
             Step::Release(_) => vec![],
+            Step::Identity(c) => vec![("identity revision".into(), c.summary())],
             Step::RemoveRevoked => vec![(
                 "MLS commit removing every revoked device's leaf (a new epoch key)".into(),
                 String::new(),

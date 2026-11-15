@@ -11,6 +11,7 @@ use charter_sync::units::glm;
 use serde_json::{Value, json};
 
 use super::{Draft, Obj, Step};
+use crate::triage;
 
 pub const ISSUE: &str = "xyz.arkiv.issue";
 pub const PATCH: &str = "xyz.arkiv.patch";
@@ -90,6 +91,7 @@ pub const REMOVE_REVOKED: &str = "Remove revoked devices";
 fn steps(rid: &Rid, f: &Fields) -> Result<(String, Vec<Step>), String> {
     Ok(match get(f, "kind") {
         "remove-revoked" => (REMOVE_REVOKED.into(), vec![Step::RemoveRevoked]),
+        "identity" => identity(f)?,
         "issue" => {
             let p = json!({"title": title(f)?, "body": get(f, "body")});
             ("Open issue".into(), vec![op(ISSUE, "create", Obj::New, p)])
@@ -103,6 +105,7 @@ fn steps(rid: &Rid, f: &Fields) -> Result<(String, Vec<Step>), String> {
             )
         }
         "review" => review(f)?,
+        "triage" => triage(f)?,
         "merge" => {
             let (patch, hex) = id(f, "patch")?;
             let mut p = json!({"patch": hex});
@@ -145,18 +148,107 @@ fn steps(rid: &Rid, f: &Fields) -> Result<(String, Vec<Step>), String> {
     })
 }
 
+/// Comma-separated labels, cleaned and deduplicated in order.
+fn label_set(s: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = vec![];
+    for l in s.split(',').filter(|l| !l.trim().is_empty()) {
+        let c = triage::clean(l, triage::LABEL_MAX)
+            .ok_or_else(|| format!("label {l:?} must be 1 to {} characters", triage::LABEL_MAX))?;
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// `a` minus `b`, at most [`triage::MAX_PER_OP`] per op as readers keep.
+fn minus(a: &[String], b: &[String]) -> Result<Vec<String>, String> {
+    let d: Vec<String> = a.iter().filter(|x| !b.contains(x)).cloned().collect();
+    match d.len() <= triage::MAX_PER_OP {
+        true => Ok(d),
+        false => Err(format!("change at most {} at once", triage::MAX_PER_OP)),
+    }
+}
+
+/// The ops that move an issue's or patch's labels, assignees and milestone from the
+/// `cur_*` values the page showed to the submitted ones; only what changed is signed.
+fn triage(f: &Fields) -> Result<(String, Vec<Step>), String> {
+    let (obj, _) = id(f, "object")?;
+    let (ty, what) = match get(f, "on") {
+        "issues" => (ISSUE, "issue"),
+        "patches" => (PATCH, "patch"),
+        o => return Err(format!("unknown object kind {o:?}")),
+    };
+    let (new, cur) = (
+        label_set(get(f, "labels"))?,
+        label_set(get(f, "cur_labels"))?,
+    );
+    let mut who: Vec<String> = f
+        .keys()
+        .filter_map(|k| k.strip_prefix("assignee."))
+        .map(str::to_ascii_lowercase)
+        .collect();
+    who.sort();
+    if let Some(bad) = who.iter().find(|w| !triage::is_nid(w)) {
+        return Err(format!("assignee {bad:?} is not a peer id"));
+    }
+    let was: Vec<String> = get(f, "cur_assignees")
+        .split(',')
+        .filter(|w| triage::is_nid(w))
+        .map(str::to_owned)
+        .collect();
+    let mut steps = vec![];
+    let mut push = |action, key: &str, v: Vec<String>| {
+        if !v.is_empty() {
+            steps.push(op(ty, action, Obj::Id(obj), json!({ key: v })));
+        }
+    };
+    push("label", "labels", minus(&new, &cur)?);
+    push("unlabel", "labels", minus(&cur, &new)?);
+    push("assign", "assignees", minus(&who, &was)?);
+    push("unassign", "assignees", minus(&was, &who)?);
+    let ms = get(f, "milestone");
+    if ms != get(f, "cur_milestone") {
+        let v = match ms {
+            "" => Value::Null,
+            m => json!(triage::clean(m, triage::MILESTONE_MAX).ok_or_else(|| {
+                format!(
+                    "milestone must be 1 to {} characters",
+                    triage::MILESTONE_MAX
+                )
+            })?),
+        };
+        steps.push(op(ty, "milestone", Obj::Id(obj), json!({ "milestone": v })));
+    }
+    if steps.is_empty() {
+        return Err("nothing changed".into());
+    }
+    Ok((format!("Update {what}"), steps))
+}
+
 /// A review object, then its verdict (`approve` at a head, or a `comment`).
 fn review(f: &Fields) -> Result<(String, Vec<Step>), String> {
     let (_, patch) = id(f, "patch")?;
     let create = op(REVIEW, "create", Obj::New, json!({"patch": patch}));
     let body = get(f, "body");
+    let comments = inline_comments(f)?;
     let (label, verdict) = match get(f, "verdict") {
         "approve" => {
             let mut p = json!({"patch": patch, "head": oid(f, "head")?});
             if !body.is_empty() {
                 p["body"] = json!(body);
             }
+            if !comments.is_empty() {
+                p["comments"] = Value::Array(comments);
+            }
             ("Approve patch", op(REVIEW, "approve", Obj::Prev, p))
+        }
+        "comment" if !comments.is_empty() => {
+            let mut p = json!({"patch": patch, "head": oid(f, "head")?, "comments": comments});
+            if !body.is_empty() {
+                p["body"] = json!(body);
+            }
+            ("Review patch", op(REVIEW, "comment", Obj::Prev, p))
         }
         "comment" => {
             let p = json!({"patch": patch, "body": need(f, "body")?});
@@ -165,6 +257,53 @@ fn review(f: &Fields) -> Result<(String, Vec<Step>), String> {
         v => return Err(format!("unknown verdict {v:?}")),
     };
     Ok((label.into(), vec![create, verdict]))
+}
+
+/// Inline comments from the files page: `c.<file>.<n|o>.<line>` holds a comment on that
+/// line of file `p.<file>`, on the new or old side, and `s.<file>.n.<line>` a suggested
+/// replacement; empty boxes are skipped. Checked as every reader checks them.
+fn inline_comments(f: &Fields) -> Result<Vec<Value>, String> {
+    let mut at: Vec<(usize, &str, u32, &str)> = vec![];
+    for (k, v) in f {
+        let mut it = k.splitn(4, '.');
+        let (Some("c"), Some(i), Some(side), Some(n)) =
+            (it.next(), it.next(), it.next(), it.next())
+        else {
+            continue;
+        };
+        let bad = || format!("bad inline comment field {k:?}");
+        let i = i.parse::<usize>().map_err(|_| bad())?;
+        let side = match side {
+            "n" => "new",
+            "o" => "old",
+            _ => return Err(bad()),
+        };
+        let n = n.parse::<u32>().map_err(|_| bad())?;
+        let suggestion = get(f, &format!("s.{i}.n.{n}"));
+        if !v.trim().is_empty() || (side == "new" && !suggestion.is_empty()) {
+            at.push((i, side, n, v.trim()));
+        }
+    }
+    at.sort();
+    if at.len() > crate::inline::MAX_COMMENTS {
+        let max = crate::inline::MAX_COMMENTS;
+        return Err(format!("a review carries at most {max} inline comments"));
+    }
+    let mut out = vec![];
+    for (i, side, n, body) in at {
+        let mut c =
+            json!({"path": need(f, &format!("p.{i}"))?, "side": side, "line": n, "body": body});
+        let suggestion = f.get(&format!("s.{i}.n.{n}")).map_or("", |s| s.trim_end());
+        if side == "new" && !suggestion.trim().is_empty() {
+            c["suggestion"] = json!(suggestion);
+        }
+        out.push(c);
+    }
+    let checked = crate::inline::parse(&json!({ "comments": out })).len();
+    match checked == out.len() {
+        true => Ok(out),
+        false => Err("an inline comment is too long or names a bad line".into()),
+    }
 }
 
 /// A pledge that raises the issue's bounty (`bounty.rhai` counts `pledge` ops; a follow-up
@@ -191,6 +330,34 @@ fn fund(f: &Fields) -> Result<(String, Vec<Step>), String> {
         purpose,
     };
     Ok(("Fund bounty".into(), vec![create, pledge, deposit]))
+}
+
+/// A rename, hand-over or archive change as one identity revision; only what differs from
+/// the `cur_*` values the form was drawn with is changed. The body's own rules (name
+/// characters, delegate count) are checked when the revision is built.
+fn identity(f: &Fields) -> Result<(String, Vec<Step>), String> {
+    let name = get(f, "name");
+    let hand_to = match get(f, "hand_to") {
+        "" => None,
+        v => Some(
+            charter_sync::ids::parse_id(v)
+                .map_err(|_| "hand over to: not a peer id (z... or 64 hex digits)")?,
+        ),
+    };
+    // A hand-over removes the signer's own delegate seat, so it is typed out, not clicked.
+    if hand_to.is_some() && get(f, "confirm").trim() != get(f, "cur_name") {
+        return Err("to hand the repo over, type its current name in the confirm box".into());
+    }
+    let archived = get(f, "archived") == "1";
+    let c = super::IdChange {
+        name: (!name.is_empty() && name != get(f, "cur_name")).then(|| name.to_owned()),
+        hand_to,
+        archived: (archived != (get(f, "cur_archived") == "1")).then_some(archived),
+    };
+    if c == super::IdChange::default() {
+        return Err("nothing changed".into());
+    }
+    Ok(("Update repository".into(), vec![Step::Identity(c)]))
 }
 
 /// The draft a write form describes.
@@ -234,6 +401,99 @@ mod tests {
         );
         let want = op(REVIEW, "approve", Obj::Prev, json!({"patch": p, "head": h}));
         assert_eq!(d.steps[1], want);
+    }
+
+    #[test]
+    fn an_identity_form_changes_only_what_differs() {
+        let to = "ab".repeat(32);
+        let base = [("kind", "identity"), ("cur_name", "demo"), ("name", "demo")];
+        let d = draft(&RID, &fields(&[&base[..], &[("archived", "1")]].concat())).expect("draft");
+        let want = super::super::IdChange {
+            archived: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(d.steps, [Step::Identity(want)]);
+        assert_eq!(d.label, "Update repository");
+        let unconfirmed = [&base[..], &[("hand_to", to.as_str())]].concat();
+        let e = draft(&RID, &fields(&unconfirmed)).expect_err("a hand-over is typed out");
+        assert!(e.contains("type its current name"), "{e}");
+        let kv = [
+            &base[..],
+            &[
+                ("hand_to", to.as_str()),
+                ("cur_archived", "1"),
+                ("confirm", "demo"),
+            ],
+        ]
+        .concat();
+        let Step::Identity(c) = &draft(&RID, &fields(&kv)).expect("draft").steps[0] else {
+            panic!("identity step");
+        };
+        assert_eq!((c.archived, c.hand_to), (Some(false), Some([0xab; 32])));
+        assert!(draft(&RID, &fields(&base)).is_err(), "nothing changed");
+        let bad = [&base[..], &[("hand_to", "nope")]].concat();
+        assert!(draft(&RID, &fields(&bad)).is_err());
+        let me = [1; 32];
+        let id = charter_core::IdBody {
+            rid: Some(RID),
+            rev: 1,
+            parent: [2; 32],
+            name: "demo".into(),
+            description: String::new(),
+            default_branch: "main".into(),
+            delegates: vec![me],
+            threshold: 1,
+            visibility: 0,
+            lang: None,
+            license: None,
+            nonce: None,
+            program: None,
+            archived: Some(true),
+        };
+        let moved = c.apply(&id, &me);
+        assert_eq!((moved.delegates, moved.archived), (vec![[0xab; 32]], None));
+    }
+
+    #[test]
+    fn triage_signs_only_what_changed() {
+        let (obj, a, b) = ("cd".repeat(32), "aa".repeat(32), "bb".repeat(32));
+        let kb = format!("assignee.{b}");
+        let f = fields(&[
+            ("kind", "triage"),
+            ("on", "issues"),
+            ("object", &obj),
+            ("labels", "bug, docs , bug"),
+            ("cur_labels", "bug, ui"),
+            (&kb, "1"),
+            ("cur_assignees", &a),
+            ("milestone", ""),
+            ("cur_milestone", "v1"),
+        ]);
+        let d = draft(&RID, &f).expect("draft");
+        assert_eq!(d.label, "Update issue");
+        let id = Obj::Id(unhex32(&obj).expect("hex"));
+        let want = [
+            op(ISSUE, "label", id.clone(), json!({"labels": ["docs"]})),
+            op(ISSUE, "unlabel", id.clone(), json!({"labels": ["ui"]})),
+            op(ISSUE, "assign", id.clone(), json!({"assignees": [b]})),
+            op(ISSUE, "unassign", id.clone(), json!({"assignees": [a]})),
+            op(ISSUE, "milestone", id, json!({"milestone": null})),
+        ];
+        assert_eq!(d.steps, want);
+        let same = fields(&[
+            ("kind", "triage"),
+            ("on", "patches"),
+            ("object", &obj),
+            ("labels", "bug"),
+            ("cur_labels", "bug"),
+        ]);
+        assert_eq!(draft(&RID, &same).expect_err("no-op"), "nothing changed");
+        for bad in [("labels", "a\u{7}"), ("assignee.zz", "1"), ("on", "repos")] {
+            let mut f = same.clone();
+            f.insert("labels".into(), "new".into());
+            f.insert(bad.0.into(), bad.1.into());
+            assert!(draft(&RID, &f).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

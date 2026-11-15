@@ -68,6 +68,7 @@ pub async fn init<A: Arkiv>(a: &A, cfg: &Config, keys: &Keys, meta: &RepoMeta) -
         license: meta.license.clone(),
         nonce: Some(nonce()),
         program: None,
+        archived: None,
     };
     root.validate()?;
     let s = sign(keys.sk(), &root)?;
@@ -129,16 +130,22 @@ pub async fn propose<A: Arkiv>(
     state: &State,
     edit: impl FnOnce(&IdBody) -> IdBody,
 ) -> Result<charter_core::Hash32> {
+    propose_with(a, cfg, keys, rid, state, |h| Ok(edit(h))).await
+}
+
+/// [`propose`] with an `edit` that may refuse the change (nothing is signed then).
+pub async fn propose_with<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    keys: &Keys,
+    rid: &Rid,
+    state: &State,
+    edit: impl FnOnce(&IdBody) -> Result<IdBody>,
+) -> Result<charter_core::Hash32> {
     let chain = show(a, rid, state).await?;
-    let head = chain.head();
-    let mut body = edit(&head.body);
-    body.rid = Some(*rid);
-    body.rev = head.body.rev + 1;
-    body.parent = head.h;
-    body.nonce = None;
-    body.delegates.sort();
-    body.delegates.dedup();
-    body.validate()?;
+    let next = edit(&chain.head().body)?;
+    let body = next_revision(&chain, rid, |_| next)?;
+    require_known_delegates(a, &chain.head().body, &body).await?;
     let s = sign(keys.sk(), &body)?;
     with_bind(
         a,
@@ -149,6 +156,50 @@ pub async fn propose<A: Arkiv>(
     )
     .await?;
     Ok(s.h)
+}
+
+/// Refuses `next` if a delegate it adds to `head` has no peer document on Arkiv. Every peer
+/// publishes one with its first write, so an id without one is most likely mistyped, and a
+/// hand-over to it would leave the repo with no delegate who can sign. Reads only for added
+/// delegates, so a revision that adds none costs no query.
+pub async fn require_known_delegates<A: Arkiv>(a: &A, head: &IdBody, next: &IdBody) -> Result<()> {
+    for d in next
+        .delegates
+        .iter()
+        .filter(|d| !head.delegates.contains(d))
+    {
+        if crate::cob::peer_key_of(a, d).await?.is_none() {
+            let msg = format!(
+                "{} has never written to Arkiv, so it may be mistyped: a new delegate must \
+                 have a peer on Arkiv (it gets one with its first write: a repo, a push or \
+                 any op)",
+                crate::ids::to_text(d)
+            );
+            return Err(crate::SyncError::coded(
+                charter_core::ErrorCode::MissingDependency,
+                msg,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The revision after `chain`'s head that `edit` makes, validated, unsigned.
+pub fn next_revision(
+    chain: &IdentityChain,
+    rid: &Rid,
+    edit: impl FnOnce(&IdBody) -> IdBody,
+) -> Result<IdBody> {
+    let head = chain.head();
+    let mut body = edit(&head.body);
+    body.rid = Some(*rid);
+    body.rev = head.body.rev + 1;
+    body.parent = head.h;
+    body.nonce = None;
+    body.delegates.sort();
+    body.delegates.dedup();
+    body.validate()?;
+    Ok(body)
 }
 
 /// Accepts revision `rev` of `rid` as a delegate.

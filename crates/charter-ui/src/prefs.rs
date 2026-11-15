@@ -59,6 +59,17 @@ pub enum Times {
     Both,
 }
 
+/// Where a submitted search looks (docs/p6/ui-v2.md 7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchScope {
+    /// The cache on this computer only; no chain query.
+    #[default]
+    Local,
+    /// Also Arkiv, once per submitted search (quota: 10 units per query).
+    Arkiv,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -92,6 +103,7 @@ pub struct Prefs {
     pub merged: Merged,
     pub times: Times,
     pub theme: Theme,
+    pub search: SearchScope,
 }
 
 fn is_nid(s: &str) -> bool {
@@ -256,13 +268,14 @@ mod tests {
         assert_eq!(parse(b"{}").expect("test"), Prefs::default());
         let d = Prefs::default();
         assert_eq!(
-            (d.names, d.fonts, d.merged, d.times, d.theme),
+            (d.names, d.fonts, d.merged, d.times, d.theme, d.search),
             (
                 Names::Both,
                 Fonts::Embedded,
                 Merged::Infer,
                 Times::Block,
-                Theme::System
+                Theme::System,
+                SearchScope::Local
             )
         );
         assert!(d.skip_under.is_none());
@@ -272,6 +285,7 @@ mod tests {
     fn unknown_fields_values_and_bad_nicknames_are_refused() {
         assert!(parse(b"{\"colour\":\"red\"}").is_err());
         assert!(parse(b"{\"theme\":\"sepia\"}").is_err());
+        assert!(parse(b"{\"search\":\"everywhere\"}").is_err());
         assert!(parse(b"{\"nicknames\":{\"zz\":\"bob\"}}").is_err());
         let ctl = format!("{{\"nicknames\":{{\"{NID}\":\"a\\u0007b\"}}}}");
         assert!(parse(ctl.as_bytes()).is_err());
@@ -291,6 +305,7 @@ mod tests {
             merged: Merged::Ops,
             times: Times::Both,
             theme: Theme::Dark,
+            search: SearchScope::Arkiv,
         };
         assert_eq!(
             parse(&serde_json::to_vec(&p).expect("test")).expect("test"),

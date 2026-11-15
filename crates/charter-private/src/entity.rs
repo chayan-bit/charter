@@ -192,6 +192,7 @@ fn seal_attrs(ring: &Keyring, given: &[Attribute]) -> Result<Option<Vec<Attribut
         names.push(PACK);
     }
     let hidden_words = names.iter().map(|n| word(n)).collect::<Result<Vec<_>>>()?;
+    let layout = word("ag.v")?;
     let mut hidden: Vec<(String, AttributeValue)> = vec![];
     let mut attrs: Vec<Attribute> = vec![];
     for a in given {
@@ -199,6 +200,12 @@ fn seal_attrs(ring: &Keyring, given: &[Attribute]) -> Result<Option<Vec<Attribut
         let name = names.iter().zip(&hidden_words).find(|(_, w)| **w == a.name);
         match (name, v) {
             (Some((n, _)), Some(v)) => hidden.push(((*n).to_owned(), v)),
+            // An archived identity's layout version (issue #63) would say "archived" in
+            // the clear: it is sealed, and the row shows the ordinary 1.
+            (None, Some(AttributeValue::U64(n))) if a.name == layout && kind == "id" && n != 1 => {
+                attrs.push(attr("ag.v", AttributeValue::U64(1), false)?);
+                hidden.push(("ag.v".to_owned(), AttributeValue::U64(n)));
+            }
             (None, Some(AttributeValue::Bytes32(b))) if b == rid => {
                 let n = name_of(&a.name)?;
                 attrs.push(attr(

@@ -52,6 +52,9 @@ pub enum Cmd {
     /// Collaborative-object ops: post one, list verified ones.
     #[command(subcommand)]
     Op(crate::op::OpCmd),
+    /// Git signing keys: claim an SSH key as this identity's, check a commit's signature.
+    #[command(subcommand)]
+    SigningKey(crate::signing::SigningCmd),
     /// Signed release records: publish one, verify one against the pinned program.
     #[command(subcommand)]
     Release(crate::release::ReleaseCmd),
@@ -142,6 +145,15 @@ pub struct ProposeArgs {
     pub lang: Option<String>,
     #[arg(long)]
     pub license: Option<String>,
+    /// Mark the repo archived. Advisory: Charter's helpers stop pushing and the UI hides its
+    /// write forms, but nothing on Arkiv stops another client from writing.
+    #[arg(long, conflicts_with = "unarchive")]
+    pub archive: bool,
+    #[arg(long)]
+    pub unarchive: bool,
+    /// The repo's current name, needed when the revision removes your own delegate seat.
+    #[arg(long)]
+    pub confirm: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -224,6 +236,9 @@ fn print_identity(rid: &Rid, chain: &charter_core::IdentityChain) {
     if let Some(p) = &b.program {
         println!("program:        {} {}", p.engine, hex32(&p.hash));
     }
+    if b.is_archived() {
+        println!("archived:       yes");
+    }
 }
 
 fn edit(args: &ProposeArgs) -> Result<impl FnOnce(&IdBody) -> IdBody + use<>> {
@@ -243,6 +258,11 @@ fn edit(args: &ProposeArgs) -> Result<impl FnOnce(&IdBody) -> IdBody + use<>> {
         args.default_branch.clone(),
     );
     let (threshold, lang, license) = (args.threshold, args.lang.clone(), args.license.clone());
+    let archived = match (args.archive, args.unarchive) {
+        (true, _) => Some(Some(true)),
+        (_, true) => Some(None),
+        _ => None,
+    };
     Ok(move |h: &IdBody| {
         let mut b = h.clone();
         b.name = name.unwrap_or(b.name);
@@ -253,6 +273,7 @@ fn edit(args: &ProposeArgs) -> Result<impl FnOnce(&IdBody) -> IdBody + use<>> {
         b.threshold = threshold.unwrap_or(b.threshold);
         b.lang = lang.or(b.lang);
         b.license = license.or(b.license);
+        b.archived = archived.unwrap_or(b.archived);
         b
     })
 }
@@ -266,7 +287,23 @@ async fn id_cmd<A: Arkiv>(a: &A, cfg: &Config, cmd: &IdCmd) -> Result<()> {
         }
         IdCmd::Propose(args) => {
             let (rid, keys) = (rid_of(&args.repo)?, Keys::require(&cfg.home)?);
-            let h = identity::propose(a, cfg, &keys, &rid, &st, edit(args)?).await?;
+            let (edit, me, confirm) = (edit(args)?, keys.nid(), args.confirm.clone());
+            let h = identity::propose_with(a, cfg, &keys, &rid, &st, |h: &IdBody| {
+                let next = edit(h);
+                let leaves = h.delegates.contains(&me) && !next.delegates.contains(&me);
+                match leaves && confirm.as_deref() != Some(h.name.as_str()) {
+                    true => Err(charter_sync::SyncError::coded(
+                        charter_core::ErrorCode::BadFormat,
+                        format!(
+                            "this revision removes your own delegate seat; pass --confirm {} \
+                             to go ahead",
+                            h.name
+                        ),
+                    )),
+                    false => Ok(next),
+                }
+            })
+            .await?;
             println!("proposed revision {}", hex32(&h));
             print_identity(&rid, &identity::show(a, &rid, &st).await?);
         }
@@ -546,6 +583,10 @@ pub fn run(cli: &Cli) -> Result<()> {
             Cmd::Ui(u) => ui_cmd(a, cfg, u).await,
             Cmd::Op(o) => {
                 crate::op::run(&backend::for_repo(&a, &cfg, &o.rid()?).await?, &cfg, o).await
+            }
+            Cmd::SigningKey(s) => {
+                let b = backend::for_repo(&a, &cfg, &s.rid()?).await?;
+                crate::signing::run(&b, &cfg, s).await
             }
             Cmd::Release(r) => {
                 let b = backend::for_repo(&a, &cfg, &r.rid()?).await?;

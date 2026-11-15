@@ -25,6 +25,7 @@ async fn wire(path: &str) -> usize {
 async fn every_page_is_under_20_kb_gzipped_with_its_css() {
     let f = fixture();
     let css = wire("/assets/app.css").await;
+    let search_css = wire("/assets/search.css").await;
     let h = &f.hex;
     let pages = [
         "/".to_owned(),
@@ -42,10 +43,19 @@ async fn every_page_is_under_20_kb_gzipped_with_its_css() {
         format!("/r/{h}/branches"),
         "/wallet".to_owned(),
         "/settings".to_owned(),
+        "/search".to_owned(),
+        "/search?q=main".to_owned(),
     ];
-    println!("app.css {css} B gzipped");
+    println!("app.css {css} B gzipped, search.css {search_css} B");
     for p in pages {
         let html = wire(&p).await;
+        // Only the search page links search.css.
+        let css = css
+            + if p.starts_with("/search") {
+                search_css
+            } else {
+                0
+            };
         println!("{p:<90} html {html:>6} B, with css {:>6} B", html + css);
         assert!(html + css < BUDGET, "{p}: {} B", html + css);
     }
