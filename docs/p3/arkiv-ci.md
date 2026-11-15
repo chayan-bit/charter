@@ -88,3 +88,5 @@ Changes reach GitHub only through this script; pull requests on GitHub are not m
 - A head is attested once per runner; to re-run a flaky head, post a new attestation by hand or revise the patch.
 - `chart-patch.sh` pushes without force, so a rebased branch needs a manual `git push --force` to the author's namespace before it is re-posted.
 - The cost figures above are estimates until the first live patch records real spend.
+- The runner's suite leaves out `cargo audit`: it needs a network fetch of the advisory database, and a failed fetch exits 1, so the runner would post a `fail` for a network error; its verdict also changes as advisories are published, so it would not be a claim about the head alone.
+  GitHub CI and the local release gates (docs/p3/releases.md, "Release gates") run it instead.
