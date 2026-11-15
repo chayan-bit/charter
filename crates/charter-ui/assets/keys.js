@@ -1,6 +1,6 @@
 // Keyboard map of docs/p6/ui-design.md section 6 (`/` jumps to the search box, or to /search
 // where the header has no room for it), the theme toggle (saved through
-// POST /settings/theme), copy buttons and popover closing.
+// POST /settings/theme), copy buttons, popover closing and boosted error pages.
 // Every action is also a plain link, so pages read the same with JavaScript off.
 (function () {
   "use strict";
@@ -187,6 +187,14 @@
     })();
   }
   d.addEventListener("htmx:afterSettle", function () { cur = -1; arrive(); toast(); });
+  // A boosted form post that fails answers with a full error page, which htmx drops for 4xx
+  // and 5xx by default; show it, as the same post without JavaScript would.
+  d.addEventListener("htmx:beforeSwap", function (e) {
+    if (e.detail.boosted && e.detail.xhr.status >= 400) {
+      e.detail.shouldSwap = true;
+      e.detail.isError = false;
+    }
+  });
   window.addEventListener("hashchange", arrive);
   window.addEventListener("resize", function () { fade(d.querySelector(".tabs")); });
   arrive();

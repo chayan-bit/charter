@@ -466,6 +466,27 @@ def sent_status(page, sink, scope, theme, vp, axe_src):
         run_axe(page, axe_src, "write-confirmed", theme)
 
 
+def write_error(browser, pages):
+    """A boosted write the server refuses (400) shows its error page, not a silent no-op."""
+    repo_path = next(p for n, p, *_ in pages if n == "repo")
+    for vp in VIEWPORTS:
+        scope = f"write-error/light/{vp}"
+        ctx, page, sink = context(browser, "light", vp)
+        page.goto(f"http://{HOST}:{PORT}{repo_path}/manage", wait_until="load")
+        page.fill("#m-to", "ab" * 32)
+        page.click("button:has-text('Save changes')")
+        try:
+            page.wait_for_selector("text=type its current name", timeout=10000)
+            shown = True
+        except Exception:
+            shown = False
+        rec("a refused boosted write shows why", scope, shown, page.url)
+        m = page.evaluate(OVERFLOW_JS)  # not state_checks: the 400 is the expected answer
+        rec("no horizontal scroll", scope, m["sw"] <= m["iw"], f'scrollWidth {m["sw"]} > innerWidth {m["iw"]}')
+        shot(page, "write-error", "light", vp, full=False)
+        ctx.close()
+
+
 def writes_nojs(browser, pages, cookie):
     """With JS off the same write works as plain form posts and reloads."""
     issue_path = next(p for n, p, *_ in pages if n == "issue")
@@ -830,6 +851,7 @@ def main():
         visit_all(browser, pages, axe_src, cookie, rid)
         writes(browser, pages, axe_src, cookie)  # last: the comments change the issue page
         writes_nojs(browser, pages, cookie)
+        write_error(browser, pages)
         live_update(browser, pages)  # last: it adds a branch
         search_flow(browser, axe_src)  # after the visits: Fetch adds a repo to the list
         browser.close()
