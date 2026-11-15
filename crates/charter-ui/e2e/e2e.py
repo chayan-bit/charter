@@ -577,6 +577,9 @@ def search_flow(browser, axe_src):
             run_axe(pg, axe_src, "search-arkiv", "light")
         c2.close()
     page.goto(f"{base}/search?q=charter", wait_until="load")
+    rec("a search link only offers Arkiv, asking it nothing", scope,
+        page.get_by_role("link", name="Search Arkiv").count() == 1 and page.locator("#arkiv[aria-busy]").count() == 0, "")
+    page.goto(f"{base}/search?q=charter&submitted=1", wait_until="load")
     page.wait_for_selector("#arkiv:not([aria-busy])", timeout=30000)
     page.get_by_role("button", name="Fetch charter-elsewhere").click()
     page.wait_for_selector("text=Fetching")
