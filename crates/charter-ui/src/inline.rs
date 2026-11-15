@@ -42,7 +42,10 @@ impl Inline {
 }
 
 fn path_ok(p: &str) -> bool {
-    !p.is_empty() && p.len() <= PATH_MAX && !p.starts_with('/') && !p.chars().any(char::is_control)
+    !p.is_empty()
+        && p.len() <= PATH_MAX
+        && !p.starts_with('/')
+        && !p.chars().any(crate::plain::hidden)
 }
 
 fn text(v: &Value) -> Option<&str> {

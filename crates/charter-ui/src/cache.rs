@@ -243,7 +243,7 @@ impl RepoView {
             v: VERSION,
             rid: hex32(&view.rid),
             name: id.name.clone(),
-            description: id.description.clone(),
+            description: crate::plain::strip(&id.description),
             default_branch: id.default_branch.clone(),
             delegates: delegates.iter().map(hex32).collect(),
             threshold: id.threshold,
@@ -263,7 +263,12 @@ impl RepoView {
             aliases: view
                 .peers
                 .keys()
-                .filter_map(|n| Some((hex32(n), charter_sync::cob::alias_of(n)?)))
+                .filter_map(|n| {
+                    Some((
+                        hex32(n),
+                        crate::plain::strip(&charter_sync::cob::alias_of(n)?),
+                    ))
+                })
                 .collect(),
             issues: 0,
             patches: 0,

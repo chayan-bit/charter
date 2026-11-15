@@ -358,7 +358,7 @@ async fn locked_round<A: Arkiv>(
     );
     // Aliases learnt in earlier rounds stay; this round's peer lookups refresh them.
     let authors = since.ops.iter().map(|o| o.author);
-    let fresh = authors.filter_map(|n| Some((hex32(&n), cob::alias_of(&n)?)));
+    let fresh = authors.filter_map(|n| Some((hex32(&n), crate::plain::strip(&cob::alias_of(&n)?))));
     now.aliases = was
         .as_ref()
         .map(|w| w.aliases.clone())

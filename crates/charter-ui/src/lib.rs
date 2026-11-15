@@ -19,6 +19,7 @@ pub mod last;
 pub mod markdown;
 pub mod pace;
 mod pages;
+pub mod plain;
 pub mod prefs;
 pub mod search;
 pub mod security;

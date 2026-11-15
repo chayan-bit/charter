@@ -27,8 +27,10 @@ pub struct Triage {
     pub milestone: Option<String>,
 }
 
-/// A label or milestone: trimmed, 1 to `max` characters, no control characters.
+/// A label or milestone: bidi and direction marks stripped, trimmed, 1 to `max`
+/// characters, no control characters.
 pub fn clean(s: &str, max: usize) -> Option<String> {
+    let s = crate::plain::strip(s);
     let t = s.trim();
     let ok = !t.is_empty() && t.chars().count() <= max && !t.chars().any(char::is_control);
     ok.then(|| t.to_owned())
@@ -132,6 +134,10 @@ mod tests {
         t.apply("close", &json!({"labels": ["ignored"]}));
         assert_eq!(t.labels, ["bug", "docs"].map(String::from).into());
         assert!(t.assignees.is_empty() && t.milestone.is_none());
+        let spoof = json!({"labels": ["\u{202e}gub", "ok\u{2066}"], "milestone": "v\u{200f}2"});
+        let t = Triage::of_create(&spoof);
+        assert_eq!(t.labels, ["gub", "ok"].map(String::from).into());
+        assert_eq!(t.milestone.as_deref(), Some("v2"));
     }
 
     #[test]

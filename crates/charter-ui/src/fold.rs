@@ -164,10 +164,7 @@ pub fn titles(ops: &[VerifiedOp], type_name: &str) -> Vec<(String, String, u64)>
         .filter(|o| o.body.type_name == type_name && o.body.is_create());
     created
         .map(|o| {
-            let title = payload(o)["title"]
-                .as_str()
-                .unwrap_or("(untitled)")
-                .to_owned();
+            let title = crate::plain::strip(payload(o)["title"].as_str().unwrap_or("(untitled)"));
             (hex32(&o.id), title, o.arkiv_order.block)
         })
         .collect()
@@ -200,7 +197,7 @@ pub fn threads(ops: &[VerifiedOp], type_name: &str, view: Option<&RepoView>) -> 
 fn new_thread(o: &VerifiedOp, p: &Value, view: Option<&RepoView>) -> Thread {
     Thread {
         id: hex32(&o.id),
-        title: p["title"].as_str().unwrap_or("(untitled)").to_owned(),
+        title: crate::plain::strip(p["title"].as_str().unwrap_or("(untitled)")),
         state: "open",
         author: hex32(&o.author),
         ts_ms: o.body.ts_ms,
