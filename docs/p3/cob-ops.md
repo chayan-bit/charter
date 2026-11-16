@@ -86,6 +86,8 @@ It walks the entities in Arkiv creation order and drops, never errors on, any op
 ## CLI
 
 - `chart op post --repo <rid> --type <t> --action <a> [--object <id>] [--parent <id>...] --payload-json '<json>'` converts the JSON to canonical CBOR and prints the op id in hex.
+- `--payload-file <path>` reads the same JSON from a file instead, and `--payload-file -` reads it from stdin; exactly one of the two flags is required, and `op attach-proof` takes them too.
+- Use `--payload-file` for large payloads, such as 60,000-character blob ops, since a Windows command line holds at most 32,767 characters.
 - JSON floats (including `1.0`) are rejected with `E_BAD_FORMAT`; map keys are sorted by their encoded bytes.
 - `chart op list --repo <rid> [--object <id>] [--type <t>] [--json]` prints the verified ops in order, one line each, or one JSON array.
 - In JSON output, byte strings show as `{"$bytes": "<hex>"}`, non-text map keys as their JSON text, and integers outside the i64 and u64 ranges as decimal strings.

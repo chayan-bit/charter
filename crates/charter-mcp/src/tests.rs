@@ -16,7 +16,7 @@ fn cli() -> PathBuf {
         .parent()
         .and_then(Path::parent)
         .expect("target dir")
-        .join("chart");
+        .join(format!("chart{}", std::env::consts::EXE_SUFFIX));
     assert!(
         bin.is_file(),
         "{} missing: run `cargo build -p charter-cli` first",
@@ -276,12 +276,36 @@ async fn cli_failures_come_back_as_coded_tool_errors() {
     assert!(e["code"].is_string(), "{e}");
 }
 
+/// A payload past the 32K Windows command line reaches `chart` on stdin and comes back whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn op_post_carries_a_payload_past_the_windows_command_line() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let s = server(tmp.path());
+    let url = repo(&s, tmp.path()).await;
+    let data: String = "0123456789abcdef".repeat(3_000);
+    assert!(data.len() > 40_000);
+
+    let id = ok(s
+        .op_post(Parameters(PostArgs {
+            repo: url.clone(),
+            type_name: "xyz.arkiv.blob".into(),
+            action: "create".into(),
+            object: None,
+            parents: vec![],
+            payload: json!({ "data": data }),
+        }))
+        .await);
+    let ops = ok(s.op_list(list(&url, Some("xyz.arkiv.blob"), None)).await);
+    assert_eq!(ops[0]["id"], id["id"], "{id}");
+    assert_eq!(ops[0]["payload"]["data"], data.as_str());
+}
+
 /// Tool arguments come from a possibly prompt-injected agent: none of them reaches git as an
 /// option, and no path leaves the server's working area.
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_arguments_cannot_inject_options_or_leave_the_work_area() {
     let tmp = tempfile::tempdir().expect("tmp");
-    let root = tmp.path().canonicalize().expect("canonical");
+    let root = dunce::canonicalize(tmp.path()).expect("canonical");
     let s = server(&root);
     let url = repo(&s, &root).await;
     // A template whose post-checkout hook leaves a marker: `--template=t` as the clone dir
@@ -291,6 +315,7 @@ async fn agent_arguments_cannot_inject_options_or_leave_the_work_area() {
     let marker = root.join("pwned");
     let hook = hooks.join("post-checkout");
     std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).expect("hook");
+    #[cfg(unix)]
     std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .expect("chmod");
     let clone = |repo: &str, dir: &str| {

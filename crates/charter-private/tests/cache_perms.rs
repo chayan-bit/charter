@@ -1,4 +1,5 @@
 //! The decrypted local cache of a private repo is readable by its owner only.
+#![cfg(unix)]
 
 mod common;
 

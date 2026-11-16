@@ -13,6 +13,7 @@
 //! Every entity lives 1 day; leftover funds are swept back even on panic.
 //!
 //! `CHARTER_RABDI=1 cargo test --release -p charter-cli --test rabdi_gate -- --ignored --nocapture`
+#![cfg(unix)]
 
 mod common;
 

@@ -23,3 +23,43 @@ jobs:
         with:
           tool: cargo-audit
       - run: cargo audit
+  windows:
+    runs-on: windows-latest
+    env:
+      # Debug test threads get 2 MiB; Windows frames are larger than Linux ones.
+      RUST_MIN_STACK: "8388608"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out bytes unchanged (tests hash fixtures and embedded files)
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Tools the tests run
+        run: |
+          git --version
+          command -v ssh-keygen
+          ssh-keygen -V 2>&1 | head -1 || true
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Performance gate (exact fake-chain costs vs bench/baseline.json)
+        run: cargo test --workspace --all-features --test bench_gate -- --nocapture
+      - run: cargo test --workspace --all-features --no-fail-fast -- --skip bench_gate
+      - name: Default home lands under USERPROFILE; show its ACL
+        shell: pwsh
+        run: |
+          Remove-Item Env:HOME, Env:CHARTER_HOME -ErrorAction SilentlyContinue
+          & target\debug\chart.exe keys init | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          icacls "$env:USERPROFILE\.charter"
+          Get-ChildItem -Recurse -File "$env:USERPROFILE\.charter" | ForEach-Object { icacls $_.FullName }
+      - name: Live read-only smoke on the Rabdi testnet (no keys, no access key)
+        continue-on-error: true
+        env:
+          CHARTER_HOME: ${{ runner.temp }}/smoke-home
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          chart status arkiv::zBZ3MRTENmgPBebpq97ZPTbxeFZNaS8VX6Es25hpdJsSJ
+          git clone -q arkiv::zBZ3MRTENmgPBebpq97ZPTbxeFZNaS8VX6Es25hpdJsSJ "$RUNNER_TEMP/smoke"
+          git -C "$RUNNER_TEMP/smoke" log --oneline -1
+          git -C "$RUNNER_TEMP/smoke" fsck --no-progress

@@ -276,6 +276,73 @@ fn ops_post_and_list_through_the_cli() {
     assert!(String::from_utf8_lossy(&float.stderr).contains("E_BAD_FORMAT"));
 }
 
+/// `--payload-file -` reads the payload from stdin, past the 32K Windows command line;
+/// exactly one payload source is allowed.
+#[test]
+fn op_post_reads_a_large_payload_from_stdin() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let log = tmp.path().join("chain.log");
+    let alice = User::new(tmp.path(), "alice", &log);
+    fund(&log, field(&alice.arkiv(&["keys", "init"]), "wallet:"));
+    let url = field(&alice.arkiv(&["init", "--name", "big"]), "url:").to_owned();
+    let data = "0123456789abcdef".repeat(3_000);
+    let payload = serde_json::json!({ "data": data }).to_string();
+    assert!(payload.len() > 40_000);
+    let arkiv = env!("CARGO_BIN_EXE_chart");
+    let base = [
+        "op",
+        "post",
+        "--repo",
+        &url,
+        "--type",
+        "xyz.arkiv.blob",
+        "--action",
+        "create",
+    ];
+
+    let mut child = alice
+        .cmd(arkiv, tmp.path())
+        .args(base)
+        .args(["--payload-file", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write");
+    let out = child.wait_with_output().expect("wait");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let listed = alice.arkiv(&[
+        "op",
+        "list",
+        "--repo",
+        &url,
+        "--type",
+        "xyz.arkiv.blob",
+        "--json",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&listed).expect("json");
+    assert_eq!(v[0]["id"], id.as_str());
+    assert_eq!(v[0]["payload"]["data"], data.as_str());
+
+    for extra in [&["--payload-json", "{}", "--payload-file", "-"][..], &[]] {
+        let out = alice.run(arkiv, tmp.path(), &[&base[..], extra].concat());
+        assert_eq!(out.status.code(), Some(2), "{extra:?}");
+    }
+}
+
 #[test]
 fn dev_faucet_funds_mem_wallets_only() {
     let tmp = tempfile::tempdir().expect("tmp");

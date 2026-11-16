@@ -46,6 +46,7 @@ A failed child is a tool error (`isError: true`) whose text is `{"code", "messag
 `git_push` runs git in the server process, so an agent whose own shell is sandboxed without network (Codex `workspace-write`) can still push, and the access key stays in the server's environment instead of the model's shell.
 Relative `dir`, `receipt` and `public` paths resolve against the server's working directory, which is also the working area: a path that starts with `-`, contains `..`, or resolves (through symlinks) outside it is refused with code `usage`, so a prompt-injected agent cannot pass git an option or post a file from elsewhere, such as a key, as a receipt.
 `repo` must be `arkiv::z...` or a bare rid, and every value reaches git after `--` and the CLI as `--name=value`.
+`op_post` and `attach_proof` hand `payload` to the CLI on stdin (`--payload-file=-`), never as an argument, so a payload of any size works on every platform, including Windows with its 32,767-character command line.
 
 `chart op attach-proof` is the CLI half of `attach_proof`: it chunks the receipt into `xyz.arkiv.blob` ops of at most 30,000 bytes, skips chunks whose `sha256` is already posted on the repo (so a retry after `E_INSUFFICIENT_FUNDS` only posts what is missing), then posts the given op with `{kind: "risc0", receipt, chunks, public}` appended to its payload's `proofs`.
 

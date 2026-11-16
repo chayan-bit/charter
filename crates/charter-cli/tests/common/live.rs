@@ -80,11 +80,12 @@ pub fn command(
     args: &[&str],
 ) -> Command {
     let bins = PathBuf::from(env!("CARGO_BIN_EXE_git-remote-arkiv"));
-    let path = format!(
-        "{}:{}",
-        bins.parent().expect("dir").display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let path = std::env::join_paths(
+        std::iter::once(bins.parent().expect("dir").to_path_buf()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )
+    .expect("PATH");
     let mut c = Command::new(program);
     c.current_dir(dir)
         .env("PATH", path)

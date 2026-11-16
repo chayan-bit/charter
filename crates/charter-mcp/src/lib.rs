@@ -149,8 +149,8 @@ pub fn confine(work: &Path, p: &Path) -> Result<PathBuf, String> {
     if p.components().any(|c| c == Component::ParentDir) {
         return Err(bad("`..` is not allowed"));
     }
-    let root = work
-        .canonicalize()
+    // dunce: no `\\?\` prefix on Windows, which git refuses; std's canonicalize elsewhere.
+    let root = dunce::canonicalize(work)
         .map_err(|e| bad(&format!("working area {}: {e}", work.display())))?;
     let abs = if p.is_absolute() {
         p.to_path_buf()
@@ -160,7 +160,7 @@ pub fn confine(work: &Path, p: &Path) -> Result<PathBuf, String> {
     let real = abs
         .ancestors()
         .find(|a| a.exists())
-        .and_then(|a| a.canonicalize().ok())
+        .and_then(|a| dunce::canonicalize(a).ok())
         .ok_or_else(|| bad("cannot be resolved"))?;
     match real.starts_with(&root) {
         true => Ok(abs),
@@ -180,9 +180,10 @@ fn op_args(cmd: &str, repo: &str, ty: &str, action: &str, object: &Option<String
     a
 }
 
-fn with_payload(mut a: Vec<String>, parents: &[String], payload: &Value) -> Vec<String> {
+/// `a` plus the parents and `--payload-file=-`: the payload itself goes on stdin.
+fn with_payload(mut a: Vec<String>, parents: &[String]) -> Vec<String> {
     a.extend(parents.iter().map(|p| opt("parent", p)));
-    a.push(opt("payload-json", &payload.to_string()));
+    a.push(opt("payload-file", "-"));
     a
 }
 
@@ -257,9 +258,11 @@ impl ArkivGit {
     #[tool(description = "Sign and post one op as this agent's identity; returns {id}.")]
     pub async fn op_post(&self, Parameters(a): Parameters<PostArgs>) -> ToolResult {
         let base = op_args("post", &url(&a.repo)?, &a.type_name, &a.action, &a.object);
+        let args = with_payload(base, &a.parents);
+        let payload = a.payload.to_string();
         let out = self
             .runner
-            .arkiv(&with_payload(base, &a.parents, &a.payload))
+            .arkiv_input(&args, payload.as_bytes())
             .await
             .map_err(err)?;
         Ok(id_json(&out))
@@ -278,10 +281,15 @@ impl ArkivGit {
             confine(&self.runner.work, &a.receipt)?,
             confine(&self.runner.work, &a.public)?,
         );
-        let mut args = with_payload(base, &a.parents, &a.payload);
+        let mut args = with_payload(base, &a.parents);
         args.push(opt("receipt", &receipt.to_string_lossy()));
         args.push(opt("public", &public.to_string_lossy()));
-        let out = self.runner.arkiv(&args).await.map_err(err)?;
+        let payload = a.payload.to_string();
+        let out = self
+            .runner
+            .arkiv_input(&args, payload.as_bytes())
+            .await
+            .map_err(err)?;
         Ok(id_json(&out))
     }
 

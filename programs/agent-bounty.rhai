@@ -23,7 +23,7 @@ fn agent_proof() {
 
 // Image id of the sealed_patch guest (arkiv_git_zk::image_id_hex()).
 fn sealed_patch_image() {
-    "2813d1c3cfd5a86fd0c337ce719ab30902b9164219d4d1b20e6fb8066eb32a05"
+    "326fefc7f5cc5aaa99f2691046dfafe0ff62496174f1eb2b93aaa4840854a0ca"
 }
 
 // ---- Agent delegation. ----

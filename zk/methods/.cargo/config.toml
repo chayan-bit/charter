@@ -1,0 +1,4 @@
+# risc0-build runs the guest's cargo from this directory, so this applies to the guest build.
+# The wrapper strips machine paths so the guest image id is the same on every machine.
+[build]
+rustc-wrapper = "./remap-rustc.sh"
