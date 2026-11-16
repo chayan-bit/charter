@@ -138,6 +138,7 @@ mod tests {
     /// A file name that is not UTF-8 (as a patch made on Linux would arrive) is a decided
     /// error, not "objects missing", which would leave the fold undecided for good.
     #[test]
+    #[cfg(unix)]
     fn a_non_utf8_path_is_a_decided_error_not_missing_objects() {
         use std::os::unix::ffi::OsStrExt;
         let d = tempfile::tempdir().expect("dir");

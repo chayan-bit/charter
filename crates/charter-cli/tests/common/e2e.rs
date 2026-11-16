@@ -30,11 +30,10 @@ impl User {
     }
 
     pub fn cmd(&self, program: &str, dir: &Path) -> Command {
-        let path = format!(
-            "{}:{}",
-            bin_dir().display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        let path = std::env::join_paths(std::iter::once(bin_dir()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .expect("PATH");
         let mut c = Command::new(program);
         c.current_dir(dir)
             .env("PATH", path)

@@ -149,8 +149,8 @@ pub fn confine(work: &Path, p: &Path) -> Result<PathBuf, String> {
     if p.components().any(|c| c == Component::ParentDir) {
         return Err(bad("`..` is not allowed"));
     }
-    let root = work
-        .canonicalize()
+    // dunce: no `\\?\` prefix on Windows, which git refuses; std's canonicalize elsewhere.
+    let root = dunce::canonicalize(work)
         .map_err(|e| bad(&format!("working area {}: {e}", work.display())))?;
     let abs = if p.is_absolute() {
         p.to_path_buf()
@@ -160,7 +160,7 @@ pub fn confine(work: &Path, p: &Path) -> Result<PathBuf, String> {
     let real = abs
         .ancestors()
         .find(|a| a.exists())
-        .and_then(|a| a.canonicalize().ok())
+        .and_then(|a| dunce::canonicalize(a).ok())
         .ok_or_else(|| bad("cannot be resolved"))?;
     match real.starts_with(&root) {
         true => Ok(abs),
