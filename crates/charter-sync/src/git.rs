@@ -27,6 +27,10 @@ const REPO_ENV: [&str; 11] = [
     "GIT_GRAFT_FILE",
 ];
 
+/// The oldest git Charter runs on: `pack-objects --keep-pack` (snapshot packs) is in 2.18.
+/// `send-pack --stdin` (2.2) and `--atomic` (2.4) are older.
+pub const MIN_GIT: &str = "2.18";
+
 /// Header of a git pack: `PACK`, version, object count.
 const PACK_HEADER: usize = 12;
 
@@ -483,15 +487,27 @@ impl Git {
         .is_ok()
     }
 
-    /// In the working repo: `git push --no-verify <cache> <refspecs>`.
+    /// In the working repo: one atomic `git send-pack` of `refspecs` to `cache`. The
+    /// refspecs go over stdin, since a Windows command line holds about 32K characters;
+    /// `--thin` is what `git push` sends, and send-pack runs no pre-push hook.
     pub fn push_to(&self, cache: &Path, refspecs: &[String]) -> Result<()> {
         if refspecs.is_empty() {
             return Ok(());
         }
         let cache = cache.to_string_lossy().into_owned();
-        let mut args = vec!["push", "--no-verify", "-q", cache.as_str()];
-        args.extend(refspecs.iter().map(String::as_str));
-        self.run(&args, b"").map(|_| ())
+        let mut input = refspecs.join("\n");
+        input.push('\n');
+        let args = [
+            "send-pack",
+            "-q",
+            "--thin",
+            "--atomic",
+            "--stdin",
+            cache.as_str(),
+        ];
+        self.run(&args, input.as_bytes())
+            .map(|_| ())
+            .map_err(name_min_git)
     }
 
     /// In the working repo: fetch `oids` from the cache (`uploadpack.allowAnySHA1InWant`).
@@ -563,6 +579,20 @@ pub fn pack_object_count(pack: &Path) -> Result<u32> {
         return Err(SyncError::coded(ErrorCode::BadPack, "not a git pack"));
     }
     Ok(u32::from_be_bytes([h[8], h[9], h[10], h[11]]))
+}
+
+/// A git too old for `send-pack --stdin --atomic`, or a cache that does not take atomic
+/// pushes, says so in `e`; add the git version Charter needs. Runs on errors only.
+fn name_min_git(e: SyncError) -> SyncError {
+    match e {
+        SyncError::Git { cmd, msg }
+            if msg.contains("unknown option") || msg.contains("support --atomic") =>
+        {
+            let msg = format!("{msg}\nCharter needs git {MIN_GIT} or newer");
+            SyncError::Git { cmd, msg }
+        }
+        e => e,
+    }
 }
 
 #[cfg(test)]
@@ -721,5 +751,75 @@ mod tests {
         assert_eq!(layer.len(), 1);
         // The new commit, its tree and the new blob; nothing of the kept pack.
         assert_eq!(pack_object_count(&layer[0]).expect("count"), 3);
+    }
+
+    /// A work repo with commits `one` and `two` (on main), `n` tags on `one`, and a cache.
+    fn tagged(n: usize) -> (tempfile::TempDir, Git, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let w = tmp.path().join("w");
+        std::fs::create_dir(&w).expect("work dir");
+        sh(&w, &["init", "-q", "-b", "main"]);
+        sh(&w, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let one = sh(&w, &["rev-parse", "HEAD"]);
+        sh(&w, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        let tags: String = (0..n)
+            .map(|i| format!("create refs/tags/t{i} {one}\n"))
+            .collect();
+        let work = Git::work(Some(&w));
+        work.run(&["update-ref", "--stdin"], tags.as_bytes())
+            .expect("tags");
+        let cache = tmp.path().join("cache");
+        Git::init_cache(&cache).expect("cache");
+        (tmp, work, cache)
+    }
+
+    fn tag_specs(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("+refs/tags/t{i}:refs/staging/n/refs/tags/t{i}"))
+            .collect()
+    }
+
+    #[test]
+    fn a_push_longer_than_a_windows_command_line_lands_in_one_call() {
+        let (_tmp, work, cache) = tagged(1500);
+        let specs = tag_specs(1500);
+        assert!(specs.iter().map(|s| s.len() + 1).sum::<usize>() > 32_767);
+        work.push_to(&cache, &specs).expect("push");
+        let refs = Git::cache(&cache).refs("refs/staging/").expect("refs");
+        assert_eq!(refs.len(), 1500);
+    }
+
+    #[test]
+    fn a_push_with_one_bad_ref_lands_nothing() {
+        let (_tmp, work, cache) = tagged(3);
+        let staged = |c: &Path| Git::cache(c).refs("refs/staging/").expect("refs");
+        let mut missing = tag_specs(3);
+        missing.push("+refs/tags/nope:refs/staging/n/nope".into());
+        assert!(work.push_to(&cache, &missing).is_err(), "no such source");
+        assert!(staged(&cache).is_empty());
+        // Refused by the cache, not the client: a rewind without `+` next to a new ref.
+        let main = ["+refs/heads/main:refs/staging/n/main".to_owned()];
+        work.push_to(&cache, &main).expect("main");
+        let mut rewind = tag_specs(3);
+        rewind.push("refs/tags/t0:refs/staging/n/main".into());
+        assert!(work.push_to(&cache, &rewind).is_err(), "non-fast-forward");
+        assert_eq!(staged(&cache).len(), 1, "only the first push's main");
+    }
+
+    #[test]
+    fn a_git_without_atomic_send_pack_is_told_the_version_charter_needs() {
+        let old = |msg: &str| SyncError::Git {
+            cmd: "send-pack".into(),
+            msg: msg.into(),
+        };
+        for msg in [
+            "error: unknown option `atomic'",
+            "fatal: the receiving end does not support --atomic push",
+        ] {
+            let e = name_min_git(old(msg)).to_string();
+            assert!(e.contains(&format!("git {MIN_GIT} or newer")), "{e}");
+        }
+        let other = name_min_git(old("fatal: bad object")).to_string();
+        assert!(!other.contains("or newer"), "{other}");
     }
 }

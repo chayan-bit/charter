@@ -2,6 +2,7 @@
 
 Prebuilt binaries are attached to every GitHub Release, so no Nix or Rust build is needed.
 Each archive holds `git-remote-arkiv`, `chart` and `chart-mcp` plus the licence files.
+Charter runs the `git` on `PATH` and needs git 2.18 or newer (snapshot packs use `pack-objects --keep-pack`).
 Two targets are published: `aarch64-apple-darwin` (Apple Silicon macOS) and `x86_64-unknown-linux-gnu` (Linux x86_64, glibc 2.35 or newer).
 
 ## Download URL pattern
