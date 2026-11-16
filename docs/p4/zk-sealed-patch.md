@@ -43,8 +43,10 @@ Its toolchain installs without root (`rzup` from crates.io, components into `RIS
 - Pinned image id: `charter_zk::IMAGE_ID` names the exact guest ELF.
   `verify` checks the receipt against that constant, so a receipt for any other program fails.
   `zk/prover` refuses to prove when the built guest does not hash to the pinned id.
-  The guest is built with the local RISC Zero toolchain, not the reproducible Docker build, so a third party that wants to rebuild the ELF and match the id must use the same toolchain (`rzup` rust 1.97.0) and sources.
-  The ELF also embeds the builder's cargo registry paths in panic locations, so the id matches only for the same `CARGO_HOME` path.
+  The guest is built with the local RISC Zero toolchain, not the Docker build, and the id does not depend on the machine: anyone with the same sources and toolchain (`rzup` rust 1.97.0) gets the pinned id.
+  `zk/methods/remap-rustc.sh`, the rustc wrapper `zk/methods/.cargo/config.toml` sets for the guest build, makes that hold: it remaps `CARGO_HOME`, the repo root and build-script `OUT_DIR`s to fixed prefixes (panic locations embed source paths), and replaces cargo's `-C metadata` for the in-repo guest crates, which hashes their absolute path, with their name and version.
+  Checked 2026-11-16: two Linux x86_64 machines, different checkout directories, `HOME`, `CARGO_HOME` and target directories, produced byte-identical guest ELFs (sha256 `a8debd45...a3de16`) and the pinned id.
+  An environment `RUSTC_WRAPPER` overrides the config; `scripts/zk-prove.sh` puts the remap wrapper in its place and chains the original one, and fails before proving if the ELF contains the home or repo path.
 - No trusted setup: receipts stay STARKs; there is no Groth16 wrap.
 - No dev mode: the verifier enables `risc0-zkvm/disable-dev-mode`, and `verify` also rejects any receipt that is not a succinct STARK receipt.
 
@@ -77,7 +79,8 @@ These CPU numbers are not comparable with the Metal numbers above.
 | Verify, release build (in `zk-prover`) | 15.0 ms | 15.0 ms |
 
 Receipts are tied to the verifier version: a 3.1.0 verifier rejects 3.0.6 receipts ("parameters digest" mismatch), so the upgrade re-proved the fixtures.
-The fixture receipt is `crates/charter-zk/tests/fixtures/demo.receipt` (sha256 `edfa56b819bbf237d455d0623b89d63ba1109cfd1244cbe94ddbf727f42e5e46`).
+The path remapping changed the image id but not the speed: three interleaved runs gave 15.03 s before and 15.06 s after (mean prove wall), with the same peak memory, receipt size and verify time.
+The fixture receipt is `crates/charter-zk/tests/fixtures/demo.receipt` (sha256 `5e3c3e523d41662d851a66fa9adc488a691399266220af5d9d1841312654f3a5`).
 Building the prover on macOS compiles RISC Zero's Metal kernels; that needs `scripts/macos-shims/xcrun` (nix xcrun cannot see the Metal toolchain, and risc0 kernels need a macOS 14 Metal language target), which `scripts/zk-prove.sh` puts on `PATH`.
 The verifier-only build links about 180 crates (`cargo tree -p charter-zk -e normal`), mostly the RISC Zero verifier and its field and hash code.
 
