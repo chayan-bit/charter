@@ -1,6 +1,6 @@
 {
-  "key_hash": "1f9f7073c2b65d932c844e961c03d6d3ef3e1d0de098f0a77ba2f73dbac768be",
-  "ct_hash": "df5bf6db5b6011511a86c27601a10b97a946512907d6e0815f379bdd53b4121c",
+  "key_hash": "a9111d721ee220e3dc719885cceb590951ea3246e02fad993ff68a735810ae9d",
+  "ct_hash": "bfd2ddd640ad7fb51010ba7978b194532bdbdfed0826c0c90c13b971b1295c3a",
   "base_hash": "1df72d30aeb9521bab827c601d2e284c5956119d055e00e14ee14537e83e7ca2",
   "spec_hash": "22c12349072b6dcde3e36a66a897fe012c108d0052df7453788319cfb44c629d",
   "spec": "+ pub fn add(a: i32, b: i32) -> i32 {\n+     a + b\n- a - b\n"

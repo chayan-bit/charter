@@ -23,7 +23,19 @@ patch=${2:-$root/zk/demo/patch.txt}
 spec=${3:-$root/zk/demo/spec.txt}
 out=${4:-$root/zk/out}
 
+# The remap wrapper must see every guest rustc call; an env RUSTC_WRAPPER (mac-heavy's sccache)
+# would override zk/methods/.cargo/config.toml, so take its place and chain it.
+wrap=$root/zk/methods/remap-rustc.sh
+if [[ ${RUSTC_WRAPPER:-} != "$wrap" ]]; then
+  export ZK_INNER_RUSTC_WRAPPER=${RUSTC_WRAPPER:-} RUSTC_WRAPPER=$wrap
+fi
 cargo build --release --manifest-path "$root/zk/Cargo.toml" -p zk-prover
+# The image id must not depend on this machine: no home or repo path may reach the guest ELF.
+elf=$CARGO_TARGET_DIR/riscv-guest/methods/sealed_patch/riscv32im-risc0-zkvm-elf/release/sealed_patch
+if grep -qaF -e "$HOME/" -e "$root/" -e "${CARGO_HOME:-$HOME/.cargo}/" "$elf"; then
+  echo "zk-prove: $elf embeds a machine path; the image id would not reproduce" >&2
+  exit 1
+fi
 # perl alarm bounds the runtime (macOS has no coreutils timeout); time -l / -v reports peak RSS.
 time_flag=-l; [[ $(uname) == Linux ]] && time_flag=-v
 /usr/bin/time "$time_flag" perl -e 'alarm shift; exec @ARGV' "$timeout_s" \
