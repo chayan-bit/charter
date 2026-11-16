@@ -659,6 +659,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // Windows forbids `"` in file names.
     fn a_new_cache_is_configured_without_extra_spawns() {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path().join("odd \"dir\\").join("git");

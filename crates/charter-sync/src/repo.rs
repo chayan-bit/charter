@@ -175,6 +175,7 @@ const OWNER_ONLY_MARKER: &str = "owner-only";
 /// A cache made before caches were owner-only, tightened once: every directory 0700, every
 /// file 0600 (symlinks untouched), and `core.sharedRepository=0600` so git keeps new
 /// objects owner-only.
+#[cfg(unix)]
 fn tighten_cache(dir: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let io = |p: &Path, e| SyncError::io(p.display(), e);
@@ -205,25 +206,32 @@ fn tighten_cache(dir: &Path) -> Result<()> {
         .map_err(|e| io(&config, e))
 }
 
+/// No Windows cache predates owner-only caches: no earlier release built on Windows.
+#[cfg(not(unix))]
+fn tighten_cache(_: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Creates `d` and makes it owner-only: `$CHARTER_HOME` and a repo's cache hold the
 /// decrypted objects and packs of private repos.
 fn owner_only_dir(d: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(d).map_err(|e| SyncError::io(d.display(), e))?;
-    std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| SyncError::io(d.display(), e))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| SyncError::io(d.display(), e))?;
+    }
+    Ok(())
 }
 
 /// Creates (or truncates) `p` with mode 0600: packs of a private repo are plaintext here.
 pub fn create_owner_only(p: &Path) -> Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(p)
-        .map_err(|e| SyncError::io(p.display(), e))
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(p).map_err(|e| SyncError::io(p.display(), e))
 }
 
 /// [`std::fs::write`] through [`create_owner_only`].
