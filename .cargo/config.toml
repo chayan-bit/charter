@@ -3,5 +3,6 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "link-arg=/STACK:8388608"]
 
+# mingw ld keeps a 24 MB COFF symbol table in each exe; msvc puts symbols in a PDB instead.
 [target.x86_64-pc-windows-gnu]
-rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]
+rustflags = ["-C", "link-arg=-Wl,--stack,8388608", "-C", "strip=symbols"]
