@@ -1,0 +1,7 @@
+# Windows gives the main thread a 1 MiB stack, and `chart init` overflows it in a debug
+# build. Reserve the 8 MiB that Linux and macOS give, so every platform runs the same code.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]
