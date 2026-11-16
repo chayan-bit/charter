@@ -25,6 +25,9 @@ jobs:
       - run: cargo audit
   windows:
     runs-on: windows-latest
+    env:
+      # Debug test threads get 2 MiB; Windows frames are larger than Linux ones.
+      RUST_MIN_STACK: "8388608"
     defaults:
       run:
         shell: bash
