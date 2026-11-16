@@ -10,6 +10,9 @@ for tool in chart git jq; do
   command -v "$tool" >/dev/null || die "$tool not found on PATH"
 done
 
+# A native jq.exe under Git Bash writes CRLF, and the \r would end every id it prints.
+case $OSTYPE in msys* | cygwin*) jq() { command jq -b "$@"; } ;; esac
+
 ops_json() { chart op list --repo "$1" --json; }
 
 my_nid() { chart keys show | sed -n 's/^nid:[[:space:]]*//p'; }
