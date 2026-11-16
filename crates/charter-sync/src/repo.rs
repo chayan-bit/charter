@@ -74,7 +74,11 @@ impl Config {
         if let Some(h) = env_compat("CHARTER_HOME", "ARKIV_GIT_HOME") {
             return PathBuf::from(h);
         }
-        home_under(Path::new(&std::env::var_os("HOME").unwrap_or_default()))
+        let user_home = std::env::var_os("HOME");
+        // cmd and PowerShell do not set HOME; without this the home would be `.\.charter`.
+        #[cfg(windows)]
+        let user_home = user_home.or_else(|| std::env::var_os("USERPROFILE"));
+        home_under(Path::new(&user_home.unwrap_or_default()))
     }
 }
 
