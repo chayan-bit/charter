@@ -19,8 +19,17 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             # Oldest runner keeps the glibc requirement low.
             os: ubuntu-22.04
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: .exe
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Check out bytes unchanged (no CRLF in embedded assets)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - name: Install the pinned toolchain
         run: rustup target add ${{ matrix.target }} && rustc --version
@@ -36,14 +45,18 @@ jobs:
         run: |
           if [ "${GITHUB_REF_TYPE}" = tag ]; then v="${GITHUB_REF_NAME}"; else v="dev-${GITHUB_SHA::7}"; fi
           name="charter-${v}-${{ matrix.target }}"
-          for b in $BINS; do cp "target/${{ matrix.target }}/release/$b" .; done
-          tar czf "$name.tar.gz" $BINS LICENSE-APACHE LICENSE-MIT
-          if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"; else shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"; fi
-          cat "$name.tar.gz.sha256"
+          files=""
+          for b in $BINS; do cp "target/${{ matrix.target }}/release/${b}${{ matrix.ext }}" .; files="$files ${b}${{ matrix.ext }}"; done
+          files="$files LICENSE-APACHE LICENSE-MIT"
+          if [ "$RUNNER_OS" = Windows ]; then a="$name.zip"; 7z a -tzip "$a" $files >/dev/null; else a="$name.tar.gz"; tar czf "$a" $files; fi
+          if command -v sha256sum >/dev/null; then sha256sum "$a" > "$a.sha256"; else shasum -a 256 "$a" > "$a.sha256"; fi
+          cat "$a.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: charter-${{ matrix.target }}
-          path: charter-*.tar.gz*
+          path: |
+            charter-*.tar.gz*
+            charter-*.zip*
           if-no-files-found: error
 
   publish:
@@ -64,4 +77,4 @@ jobs:
         run: |
           cd dist
           cat *.sha256 > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes *.tar.gz SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes *.tar.gz *.zip SHA256SUMS
