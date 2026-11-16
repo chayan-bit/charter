@@ -4,24 +4,27 @@ Prebuilt binaries are attached to every GitHub Release, so no Nix or Rust build 
 Each archive holds `git-remote-arkiv`, `chart` and `chart-mcp` plus the licence files.
 Charter runs the `git` on `PATH` and needs git 2.18 or newer (snapshot packs use `pack-objects --keep-pack`).
 On Windows the default home is `%USERPROFILE%\.charter`; `icacls` shows it and its key files open to the user, SYSTEM and Administrators only.
-Two targets are published: `aarch64-apple-darwin` (Apple Silicon macOS) and `x86_64-unknown-linux-gnu` (Linux x86_64, glibc 2.35 or newer).
+Three targets are published: `aarch64-apple-darwin` (Apple Silicon macOS), `x86_64-unknown-linux-gnu` (Linux x86_64, glibc 2.35 or newer) and `x86_64-pc-windows-msvc` (Windows x86_64).
+The Windows archive is a `.zip` holding `git-remote-arkiv.exe`, `chart.exe` and `chart-mcp.exe`; the others are `.tar.gz`.
 
 ## Download URL pattern
 
 ```
 https://github.com/chayan-bit/charter/releases/download/<tag>/charter-<tag>-<target>.tar.gz
+https://github.com/chayan-bit/charter/releases/download/<tag>/charter-<tag>-x86_64-pc-windows-msvc.zip
 https://github.com/chayan-bit/charter/releases/download/<tag>/SHA256SUMS
 ```
 
-For v0.7.1 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.1/charter-v0.7.1-aarch64-apple-darwin.tar.gz`.
-For v0.7.1 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.1/charter-v0.7.1-x86_64-unknown-linux-gnu.tar.gz`.
+For v0.7.2 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.2/charter-v0.7.2-aarch64-apple-darwin.tar.gz`.
+For v0.7.2 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.2/charter-v0.7.2-x86_64-unknown-linux-gnu.tar.gz`.
+For v0.7.2 on Windows x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.2/charter-v0.7.2-x86_64-pc-windows-msvc.zip`.
 v0.1.0 predates the rename to Charter: its archives are named `arkiv-git-v0.1.0-<target>.tar.gz` and hold `git-remote-arkiv`, `arkiv-git` and `arkiv-git-mcp`.
 A combined `SHA256SUMS` file is attached to the release as well.
 
 ## Install snippet
 
 ```sh
-TAG=v0.7.1
+TAG=v0.7.2
 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 BASE=https://github.com/chayan-bit/charter/releases/download/$TAG
 curl -fsSLO "$BASE/charter-$TAG-$TARGET.tar.gz"
@@ -42,6 +45,17 @@ git clone arkiv::<rid>
 
 Files fetched with `curl` carry no quarantine flag, so the snippet above runs as is.
 If you download the archive in a browser and macOS refuses to open the binaries, clear the flag with `xattr -d com.apple.quarantine ~/.local/bin/git-remote-arkiv ~/.local/bin/chart ~/.local/bin/chart-mcp`.
+
+## Upgrading to v0.7.2
+
+v0.7.2 reads every repo v0.7.1 wrote and changes no storage format; the device seed, `keys/` and `private/` are kept.
+
+- The zk prover moves to risc0 3.1.0, which drops `zip` and its advisories (RUSTSEC-2026-0367, RUSTSEC-2026-0368, RUSTSEC-2026-0369 and RUSTSEC-2026-0429).
+  The guest image id is now `326fefc7f5cc5aaa99f2691046dfafe0ff62496174f1eb2b93aaa4840854a0ca` on every build machine.
+  Receipts are tied to the prover version, so v0.7.1 and v0.7.2 reject each other's zk receipts; re-prove any receipt you keep with v0.7.2.
+- Pushes write the cache with one atomic `git send-pack --stdin`, so Charter now needs git 2.18 or newer on `PATH`.
+- Windows x86_64 is a published target (`x86_64-pc-windows-msvc`); the default home is `%USERPROFILE%\.charter`.
+- `chart op post --payload-file <path>` reads the payload from a file, and `--payload-file -` from stdin, past the 32K Windows command line; `chart-mcp` now passes payloads on stdin.
 
 ## Upgrading to v0.7.1
 

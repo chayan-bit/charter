@@ -28,8 +28,8 @@ Charter's own source is hosted on Arkiv by Charter, and its development runs the
 GitHub is a read-only mirror plus the host of the release binaries.
 
 ```sh
-# 1. install the prebuilt binaries (macOS arm64 or Linux x86_64), see docs/install.md
-TAG=v0.7.1 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
+# 1. install the prebuilt binaries (macOS arm64 or Linux x86_64; the Windows x86_64 zip is in docs/install.md)
+TAG=v0.7.2 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 mkdir -p ~/.local/bin && curl -fsSL "https://github.com/chayan-bit/charter/releases/download/$TAG/charter-$TAG-$TARGET.tar.gz" | tar xz -C ~/.local/bin git-remote-arkiv chart chart-mcp
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -161,6 +161,13 @@ Never use real funds or mainnet keys.
 5. In any git repo: `git remote add arkiv arkiv::<rid>` and `git push arkiv main`.
 6. Anywhere else: `git clone arkiv::<rid> demo-clone`.
 7. `chart status arkiv::<rid>` shows each peer's head and the minimum expiry in days, and `chart keepalive arkiv::<rid> --dry-run` shows what it would extend.
+
+### Upgrading to v0.7.2
+
+v0.7.2 moves the zk prover to risc0 3.1.0, which drops the `zip` advisories (RUSTSEC-2026-0367, 0368, 0369 and 0429), adds a Windows x86_64 build, pushes with one atomic `git send-pack`, and lets `chart op post` read its payload from a file or stdin (`--payload-file`).
+Pushing now needs git 2.18 or newer.
+zk receipts are tied to the prover version, so v0.7.1 and v0.7.2 reject each other's receipts; re-prove any you keep with v0.7.2.
+No repo format changes; `docs/install.md` has the full upgrade notes.
 
 ### Upgrading to v0.7.1
 
