@@ -44,6 +44,20 @@ pub fn code_of(stderr: &str) -> Option<String> {
     })
 }
 
+fn spawn_failure(e: std::io::Error) -> Value {
+    json!({"code": null, "message": format!("spawn: {e}"), "exit": null})
+}
+
+/// Stdout of a finished child, or its [`failure`].
+fn finish(out: std::process::Output) -> Result<String, Value> {
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if out.status.success() {
+        return Ok(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Err(failure(out.status.code(), &stdout, &stderr))
+}
+
 impl Runner {
     /// `CHARTER_BIN` (or the pre-rename `ARKIV_GIT_BIN`), else `chart` next to this executable, else `chart` on `PATH`.
     pub fn from_env() -> Self {
@@ -86,16 +100,7 @@ impl Runner {
     }
 
     async fn output(&self, mut c: tokio::process::Command) -> Result<String, Value> {
-        let out = c
-            .output()
-            .await
-            .map_err(|e| json!({"code": null, "message": format!("spawn: {e}"), "exit": null}))?;
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        if out.status.success() {
-            return Ok(stdout);
-        }
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(failure(out.status.code(), &stdout, &stderr))
+        finish(c.output().await.map_err(spawn_failure)?)
     }
 
     /// `chart <args>`; stdout on success.
@@ -103,6 +108,28 @@ impl Runner {
         let mut c = self.command(&self.bin, None);
         c.args(args);
         self.output(c).await
+    }
+
+    /// `chart <args>` with `input` on stdin; stdout on success. Payloads go this way, not
+    /// as arguments, since a Windows command line holds about 32K characters.
+    pub async fn arkiv_input(&self, args: &[String], input: &[u8]) -> Result<String, Value> {
+        use tokio::io::AsyncWriteExt;
+        let mut c = self.command(&self.bin, None);
+        c.args(args).stdin(std::process::Stdio::piped());
+        c.stdout(std::process::Stdio::piped());
+        c.stderr(std::process::Stdio::piped());
+        let mut child = c.spawn().map_err(spawn_failure)?;
+        let stdin = child.stdin.take();
+        // Written beside the wait so neither side blocks on a full pipe, then closed (dropped)
+        // for EOF; a child that exits without reading reports its own error, so a broken
+        // pipe here is not one.
+        let feed = async move {
+            if let Some(mut s) = stdin {
+                let _ = s.write_all(input).await;
+            }
+        };
+        let ((), out) = tokio::join!(feed, child.wait_with_output());
+        finish(out.map_err(spawn_failure)?)
     }
 
     /// `git <args>` in `dir`; stdout on success.

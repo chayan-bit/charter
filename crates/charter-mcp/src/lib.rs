@@ -180,9 +180,10 @@ fn op_args(cmd: &str, repo: &str, ty: &str, action: &str, object: &Option<String
     a
 }
 
-fn with_payload(mut a: Vec<String>, parents: &[String], payload: &Value) -> Vec<String> {
+/// `a` plus the parents and `--payload-file=-`: the payload itself goes on stdin.
+fn with_payload(mut a: Vec<String>, parents: &[String]) -> Vec<String> {
     a.extend(parents.iter().map(|p| opt("parent", p)));
-    a.push(opt("payload-json", &payload.to_string()));
+    a.push(opt("payload-file", "-"));
     a
 }
 
@@ -257,9 +258,11 @@ impl ArkivGit {
     #[tool(description = "Sign and post one op as this agent's identity; returns {id}.")]
     pub async fn op_post(&self, Parameters(a): Parameters<PostArgs>) -> ToolResult {
         let base = op_args("post", &url(&a.repo)?, &a.type_name, &a.action, &a.object);
+        let args = with_payload(base, &a.parents);
+        let payload = a.payload.to_string();
         let out = self
             .runner
-            .arkiv(&with_payload(base, &a.parents, &a.payload))
+            .arkiv_input(&args, payload.as_bytes())
             .await
             .map_err(err)?;
         Ok(id_json(&out))
@@ -278,10 +281,15 @@ impl ArkivGit {
             confine(&self.runner.work, &a.receipt)?,
             confine(&self.runner.work, &a.public)?,
         );
-        let mut args = with_payload(base, &a.parents, &a.payload);
+        let mut args = with_payload(base, &a.parents);
         args.push(opt("receipt", &receipt.to_string_lossy()));
         args.push(opt("public", &public.to_string_lossy()));
-        let out = self.runner.arkiv(&args).await.map_err(err)?;
+        let payload = a.payload.to_string();
+        let out = self
+            .runner
+            .arkiv_input(&args, payload.as_bytes())
+            .await
+            .map_err(err)?;
         Ok(id_json(&out))
     }
 

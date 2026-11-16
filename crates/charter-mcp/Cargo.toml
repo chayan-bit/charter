@@ -19,7 +19,7 @@ dunce = "1"
 rmcp = { version = "3.9", default-features = false, features = ["server", "macros", "transport-io"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-std", "io-util"] }
 
 [dev-dependencies]
 tempfile = "3"
