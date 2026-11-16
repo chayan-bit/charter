@@ -41,7 +41,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Performance gate (exact fake-chain costs vs bench/baseline.json)
         run: cargo test --workspace --all-features --test bench_gate -- --nocapture
-      - run: cargo test --workspace --all-features -- --skip bench_gate
+      - run: cargo test --workspace --all-features --no-fail-fast -- --skip bench_gate
       - name: Default home lands under USERPROFILE; show its ACL
         shell: pwsh
         run: |
