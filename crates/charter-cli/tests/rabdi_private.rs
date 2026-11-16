@@ -741,11 +741,19 @@ fn mem_private_members_roles_removal_and_program() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "a 60 KB --payload-json blob op passes the 32K Windows command line"
+)]
 fn mem_zk_sealed_patch_proofs_and_timelock() {
     mem_world(|w| zk_flow(w, true, false));
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "a 60 KB --payload-json blob op passes the 32K Windows command line"
+)]
 fn mem_zk_sealed_patch_proofs_and_timelock_public() {
     mem_world(|w| zk_flow(w, false, false));
 }
