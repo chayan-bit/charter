@@ -1978,6 +1978,7 @@ dependencies = [
 name = "charter-mcp"
 version = "0.7.1"
 dependencies = [
+ "dunce",
  "rmcp",
  "serde",
  "serde_json",

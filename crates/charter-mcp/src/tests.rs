@@ -281,7 +281,7 @@ async fn cli_failures_come_back_as_coded_tool_errors() {
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_arguments_cannot_inject_options_or_leave_the_work_area() {
     let tmp = tempfile::tempdir().expect("tmp");
-    let root = tmp.path().canonicalize().expect("canonical");
+    let root = dunce::canonicalize(tmp.path()).expect("canonical");
     let s = server(&root);
     let url = repo(&s, &root).await;
     // A template whose post-checkout hook leaves a marker: `--template=t` as the clone dir
