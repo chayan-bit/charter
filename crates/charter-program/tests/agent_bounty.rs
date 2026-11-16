@@ -10,7 +10,7 @@ const AGENT: u8 = 0xa9;
 const ISSUE: u8 = 0x60;
 const PATCH: u8 = 0x50;
 const GRANT: u8 = 0x30;
-const IMAGE: &str = "2813d1c3cfd5a86fd0c337ce719ab30902b9164219d4d1b20e6fb8066eb32a05";
+const IMAGE: &str = "326fefc7f5cc5aaa99f2691046dfafe0ff62496174f1eb2b93aaa4840854a0ca";
 
 fn grant(order: u64, scopes: &[&str], max_bounty: u64, until: u64) -> Event {
     let payload =
