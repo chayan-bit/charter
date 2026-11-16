@@ -16,7 +16,7 @@ use crate::Result;
 use crate::cob::json::to_json;
 
 /// COB type of a receipt chunk op: payload `{ data: <hex> }`, addressed by `sha256` of the
-/// decoded bytes. Hex text, so `op post --payload-json` can write it; a chunk of at most
+/// decoded bytes. Hex text, so `op post --payload-file` can write it; a chunk of at most
 /// [`BLOB_CHUNK`] bytes keeps the signed op body under its 62,119 B cap.
 pub const BLOB_TYPE: &str = "xyz.arkiv.blob";
 /// Largest raw chunk per blob op: 60,000 hex chars plus the op envelope fit the body cap

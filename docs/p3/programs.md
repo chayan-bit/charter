@@ -112,7 +112,7 @@ Programs decide whether proofs are required; clients only verify them.
 An op payload may carry `proofs: [ { kind: "risc0", receipt, chunks: [..], public } ]`.
 `public` is the statement the receipt claims to prove, for a sealed patch the `arkiv_git_zk_core::Public` map `{ key_hash, ct_hash, base_hash, spec_hash, spec }` with hex hashes.
 A receipt (about 224 KB) does not fit the 64 KiB op payload cap, so its bytes travel in `xyz.arkiv.blob` ops and the proof entry references them by hash.
-A blob op has action `create` and payload `{ data: <hex> }`, at most 30,000 raw bytes per op (`proofs::BLOB_CHUNK`), so `op post --payload-json` can write it.
+A blob op has action `create` and payload `{ data: <hex> }`, at most 30,000 raw bytes per op (`proofs::BLOB_CHUNK`), so `op post --payload-file` can write it (the hex alone is past the 32,767-character Windows command line, so `--payload-json` works for it only on Unix).
 `chunks` lists the sha256 hex of each chunk's raw bytes in order, and `receipt` is the sha256 hex of the whole receipt.
 A client concatenates the blob data whose hashes are listed and requires the result to hash to `receipt`.
 Blobs are content addressed, so anyone may post them and a junk blob cannot displace a real one.

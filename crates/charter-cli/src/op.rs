@@ -29,7 +29,7 @@ pub enum OpCmd {
 #[derive(Debug, Args)]
 pub struct AttachArgs {
     /// The op to post, e.g. `--type xyz.arkiv.patch --action create`; `proofs` is appended
-    /// to its `--payload-json` object.
+    /// to its payload object.
     #[command(flatten)]
     pub post: PostArgs,
     /// RISC Zero receipt file (`chart zk prove` writes one).
@@ -56,8 +56,16 @@ pub struct PostArgs {
     #[arg(long = "parent")]
     pub parents: Vec<String>,
     /// Payload as JSON (no floats); stored as canonical CBOR.
-    #[arg(long)]
-    pub payload_json: String,
+    #[arg(
+        long,
+        required_unless_present = "payload_file",
+        conflicts_with = "payload_file"
+    )]
+    pub payload_json: Option<String>,
+    /// Read the payload JSON from this file, or from stdin if `-`; for payloads past the
+    /// Windows command line (about 32K characters).
+    #[arg(long, value_name = "PATH")]
+    pub payload_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -90,8 +98,21 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 fn payload(p: &PostArgs) -> Result<Value> {
-    serde_json::from_str(&p.payload_json)
-        .map_err(|e| CliError::Usage(format!("--payload-json: {e}")))
+    let (flag, text) = match (&p.payload_json, &p.payload_file) {
+        (Some(j), _) => ("--payload-json", j.clone()),
+        (None, Some(f)) => ("--payload-file", payload_text(f)?),
+        (None, None) => return Err(CliError::Usage("no payload".into())),
+    };
+    serde_json::from_str(&text).map_err(|e| CliError::Usage(format!("{flag}: {e}")))
+}
+
+/// The text of `f`, or of stdin if `f` is `-`.
+fn payload_text(f: &std::path::Path) -> Result<String> {
+    let text = match f.as_os_str() == "-" {
+        true => std::io::read_to_string(std::io::stdin()),
+        false => std::fs::read_to_string(f),
+    };
+    text.map_err(|e| CliError::Usage(format!("--payload-file {}: {e}", f.display())))
 }
 
 fn body(p: &PostArgs, v: &Value) -> Result<CobOpBody> {
@@ -154,7 +175,7 @@ fn read(path: &std::path::Path) -> Result<Vec<u8>> {
 fn with_proof(mut payload: Value, entry: Value) -> Result<Value> {
     let obj = payload
         .as_object_mut()
-        .ok_or_else(|| CliError::Usage("--payload-json must be a JSON object".into()))?;
+        .ok_or_else(|| CliError::Usage("the payload must be a JSON object".into()))?;
     match obj.entry("proofs").or_insert_with(|| json!([])) {
         Value::Array(list) => list.push(entry),
         _ => return Err(CliError::Usage("payload `proofs` must be an array".into())),
