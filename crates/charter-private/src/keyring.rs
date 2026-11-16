@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use charter_core::{ErrorCode, Nid, Rid};
@@ -295,15 +294,17 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let io = |e| SyncError::io("write private state", e);
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(io)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
+    }
     let tmp = path.with_extension("tmp");
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)
-        .map_err(io)?;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let mut f = o.open(&tmp).map_err(io)?;
     f.write_all(bytes).and_then(|()| f.sync_all()).map_err(io)?;
     std::fs::rename(&tmp, path).map_err(io)
 }
@@ -323,11 +324,15 @@ mod tests {
         assert!(ring.require(&[6; 32], Role::Read).is_err());
         let home = tempfile::tempdir().expect("tmp");
         ring.save(home.path()).expect("save");
-        let mode = std::fs::metadata(Keyring::path(home.path(), &ring.rid))
-            .expect("meta")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(Keyring::path(home.path(), &ring.rid))
+                .expect("meta")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         let back = Keyring::load(home.path(), &ring.rid).expect("load");
         assert_eq!(back.as_ref(), Some(&ring));
         ring.epochs.clear();
