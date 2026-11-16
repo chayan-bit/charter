@@ -117,15 +117,18 @@ impl Peer {
         to_text(&self.keys().nid())
     }
 
+    /// `op post` with the payload in a file: blob ops pass the 32K Windows command line.
     fn post(&self, url: &str, ty: &str, action: &str, object: Option<&str>, p: &Value) -> String {
-        let payload = p.to_string();
+        let file = self.home.join("payload.json");
+        std::fs::write(&file, p.to_string()).expect("payload file");
+        let file = file.to_string_lossy();
         let mut args = vec![
             "op", "post", "--repo", url, "--type", ty, "--action", action,
         ];
         if let Some(o) = object {
             args.extend(["--object", o, "--parent", o]);
         }
-        args.extend(["--payload-json", &payload]);
+        args.extend(["--payload-file", &file]);
         self.arkiv(&args).trim().to_owned()
     }
 }
@@ -741,19 +744,11 @@ fn mem_private_members_roles_removal_and_program() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "a 60 KB --payload-json blob op passes the 32K Windows command line"
-)]
 fn mem_zk_sealed_patch_proofs_and_timelock() {
     mem_world(|w| zk_flow(w, true, false));
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "a 60 KB --payload-json blob op passes the 32K Windows command line"
-)]
 fn mem_zk_sealed_patch_proofs_and_timelock_public() {
     mem_world(|w| zk_flow(w, false, false));
 }
