@@ -25,7 +25,16 @@ async fn a_round_skips_while_a_push_holds_the_lock_then_catches_up() {
         "a skipped round writes nothing"
     );
     drop(held);
-    let first = round(&net, &alice.cfg, &rid).await;
+    // A git child that another test forks keeps a copy of the lock fd until it execs, so a
+    // round right after the drop can still see the lock taken.
+    let mut first = round(&net, &alice.cfg, &rid).await;
+    for _ in 0..100 {
+        if !matches!(first, Ok(Outcome::Busy)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        first = round(&net, &alice.cfg, &rid).await;
+    }
     assert_eq!(
         first.as_ref().expect("round"),
         &Outcome::Synced(Changes {
