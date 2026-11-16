@@ -16,7 +16,7 @@ fn cli() -> PathBuf {
         .parent()
         .and_then(Path::parent)
         .expect("target dir")
-        .join("chart");
+        .join(format!("chart{}", std::env::consts::EXE_SUFFIX));
     assert!(
         bin.is_file(),
         "{} missing: run `cargo build -p charter-cli` first",
@@ -291,6 +291,7 @@ async fn agent_arguments_cannot_inject_options_or_leave_the_work_area() {
     let marker = root.join("pwned");
     let hook = hooks.join("post-checkout");
     std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).expect("hook");
+    #[cfg(unix)]
     std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .expect("chmod");
     let clone = |repo: &str, dir: &str| {

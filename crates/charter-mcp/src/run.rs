@@ -47,9 +47,10 @@ pub fn code_of(stderr: &str) -> Option<String> {
 impl Runner {
     /// `CHARTER_BIN` (or the pre-rename `ARKIV_GIT_BIN`), else `chart` next to this executable, else `chart` on `PATH`.
     pub fn from_env() -> Self {
+        let chart = format!("chart{}", std::env::consts::EXE_SUFFIX);
         let sibling = std::env::current_exe()
             .ok()
-            .and_then(|p| Some(p.parent()?.join("chart")))
+            .and_then(|p| Some(p.parent()?.join(&chart)))
             .filter(|p| p.is_file());
         let bin = std::env::var_os("CHARTER_BIN")
             .or_else(|| std::env::var_os("ARKIV_GIT_BIN"))
@@ -69,8 +70,12 @@ impl Runner {
         let mut c = tokio::process::Command::new(program);
         // git finds `git-remote-arkiv` beside `chart`.
         if let Some(d) = self.bin.parent().filter(|d| !d.as_os_str().is_empty()) {
-            let path = std::env::var("PATH").unwrap_or_default();
-            c.env("PATH", format!("{}:{path}", d.display()));
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let dirs = std::iter::once(d.to_path_buf()).chain(std::env::split_paths(&path));
+            // `;` on Windows; a directory holding the separator cannot be listed at all.
+            if let Ok(p) = std::env::join_paths(dirs) {
+                c.env("PATH", p);
+            }
         }
         c.envs(self.env.iter().map(|(k, v)| (k, v)));
         if let Some(d) = dir {
