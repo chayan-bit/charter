@@ -117,6 +117,8 @@ impl Log {
         if records.is_empty() {
             return Ok(());
         }
+        #[cfg(windows)]
+        self.file.seek(SeekFrom::Start(self.consumed)).map_err(io)?;
         self.file.write_all(records).map_err(io)?;
         self.file.flush().map_err(io)?;
         self.consumed += records.len() as u64;
@@ -155,12 +157,15 @@ fn apply(mem: &MemArkiv, chain_id: u64, tag: u8, payload: &[u8]) -> Result<(), S
 impl FileMemArkiv {
     /// Opens (or creates) the log at `path` for chain `chain_id` and replays it.
     pub fn open(path: &Path, chain_id: u64) -> Result<Self, StoreError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(path)
-            .map_err(io)?;
+        let mut o = OpenOptions::new();
+        o.read(true).create(true);
+        // An append-only handle on Windows may not truncate a torn tail (`set_len` is
+        // denied), so there it writes at `consumed`, which is the end once caught up.
+        match cfg!(windows) {
+            true => o.write(true),
+            false => o.append(true),
+        };
+        let file = o.open(path).map_err(io)?;
         let me = Self {
             mem: MemArkiv::new(chain_id),
             log: Mutex::new(Log { file, consumed: 0 }),
