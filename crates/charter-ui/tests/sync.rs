@@ -147,3 +147,20 @@ async fn a_new_push_shows_after_the_next_round() {
         "{again}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lock_freed_a_moment_late_does_not_cost_the_round() {
+    // A forked git child can keep the lock for a moment after its owner dropped it; a round
+    // that started in that moment waits for it instead of reporting the repo busy.
+    let net = Net::new();
+    let alice = Peer::new(&net, 7);
+    let rid = init(&net, &alice, "late").await;
+    let held = alice.repo(&rid);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(held);
+    });
+    let got = round(&net, &alice.cfg, &rid).await.expect("round");
+    release.join().expect("release");
+    assert!(matches!(got, Outcome::Synced(_)), "{got:?}");
+}

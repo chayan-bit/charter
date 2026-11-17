@@ -413,13 +413,32 @@ pub async fn round_watched<A: Arkiv>(
     }
 }
 
+/// How long a round waits for a repo lock before it reports the repo busy.
+const LOCK_WAIT: Duration = Duration::from_millis(500);
+
+/// The repo, or `None` when another process keeps its lock past [`LOCK_WAIT`]. A git child
+/// forked in this process keeps a copy of the lock until it execs, so a lock its owner just
+/// dropped can look taken for a moment.
+async fn open_waiting(home: &std::path::Path, rid: &Rid) -> Result<Option<Repo>, UiError> {
+    let end = Instant::now() + LOCK_WAIT;
+    loop {
+        if let Some(repo) = Repo::try_open(home, rid)? {
+            return Ok(Some(repo));
+        }
+        if Instant::now() >= end {
+            return Ok(None);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn locked_round<A: Arkiv>(
     a: &A,
     cfg: &Config,
     rid: &Rid,
     revoked: usize,
 ) -> Result<(Outcome, Option<Watch>), UiError> {
-    let Some(repo) = Repo::try_open(&cfg.home, rid)? else {
+    let Some(repo) = open_waiting(&cfg.home, rid).await? else {
         return Ok((Outcome::Busy, None));
     };
     let view = charter_sync::sync(a, &repo, &Want::default()).await?;

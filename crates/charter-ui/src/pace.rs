@@ -47,6 +47,8 @@ pub const ON_SCREEN_EVERY: Duration = Duration::from_secs(10);
 pub const IDLE_EVERY: Duration = Duration::from_secs(300);
 /// Background rounds stop at this much of the RPC quota used.
 pub const PAUSE_AT: f64 = 80.0;
+/// A round that found the repo locked runs again after this long.
+const BUSY_RETRY: Duration = Duration::from_secs(2);
 /// A 429 that names no `Retry-After` pauses this long.
 const REFUSED_PAUSE: Duration = Duration::from_secs(60);
 
@@ -169,6 +171,9 @@ struct State {
     heads_next: bool,
     /// The repo changed and no round has caught up yet (failed or lock busy).
     dirty: bool,
+    /// A round found the lock taken (a push in another process): run it again then, not at
+    /// the repo's next interval.
+    retry_at: Option<Instant>,
 }
 
 /// The loop's pacing state; [`Pacer::tick`] does whatever is due at `now`.
@@ -254,6 +259,9 @@ impl Pacer {
     fn step(&self, shared: &Shared, home: &Path, rid: &Rid, now: Instant, slow: u32) -> Step {
         let st = self.repos.get(rid);
         let checked = st.and_then(|s| s.checked);
+        if let Some(t) = st.and_then(|s| s.retry_at) {
+            return if now >= t { Step::Full } else { Step::Wait };
+        }
         if checked.is_none() && shared.wanted(rid) && private(home, rid).is_none() {
             return Step::Full;
         }
@@ -393,6 +401,7 @@ impl Job {
             Ok(o) => *o == Outcome::Busy,
             Err(e) => !settled(e),
         };
+        st.retry_at = matches!(r, Ok(Outcome::Busy)).then(|| self.now + BUSY_RETRY);
         if let Err(e) = &r {
             charter_sync::warn(&format!("ui sync {}: {e}", charter_sync::ids::hex32(&rid)));
         }

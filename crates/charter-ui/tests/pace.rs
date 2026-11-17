@@ -180,7 +180,8 @@ impl Sim {
     }
 
     fn view_cached(&self) -> bool {
-        self.alice.repo(&self.rid).dir.join(cache::VIEW).exists()
+        let dir = self.alice.home.path().join("repos").join(hex32(&self.rid));
+        dir.join(cache::VIEW).exists() // not `repo()`: that waits for the lock
     }
 
     fn router(&self) -> axum::Router {
@@ -502,6 +503,19 @@ async fn a_full_round_in_flight_shows_as_running_and_the_probe_does_not() {
         !s.shared.round(&s.rid).running,
         "and it ends with the round"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_round_that_found_the_lock_busy_runs_again_within_seconds() {
+    let mut s = sim(49, true).await;
+    s.shared.want(s.rid);
+    let _other = s.shared.viewer([9; 32]); // idle repos are checked every 5 minutes
+    let held = s.alice.repo(&s.rid); // a push in another process holds the lock
+    s.run(0, 1).await;
+    assert!(!s.view_cached(), "the busy round wrote nothing");
+    drop(held);
+    s.run(1, 20).await;
+    assert!(s.view_cached(), "the repo waited for the 5 minute interval");
 }
 
 #[tokio::test(flavor = "multi_thread")]
