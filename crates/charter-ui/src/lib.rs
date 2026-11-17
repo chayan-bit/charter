@@ -73,7 +73,9 @@ pub fn router(app: Arc<App>, auth: Arc<security::Auth>) -> Router {
         .route("/r/{rid}/raw/{rev}/{*path}", get(code::raw))
         .route("/r/{rid}/log/{rev}", get(history::log))
         .route("/r/{rid}/commit/{sha}", get(history::commit))
+        .route("/events", get(live::events_all))
         .route("/r/{rid}/events", get(live::events))
+        .route("/r/{rid}/sync", post(live::retry))
         .route("/r/{rid}/verify", get(live::verify))
         .route("/r/{rid}/write", post(write::prepare).get(write::to_repo))
         .route(

@@ -78,10 +78,9 @@ pub async fn index(State(app): State<Arc<App>>, pref: Pref) -> Response {
             .into_iter()
             .map(|rid| row(&app, &pref, rid))
             .collect();
-        html(&Index {
-            l: Layout::new(&app, &pref, "Repositories"),
-            repos,
-        })
+        let mut l = Layout::new(&app, &pref, "Repositories");
+        l.events = "/events".into();
+        html(&Index { l, repos })
     })
     .await
 }

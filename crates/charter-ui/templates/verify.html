@@ -1,5 +1,5 @@
 <details id="verify" data-live="sync" data-src="/r/{{ r.hex }}/verify" class="pop seal {{ r.verify.state }}"{% if r.verify.open %} open{% endif %}>
-<summary>{% match r.verify.state %}{% when "verified" %}{{ m::i(l.v, "seal-check") }}{% when "equivocation" %}{{ m::i(l.v, "seal-warning") }}{% when "pending" %}{{ m::i(l.v, "circle-dashed") }}{% else %}{{ m::i(l.v, "seal-question") }}{% endmatch %}<b>{{ r.verify.word }}</b><small>{% if let Some(p) = r.verify.pause %}sync {{ p }}{% else %}{{ r.verify.sub }}{% endif %}</small></summary>
+<summary>{% match r.verify.state %}{% when "verified" %}{{ m::i(l.v, "seal-check") }}{% when "equivocation" %}{{ m::i(l.v, "seal-warning") }}{% when "pending" %}{{ m::i(l.v, "circle-dashed") }}{% when "failed" %}{{ m::i(l.v, "warning-circle") }}{% else %}{{ m::i(l.v, "seal-question") }}{% endmatch %}<b>{{ r.verify.word }}</b><small>{% if let Some(p) = r.verify.pause %}sync {{ p }}{% else %}{{ r.verify.sub }}{% endif %}</small></summary>
 <div class="popover">
 <h3>{{ r.verify.heading }}</h3>
 <p>{{ r.verify.summary }}</p>
@@ -7,7 +7,8 @@
 <dt>Last check</dt><dd>{{ r.verify.synced }}{% if let Some(p) = r.verify.pause %}; sync {{ p }}{% endif %}</dd>
 {% if !r.verify.delegates.is_empty() %}<dt>Maintainers</dt><dd>{{ r.maintainers() }}{% if r.verify.delegates.len() > 1 %}; {{ r.verify.threshold }} must sign a change{% endif %}</dd>{% endif %}
 {% for e in r.verify.equivocations %}<dt>Conflict</dt><dd class="bad">{{ r.who(e.nid) }} signed two versions of step {{ e.seq }}</dd>{% endfor %}
-{% if let Some(e) = r.verify.error %}<dt>Last sync</dt><dd class="bad">failed: {{ e }}</dd>{% endif %}
+{% if let Some(e) = r.verify.error %}<dt>Last sync</dt><dd class="bad">Sync failed {{ r.verify.failed }}: {{ e }}</dd>{% endif %}
+{% if r.verify.retry %}<dt>Now</dt><dd>Retrying now</dd>{% else if r.verify.running %}<dt>Now</dt><dd>Checking Arkiv for changes</dd>{% endif %}
 {% if r.verify.busy > 0 %}<dt>Skipped</dt><dd>{{ r.verify.busy }} round{% if r.verify.busy != 1 %}s{% endif %} while a push held the lock</dd>{% endif %}
 </dl>
 <details class="tech"><summary>Technical details</summary>

@@ -9,10 +9,11 @@
 <p>Clone one with <code>git clone arkiv::&lt;address&gt;</code>, or run <code>chart ui &lt;address&gt;</code> to fetch and verify it here. Reading is free.</p>
 </section>
 {% else %}
+<div id="repos" data-live="push op sync">
 {% let att = self.attention() %}
 {% if !att.is_empty() %}
 <ul class="attention" aria-label="Needs attention">
-{% for x in att %}{% if x.verify.state == "equivocation" %}<li class="bad">{{ m::i(l.v, "seal-warning") }}<p><b>{{ x.name }}</b> has conflicting histories. Don't merge or release until a maintainer explains.</p><a class="btn btn-sm" href="/r/{{ x.hex }}#verify">See details</a></li>{% else %}<li class="warn">{{ m::i(l.v, "warning-circle") }}<p><b>{{ x.name }}</b> could not be synced; it shows what was verified before.</p><a class="btn btn-sm" href="/r/{{ x.hex }}#verify">Details</a></li>{% endif %}
+{% for x in att %}{% if x.verify.state == "equivocation" %}<li class="bad">{{ m::i(l.v, "seal-warning") }}<p><b>{{ x.name }}</b> has conflicting histories. Don't merge or release until a maintainer explains.</p><a class="btn btn-sm" href="/r/{{ x.hex }}#verify">See details</a></li>{% else %}<li class="warn">{{ m::i(l.v, "warning-circle") }}<p><b>{{ x.name }}</b>: Sync failed {{ x.verify.failed }}. {% if let Some(h) = x.verify.hint %}{{ h }}{% else if x.verify.state == "failed" %}Nothing in it is verified yet.{% else %}It shows what was verified before.{% endif %}{% if let Some(e) = x.verify.error %} <code class="err">{{ e }}</code>{% endif %}</p><a class="btn btn-sm" href="/r/{{ x.hex }}">Details</a></li>{% endif %}
 {% endfor %}
 </ul>
 {% endif %}
@@ -22,9 +23,10 @@
 <h2><a href="/r/{{ x.hex }}">{{ x.name }}</a>{% match x.private %}{% when Some(true) %}<span class="vis">{{ m::i(l.v, "lock-simple") }}Private</span>{% when Some(false) %}<span class="vis">{{ m::i(l.v, "globe-simple") }}Public</span>{% when None %}{% endmatch %}{% if x.archived %}<span class="vis">{{ m::i(l.v, "archive") }}Archived</span>{% endif %}</h2>
 {% if !x.description.is_empty() %}<p class="desc">{{ x.description }}</p>{% endif %}
 <p class="meta">{% if let Some((when, full, who)) = x.updated %}<span>Updated <time title="{{ full }}">{{ when }}</time> by {{ who }}</span>{% else %}<span>No signed push yet</span>{% endif %}<span>{{ x.issues }} issue{% if x.issues != 1 %}s{% endif %}, {{ x.patches }} patch{% if x.patches != 1 %}es{% endif %}</span></p>
-<div class="state"><span class="sealmini {{ x.verify.state }}">{% match x.verify.state %}{% when "verified" %}{{ m::i(l.v, "seal-check") }}{% when "equivocation" %}{{ m::i(l.v, "seal-warning") }}{% when "pending" %}{{ m::i(l.v, "circle-dashed") }}{% else %}{{ m::i(l.v, "seal-question") }}{% endmatch %}{{ x.verify.word }}</span><span>{% if let Some(p) = x.verify.pause %}Sync {{ p }}{% else %}Checked {{ x.verify.synced }}{% endif %}</span></div>
+<div class="state"><span class="sealmini {{ x.verify.state }}">{% match x.verify.state %}{% when "verified" %}{{ m::i(l.v, "seal-check") }}{% when "equivocation" %}{{ m::i(l.v, "seal-warning") }}{% when "pending" %}{{ m::i(l.v, "circle-dashed") }}{% when "failed" %}{{ m::i(l.v, "warning-circle") }}{% else %}{{ m::i(l.v, "seal-question") }}{% endmatch %}{{ x.verify.word }}</span><span>{% if let Some(p) = x.verify.pause %}Sync {{ p }}{% else if x.verify.error.is_some() %}Sync failed {{ x.verify.failed }}{% else if x.verify.running %}Checking now{% else %}Checked {{ x.verify.synced }}{% endif %}</span></div>
 </li>
 {% endfor %}
 </ol>
+</div>
 {% endif %}
 {% endblock %}

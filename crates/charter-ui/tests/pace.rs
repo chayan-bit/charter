@@ -30,6 +30,11 @@ struct Counting {
     quota: Mutex<Option<Quota>>,
     /// The next query is refused with this `Retry-After`.
     refuse: Mutex<Option<Duration>>,
+    /// Every query fails with an RPC error while set.
+    fail: Mutex<bool>,
+    /// Records, per query, whether this repo's round was marked running.
+    watch: Mutex<Option<(Arc<Shared>, Rid)>>,
+    running: Mutex<Vec<bool>>,
 }
 
 impl Counting {
@@ -50,6 +55,13 @@ impl Arkiv for Counting {
     }
     async fn query(&self, q: &Query, o: &QueryOpts) -> Result<QueryPage, StoreError> {
         self.queries.fetch_add(1, Ordering::SeqCst);
+        if let Some((shared, rid)) = self.watch.lock().expect("lock").as_ref() {
+            let on = shared.round(rid).running;
+            self.running.lock().expect("lock").push(on);
+        }
+        if *self.fail.lock().expect("lock") {
+            return Err(StoreError::Rpc("boom from the test".into()));
+        }
         if let Some(d) = self.refuse.lock().expect("lock").take() {
             return Err(StoreError::RateLimited {
                 retry_after: Some(d),
@@ -112,6 +124,9 @@ async fn sim(seed: u8, fresh: bool) -> Sim {
         queries: AtomicU64::new(0),
         quota: Mutex::new(None),
         refuse: Mutex::new(None),
+        fail: Mutex::new(false),
+        watch: Mutex::new(None),
+        running: Mutex::new(vec![]),
     };
     let alice = Peer::new(&c.net, seed);
     let rid = init(&c.net, &alice, "paced").await;
@@ -159,12 +174,17 @@ impl Sim {
         self.alice.repo(&self.rid).dir.join(cache::VIEW).exists()
     }
 
-    async fn verify_panel(&self) -> String {
+    fn router(&self) -> axum::Router {
         let home = self.alice.home.path().to_path_buf();
         let app = Arc::new(App::new(home, self.shared.clone(), CSRF.into()));
-        let r = router(app, Arc::new(Auth::with(PORT, TOKEN.into(), CSRF.into())));
+        router(app, Arc::new(Auth::with(PORT, TOKEN.into(), CSRF.into())))
+    }
+
+    async fn verify_panel(&self) -> String {
         let hex = charter_sync::ids::hex32(&self.rid);
-        send(r, req(&format!("/r/{hex}/verify"))).await.text()
+        send(self.router(), req(&format!("/r/{hex}/verify")))
+            .await
+            .text()
     }
 }
 
@@ -400,4 +420,108 @@ async fn a_429_is_never_retried_before_its_retry_after() {
     );
     assert_eq!(s.run(1, 120).await, 0, "no query before Retry-After");
     assert!(s.run(120, 121).await > 0, "then the loop carries on");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_sync_says_why_and_retry_now_runs_a_round_at_once() {
+    let mut s = sim(46, false).await;
+    s.shared.focus(s.rid);
+    let _v = s.shared.viewer(s.rid);
+    *s.c.fail.lock().expect("lock") = true;
+    s.run(0, 1).await;
+    let r = s.shared.round(&s.rid);
+    assert!(
+        r.error.as_deref().is_some_and(|e| e.contains("boom")) && r.failed_ms > 0,
+        "{r:?}"
+    );
+    let panel = s.verify_panel().await;
+    for want in [
+        "Sync failed",
+        "boom from the test",
+        "Retry now",
+        "1 repo failed to sync",
+    ] {
+        assert!(panel.contains(want), "{want}: {panel}");
+    }
+    *s.c.fail.lock().expect("lock") = false;
+    assert_eq!(
+        s.run(1, 5).await,
+        0,
+        "on its own, the next check waits its interval"
+    );
+    let hex = charter_sync::ids::hex32(&s.rid);
+    let post = axum::http::Request::post(format!("/r/{hex}/sync"))
+        .header(axum::http::header::HOST, HOST)
+        .header(axum::http::header::COOKIE, format!("charter_ui={TOKEN}"))
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(axum::body::Body::from(format!("csrf={CSRF}")))
+        .expect("request");
+    let resp = send(s.router(), post).await;
+    assert_eq!(
+        resp.status,
+        axum::http::StatusCode::SEE_OTHER,
+        "{}",
+        resp.text()
+    );
+    assert!(s.verify_panel().await.contains("Retrying"));
+    assert!(s.run(5, 6).await > 0, "Retry now runs a round at once");
+    assert!(s.shared.round(&s.rid).error.is_none());
+    let panel = s.verify_panel().await;
+    assert!(
+        !panel.contains("Sync failed") && !panel.contains("failed to sync"),
+        "{panel}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_round_in_flight_shows_as_running_and_the_probe_does_not() {
+    let mut s = sim(47, false).await;
+    s.shared.focus(s.rid);
+    let _v = s.shared.viewer(s.rid);
+    *s.c.watch.lock().expect("lock") = Some((s.shared.clone(), s.rid));
+    s.run(0, 1).await;
+    let seen = s.c.running.lock().expect("lock").clone();
+    assert!(
+        !seen.is_empty() && !seen[0],
+        "the probe is not a round: {seen:?}"
+    );
+    assert!(seen.iter().any(|on| *on), "the round is: {seen:?}");
+    assert!(
+        !s.shared.round(&s.rid).running,
+        "and it ends with the round"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_sync_that_fails_shows_on_the_repo_list_with_its_reason() {
+    let mut s = sim(48, true).await;
+    s.shared.want(s.rid);
+    // The cache directory exists (as after `git clone` or Fetch), but no round has finished.
+    let _repo = s.alice.repo(&s.rid);
+    drop(_repo);
+    *s.c.fail.lock().expect("lock") = true;
+    s.run(0, 1).await;
+    let index = send(s.router(), req("/")).await.text();
+    for want in ["Sync failed", "boom from the test", "1 repo failed to sync"] {
+        assert!(index.contains(want), "{want}: {index}");
+    }
+    assert!(!index.contains("Checked never"), "{index}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_repo_on_screen_is_checked_before_the_others() {
+    let mut s = sim(49, false).await;
+    let other = init(&s.c.net, &s.alice, "other").await;
+    round(&s.c, &s.alice.cfg, &other).await.expect("round");
+    // Whichever sorts last by rid is the one on screen.
+    let on = s.rid.max(other);
+    s.shared.focus(on);
+    let _v = s.shared.viewer(on);
+    let mut events = s.shared.subscribe();
+    s.run(0, 1).await;
+    let first = events.try_recv().expect("an event");
+    assert_eq!(first.rid, on, "the page being looked at goes first");
 }

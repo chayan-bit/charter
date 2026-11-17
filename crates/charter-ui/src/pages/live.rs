@@ -42,6 +42,39 @@ pub async fn events(State(app): State<Arc<App>>, Path(rid): Path<String>) -> Res
         .into_response()
 }
 
+/// `GET /events`: every repo's events, for the repo list. Unlike a repo's stream it keeps
+/// nothing on screen, so an open list never makes the loop spend more quota.
+pub async fn events_all(State(app): State<Arc<App>>) -> Response {
+    let stream = futures_util::stream::unfold(app.shared.subscribe(), |mut rx| async move {
+        let name = match rx.recv().await {
+            Ok(e) => e.kind.name(),
+            Err(RecvError::Lagged(_)) => "resync",
+            Err(RecvError::Closed) => return None,
+        };
+        let ev = Event::default().event(name).data(name);
+        Some((Ok::<_, Infallible>(ev), rx))
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// `POST /r/<rid>/sync` (Retry now): the next tick runs a full round of the repo.
+pub async fn retry(State(app): State<Arc<App>>, Path(rid): Path<String>) -> Response {
+    let rid = match parse_id(&rid) {
+        Ok(rid) if app.shared.repos(&app.home).contains(&rid) => rid,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    app.shared.retry(rid);
+    app.shared.emit(rid, crate::sync_loop::Kind::Sync);
+    let back = format!("/r/{}", charter_sync::ids::hex32(&rid));
+    (
+        StatusCode::SEE_OTHER,
+        [(axum::http::header::LOCATION, back)],
+    )
+        .into_response()
+}
+
 #[derive(Template)]
 #[template(path = "verify_part.html")]
 pub struct VerifyPart {

@@ -123,26 +123,68 @@ impl FromRequestParts<Arc<App>> for Pref {
     }
 }
 
-/// The header's sync indicator: `ok`, `warn`, `bad` or `idle`, and what it says.
+/// The header's sync indicator: `ok`, `busy`, `warn`, `bad` or `idle`, what it says, its
+/// tooltip, and where it leads (the failing repo, or the list when several fail).
 #[derive(Debug, Clone)]
 pub struct SyncChip {
     pub state: &'static str,
     pub text: String,
+    pub title: String,
+    pub href: String,
 }
 
 impl SyncChip {
-    fn of(shared: &Shared) -> Self {
-        let (ok, failing) = shared.health();
-        let (state, text) = match (shared.paused(), failing, ok) {
-            (Some(t), _, _) if t > std::time::Instant::now() => (
-                "warn",
-                format!("Paused: RPC quota, resumes in {} min", mins_until(t)),
-            ),
-            (_, n, _) if n > 0 => ("bad", "Last sync failed".into()),
-            (_, _, Some(t)) => ("ok", format!("Synced {}", ago(t))),
-            _ => ("idle", "Starting sync".into()),
+    pub fn of(shared: &Shared) -> Self {
+        let h = shared.health();
+        let chip = |state, text: String, title: String, href: String| Self {
+            state,
+            text,
+            title,
+            href,
         };
-        Self { state, text }
+        if let Some(t) = shared.paused().filter(|t| *t > std::time::Instant::now()) {
+            let m = mins_until(t);
+            return chip(
+                "warn",
+                "Sync paused".into(),
+                format!("Arkiv's RPC quota is nearly used up. Sync resumes in {m} min."),
+                String::new(),
+            );
+        }
+        match h.failing.as_slice() {
+            [(rid, e)] => chip(
+                "bad",
+                "1 repo failed to sync".into(),
+                format!("Sync failed: {e}"),
+                format!("/r/{}", hex32(rid)),
+            ),
+            [_, ..] => chip(
+                "bad",
+                format!("{} repos failed to sync", h.failing.len()),
+                "Open the repo list to see why".into(),
+                "/".into(),
+            ),
+            [] if h.running => chip(
+                "busy",
+                "Syncing".into(),
+                "Checking Arkiv for changes".into(),
+                String::new(),
+            ),
+            [] => match h.ok_ms {
+                Some(t) => chip(
+                    "ok",
+                    format!("Synced {}", ago(t)),
+                    "Every repo here was checked against Arkiv".into(),
+                    String::new(),
+                ),
+                None => chip(
+                    "idle",
+                    "Starting sync".into(),
+                    "The first check against Arkiv has not finished".into(),
+                    String::new(),
+                ),
+            },
+        }
     }
 }
 
@@ -184,8 +226,11 @@ pub struct Layout {
     pub banners: Vec<Banner>,
     /// `(href, label)`; an empty href is the current page.
     pub crumbs: Vec<(String, String)>,
-    /// The repo's event stream (`live.js`); empty off repo pages.
+    /// The page's event stream (`live.js`): the repo's on repo pages, every repo's on the list.
     pub events: String,
+    /// What the header's live parts refetch on a repo page (`/r/<rid>/verify`); empty
+    /// elsewhere, where they refetch the page itself.
+    pub live_src: String,
 }
 
 impl Layout {
@@ -211,6 +256,7 @@ impl Layout {
             banners: notice.into_iter().collect(),
             crumbs: vec![],
             events: String::new(),
+            live_src: String::new(),
         }
     }
 
@@ -435,6 +481,7 @@ pub fn frame(app: &App, pref: &Pref, r: &Repo, tab: &'static str, title: &str) -
     let mut l = Layout::new(app, pref, format!("{title} - {}", r.name()));
     l.crumbs.push((format!("/r/{}", r.hex), r.name()));
     l.events = format!("/r/{}/events", r.hex);
+    l.live_src = format!("/r/{}/verify", r.hex);
     let head = Head::new(r, &ops, tab, people(app, pref, r.view.as_ref()));
     if head.verify.state == "equivocation" {
         l.banners.push(Banner {

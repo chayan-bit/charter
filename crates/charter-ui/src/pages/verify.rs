@@ -32,6 +32,13 @@ pub struct Verify {
     pub pause: Option<String>,
     pub head_block: u64,
     pub error: Option<String>,
+    /// What the error means, in a sentence, when it is one to act on or wait out.
+    pub hint: Option<&'static str>,
+    /// `3 min ago`: when the last round or probe failed.
+    pub failed: String,
+    /// A full round is in flight, or Retry now is queued.
+    pub running: bool,
+    pub retry: bool,
     pub busy: u64,
 }
 
@@ -64,7 +71,9 @@ impl Verify {
             state,
             word,
             sub: match state {
-                "verified" => format!("on this computer, {synced}"),
+                _ if round.running || round.retry => "checking for changes now".into(),
+                "verified" if round.error.is_some() => "last sync failed".into(),
+                "verified" => format!("checked {synced}"),
                 "equivocation" => "don't merge or release".into(),
                 _ => "no signed history yet".into(),
             },
@@ -84,21 +93,44 @@ impl Verify {
             pause: pause(round),
             head_block: v.head_block,
             error: round.error.clone(),
+            hint: round.hint,
+            failed: ago(round.failed_ms),
+            running: round.running,
+            retry: round.retry,
             busy: round.busy,
         }
     }
 
     fn unsynced(round: &Round) -> Self {
         let error = round.error.clone();
+        let (state, word, sub, heading, summary) = match &error {
+            Some(_) => (
+                "failed",
+                "Sync failed",
+                "nothing checked yet",
+                "This computer could not check this repo",
+                "The first sync failed, so nothing here is verified. What went wrong is below; \
+                 Charter tries again on its own.",
+            ),
+            None => (
+                "pending",
+                "Checking",
+                "first copy",
+                "Checking the first copy",
+                "This computer is fetching the repo from Arkiv and checking every signature. \
+                 Nothing is shown as verified until that finishes.",
+            ),
+        };
         Self {
-            state: "pending",
-            word: "Checking",
-            sub: "first copy".into(),
-            heading: "Checking the first copy",
-            summary: "This computer is fetching the repo from Arkiv and checking every \
-                      signature. Nothing is shown as verified until that finishes."
-                .into(),
-            open: error.is_some(),
+            state,
+            word,
+            sub: match round.running || round.retry {
+                true => "checking now".into(),
+                false => sub.into(),
+            },
+            heading,
+            summary: summary.into(),
+            open: false,
             revisions: 0,
             head_rev: None,
             delegates: vec![],
@@ -109,6 +141,10 @@ impl Verify {
             pause: pause(round),
             head_block: 0,
             error,
+            hint: round.hint,
+            failed: ago(round.failed_ms),
+            running: round.running,
+            retry: round.retry,
             busy: round.busy,
         }
     }

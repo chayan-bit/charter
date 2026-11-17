@@ -101,6 +101,54 @@ async fn pages_mark_what_each_event_refreshes_and_the_panel_comes_alone() {
         panel.trim_start().starts_with("<details id=\"verify\"") && !panel.contains("<main"),
         "{panel}"
     );
+    for part in ["id=\"sync\"", "id=\"pushed\"", "id=\"syncnote\""] {
+        assert!(
+            panel.contains(part),
+            "the header's live parts come with the panel: {part}"
+        );
+    }
     let index = page("/").await;
-    assert!(!index.contains("data-events"), "no stream off repo pages");
+    assert!(
+        index.contains("data-events=\"/events\"")
+            && index.contains("id=\"repos\" data-live=\"push op sync\""),
+        "the repo list follows every repo's rounds"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_list_stream_carries_every_repos_events_and_keeps_nothing_on_screen() {
+    let f = fixture();
+    let shared = Arc::new(Shared::default());
+    let app = App::new(
+        f.alice.home.path().to_path_buf(),
+        shared.clone(),
+        CSRF.into(),
+    );
+    let r = router(
+        Arc::new(app),
+        Arc::new(Auth::with(PORT, TOKEN.into(), CSRF.into())),
+    );
+    let resp = r.oneshot(req("/events")).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    shared.emit([9; 32], Kind::Push);
+    shared.emit(f.rid, Kind::Sync);
+    let mut body = resp.into_body().into_data_stream();
+    let mut got = String::new();
+    while got.matches("event: ").count() < 2 {
+        let chunk = tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .expect("an event in time")
+            .expect("open")
+            .expect("chunk");
+        got.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    let names: Vec<&str> = got
+        .lines()
+        .filter_map(|l| l.strip_prefix("event: "))
+        .collect();
+    assert_eq!(names, ["push", "sync"], "{got}");
+    assert!(
+        !shared.any_open(std::time::Instant::now()),
+        "an open list holds no repo on screen, so the loop spends nothing more"
+    );
 }

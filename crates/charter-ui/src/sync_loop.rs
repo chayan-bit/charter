@@ -62,6 +62,14 @@ impl Kind {
 #[derive(Debug, Clone, Default)]
 pub struct Round {
     pub error: Option<String>,
+    /// What the error means for the user, when it is one they can act on or wait out.
+    pub hint: Option<&'static str>,
+    /// When the last round or probe failed (ms).
+    pub failed_ms: u64,
+    /// A full round is in flight (a probe alone is not).
+    pub running: bool,
+    /// Retry now was asked and the round has not started yet.
+    pub retry: bool,
     /// Rounds skipped because a push or fetch held the lock.
     pub busy: u64,
     /// When a probe last found the repo unchanged since `view.json` (ms).
@@ -90,6 +98,7 @@ pub struct Shared {
     rounds: Mutex<BTreeMap<Rid, Round>>,
     focus: Mutex<Option<Rid>>,
     wanted: Mutex<BTreeSet<Rid>>,
+    retries: Mutex<BTreeSet<Rid>>,
     activity: Mutex<Activity>,
     events: tokio::sync::broadcast::Sender<Event>,
 }
@@ -100,6 +109,7 @@ impl Default for Shared {
             rounds: Mutex::default(),
             focus: Mutex::default(),
             wanted: Mutex::default(),
+            retries: Mutex::default(),
             activity: Mutex::default(),
             events: tokio::sync::broadcast::channel(EVENTS_BUFFER).0,
         }
@@ -207,6 +217,15 @@ impl Shared {
         all.into_iter().collect()
     }
 
+    /// [`Shared::repos`], the last repo requested first: a round of a slow repo never keeps
+    /// the page being looked at stale.
+    pub fn by_focus(&self, home: &Path) -> Vec<Rid> {
+        let focus = self.focus.lock().ok().and_then(|f| *f);
+        let mut all = self.repos(home);
+        all.sort_by_key(|r| Some(*r) != focus);
+        all
+    }
+
     /// Sync `rid` even before its cache directory exists (`chart ui <rid>`).
     pub fn want(&self, rid: Rid) {
         if let Ok(mut w) = self.wanted.lock() {
@@ -218,8 +237,26 @@ impl Shared {
         let r = self.rounds.lock().ok().and_then(|r| r.get(rid).cloned());
         Round {
             paused: self.paused().filter(|t| *t > Instant::now()),
+            retry: self.retries.lock().is_ok_and(|q| q.contains(rid)),
             ..r.unwrap_or_default()
         }
+    }
+
+    /// Retry now: the next tick runs a full round of `rid`, whatever its interval.
+    pub fn retry(&self, rid: Rid) {
+        if let Ok(mut q) = self.retries.lock() {
+            q.insert(rid);
+        }
+    }
+
+    /// Whether Retry now was asked for `rid`; asking again needs another [`Shared::retry`].
+    pub fn take_retry(&self, rid: &Rid) -> bool {
+        self.retries.lock().is_ok_and(|mut q| q.remove(rid))
+    }
+
+    /// A full round of `rid` starts (`true`) or ends.
+    pub fn running(&self, rid: Rid, on: bool) {
+        self.record(rid, |s| s.running = on);
     }
 
     fn record(&self, rid: Rid, f: impl FnOnce(&mut Round)) {
@@ -233,23 +270,63 @@ impl Shared {
         self.record(rid, |s| (s.checked_ms, s.ok_ms) = (now_ms(), now_ms()));
     }
 
-    /// For the header: the latest success of any repo, and how many repos failed last.
-    pub fn health(&self) -> (Option<u64>, usize) {
+    /// For the header: the latest success of any repo, the repos whose last round failed
+    /// (with the error), and whether a round is in flight.
+    pub fn health(&self) -> Health {
         let r = self.rounds.lock().map(|r| r.clone()).unwrap_or_default();
-        let ok = r.values().map(|x| x.ok_ms).max().filter(|t| *t > 0);
-        (ok, r.values().filter(|x| x.error.is_some()).count())
+        Health {
+            ok_ms: r.values().map(|x| x.ok_ms).max().filter(|t| *t > 0),
+            failing: r
+                .iter()
+                .filter_map(|(rid, x)| Some((*rid, x.error.clone()?)))
+                .collect(),
+            running: r.values().any(|x| x.running),
+        }
     }
 
-    pub fn failed(&self, rid: Rid, error: String) {
-        self.record(rid, |s| s.error = Some(error));
+    pub fn failed(&self, rid: Rid, e: &UiError) {
+        self.record(rid, |s| s.fail(e));
     }
 
     pub fn recorded(&self, rid: Rid, r: Result<Outcome, UiError>) {
         self.record(rid, |s| match r {
-            Ok(Outcome::Synced(_)) => (s.error, s.ok_ms) = (None, now_ms()),
+            Ok(Outcome::Synced(_)) => (s.error, s.hint, s.ok_ms) = (None, None, now_ms()),
             Ok(Outcome::Busy) => s.busy += 1,
-            Err(e) => s.error = Some(e.to_string()),
+            Err(e) => s.fail(&e),
         });
+    }
+}
+
+/// What the header shows of every repo's last round.
+#[derive(Debug, Clone, Default)]
+pub struct Health {
+    pub ok_ms: Option<u64>,
+    pub failing: Vec<(Rid, String)>,
+    pub running: bool,
+}
+
+impl Round {
+    fn fail(&mut self, e: &UiError) {
+        (self.error, self.hint, self.failed_ms) = (Some(e.to_string()), hint(e), now_ms());
+    }
+}
+
+/// A plain sentence for the sync errors a user can act on or wait out.
+pub fn hint(e: &UiError) -> Option<&'static str> {
+    use charter_core::ErrorCode as C;
+    let UiError::Sync(e) = e else {
+        return None;
+    };
+    match e.code() {
+        C::NotLive | C::IdNotLive | C::ControlNotLive => Some(
+            "A record this repo needs is no longer on Arkiv (it expired), so this computer \
+             cannot rebuild or check it. Only its maintainers can publish it again.",
+        ),
+        C::Rpc | C::InconsistentView | C::Paging => {
+            Some("Arkiv's RPC did not answer as expected. Charter tries again on its own.")
+        }
+        C::WrongChain => Some("The RPC serves a different chain than this repo lives on."),
+        _ => None,
     }
 }
 

@@ -25,7 +25,7 @@
 </nav>
 {% if l.nav != "search" %}<form class="jump" role="search" action="/search" hx-boost="false"><label class="vh" for="jump">Jump to</label>{{ m::i(l.v, "magnifying-glass") }}<input id="jump" type="search" name="q" placeholder="Jump to" autocomplete="off" maxlength="100"><kbd class="js" aria-hidden="true">/</kbd></form>{% endif %}
 <div class="top-right">
-<span class="sync" role="status" title="{{ l.sync.text }}"><i class="dot {{ l.sync.state }}" aria-hidden="true"></i><span class="txt">{{ l.sync.text }}</span></span>
+{% include "sync_chip.html" %}
 <span id="wallet-slot">{% include "wallet_chip_a.html" %}</span>
 <button type="button" class="btn icon-btn js" data-theme-toggle aria-label="Theme: {% match l.theme %}{% when "light" %}light{% when "dark" %}dark{% else %}system{% endmatch %}. Change">{% match l.theme %}{% when "light" %}{{ m::i(l.v, "sun") }}{% when "dark" %}{{ m::i(l.v, "moon") }}{% else %}{{ m::i(l.v, "circle-half") }}{% endmatch %}</button>
 <button type="button" class="btn icon-btn js help-btn" data-help aria-label="Keyboard shortcuts">{{ m::i(l.v, "question") }}</button>

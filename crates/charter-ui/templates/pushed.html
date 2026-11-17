@@ -1,0 +1,1 @@
+<span id="pushed" data-live="sync" data-src="/r/{{ r.hex }}/verify">{% if let Some((block, nid)) = r.pushed %}{{ m::i(l.v, "git-branch") }}<span>Updated <time title="{{ r.full(block) }}">{{ r.when(block) }}</time> by {{ r.who(nid) }}</span>{% endif %}</span>

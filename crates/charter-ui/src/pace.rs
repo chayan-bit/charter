@@ -240,8 +240,11 @@ impl Pacer {
             return self.pause(shared, &cfg.home, quota.map(|q| q.until()));
         };
         self.pause(shared, &cfg.home, None);
-        for rid in shared.repos(&cfg.home) {
-            let step = self.step(shared, &cfg.home, &rid, now, slow);
+        for rid in shared.by_focus(&cfg.home) {
+            let step = match shared.take_retry(&rid) {
+                true => Step::Full,
+                false => self.step(shared, &cfg.home, &rid, now, slow),
+            };
             if step == Step::Wait {
                 continue;
             }
@@ -251,7 +254,7 @@ impl Pacer {
                     return self.pause(shared, &cfg.home, Some(until));
                 }
                 charter_sync::warn(&format!("ui sync {}: {e}", charter_sync::ids::hex32(&rid)));
-                shared.failed(rid, e.to_string());
+                shared.failed(rid, &e);
                 shared.emit(rid, Kind::Sync);
             }
         }
@@ -297,6 +300,9 @@ impl Pacer {
             shared.emit(rid, Kind::Sync);
             return Ok(());
         }
+        // Pages show the round in flight, so a stale cache is never presented as current.
+        shared.running(rid, true);
+        shared.emit(rid, Kind::Sync);
         let r = match Box::pin(round_watched(a, cfg, &rid)).await {
             Ok((o, w)) => {
                 st.watch = w;
@@ -304,6 +310,7 @@ impl Pacer {
             }
             Err(e) => Err(e),
         };
+        shared.running(rid, false);
         if r.as_ref().is_err_and(|e| retry_after(e).is_some()) {
             return r.map(|_| ());
         }
