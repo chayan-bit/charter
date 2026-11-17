@@ -3,7 +3,8 @@
 //! `cob::list_since`, writes `view.json` and `cobs.json`, and drops the lock, then
 //! broadcasts what changed ([`Event`]) to the pages' event streams. [`crate::pace`] decides
 //! when a round is worth its RPC quota. It runs on its own thread and runtime, so git
-//! subprocesses never stall page handlers.
+//! subprocesses never stall page handlers, and checks the repos concurrently, so a slow or
+//! stuck repo never stalls another.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -20,8 +21,10 @@ use crate::UiError;
 use crate::cache::{self, Cobs, RepoView};
 use crate::head_watch::Watch;
 
+use futures_util::StreamExt;
+
 use crate::last::Last;
-use crate::pace::Pacer;
+use crate::pace::{self, Pacer};
 
 /// A page request keeps its repo on screen (and the UI open) this long without a stream.
 pub const OPEN_TTL: Duration = Duration::from_secs(60);
@@ -482,17 +485,31 @@ async fn run<A: Arkiv>(a: Arc<A>, cfg: Config, shared: Arc<Shared>, ws: Option<W
         rx
     });
     let mut pacer = Pacer::default();
+    // Each repo's check runs on its own: a slow or stuck one never holds up the others.
+    let mut flying = futures_util::stream::FuturesUnordered::new();
     loop {
         pacer.head(heads.as_ref().and_then(|h| *h.borrow()), Instant::now());
-        pacer.tick(a.as_ref(), &cfg, &shared, Instant::now()).await;
-        match heads.as_mut() {
-            Some(h) => {
-                if let Ok(Err(_)) = tokio::time::timeout(TICK, h.changed()).await {
-                    heads = None; // the follower is gone: poll from now on
-                }
-            }
-            None => tokio::time::sleep(TICK).await,
+        let jobs = pacer.due(a.as_ref(), &cfg, &shared, Instant::now());
+        flying.extend(
+            jobs.into_iter()
+                .map(|j| pace::check(a.as_ref(), &cfg, &shared, j)),
+        );
+        tokio::select! {
+            Some((job, r)) = flying.next() => pacer.done(&shared, &cfg.home, job, r),
+            () = next_tick(&mut heads) => {}
         }
+    }
+}
+
+/// Waits one [`TICK`], or less when the `newHeads` socket announces a block.
+async fn next_tick(heads: &mut Option<tokio::sync::watch::Receiver<Option<u64>>>) {
+    match heads.as_mut() {
+        Some(h) => {
+            if let Ok(Err(_)) = tokio::time::timeout(TICK, h.changed()).await {
+                *heads = None; // the follower is gone: poll from now on
+            }
+        }
+        None => tokio::time::sleep(TICK).await,
     }
 }
 

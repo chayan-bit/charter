@@ -27,7 +27,7 @@
 //! in the count, so a writer deleting one of its own rows in the same block hides it until
 //! the next change the probe or the watch sees (docs/p6/ui.md 4.2).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -175,8 +175,19 @@ struct State {
 #[derive(Debug, Default)]
 pub struct Pacer {
     repos: BTreeMap<Rid, State>,
+    /// Repos whose check is in flight; their [`State`] travels with the [`Job`].
+    flying: BTreeSet<Rid>,
     /// The latest `newHeads` block and when it arrived; `None` while no socket is live.
     head: Option<(u64, Instant)>,
+}
+
+/// One repo's due check, holding its pacing state until [`Pacer::done`] takes it back.
+#[derive(Debug)]
+pub(crate) struct Job {
+    rid: Rid,
+    step: Step,
+    now: Instant,
+    st: State,
 }
 
 fn private(home: &Path, rid: &Rid) -> Option<bool> {
@@ -192,6 +203,42 @@ fn retry_after(e: &UiError) -> Option<Option<Duration>> {
         }
         _ => None,
     }
+}
+
+/// A failure that re-reading the same entities can only repeat (expired or invalid data):
+/// the next round waits for the probe to see the repo change, or for Retry now, instead of
+/// spending a full round's quota on every check.
+fn settled(e: &UiError) -> bool {
+    use charter_core::ErrorCode as C;
+    let UiError::Sync(e) = e else {
+        return false;
+    };
+    matches!(
+        e.code(),
+        C::NotLive
+            | C::IdNotLive
+            | C::ControlNotLive
+            | C::BadSig
+            | C::BadFormat
+            | C::BadRefs
+            | C::BadPack
+            | C::ChainGap
+            | C::HistoryRewritten
+            | C::UnsupportedVersion
+            | C::ProgramMissing
+            | C::ProgramRejected
+    )
+}
+
+/// Runs `job`'s check and hands the job back for [`Pacer::done`].
+pub(crate) async fn check<A: Arkiv>(
+    a: &A,
+    cfg: &Config,
+    shared: &Shared,
+    mut job: Job,
+) -> (Job, Result<(), UiError>) {
+    let r = Box::pin(job.run(a, cfg, shared)).await;
+    (job, r)
 }
 
 impl Pacer {
@@ -230,17 +277,40 @@ impl Pacer {
         if sealed { Step::Full } else { Step::Check }
     }
 
-    /// Runs what is due at `now` for every repo the loop knows.
+    /// Runs what is due at `now` for every repo the loop knows, the repos at once, and
+    /// returns when all of them are done.
     pub async fn tick<A: Arkiv>(&mut self, a: &A, cfg: &Config, shared: &Shared, now: Instant) {
+        let jobs = self.due(a, cfg, shared, now);
+        let checks = jobs.into_iter().map(|j| check(a, cfg, shared, j));
+        for (job, r) in futures_util::future::join_all(checks).await {
+            self.done(shared, &cfg.home, job, r);
+        }
+    }
+
+    /// Takes out the checks due at `now`, the repo on screen first. A repo stays out until
+    /// [`Pacer::done`] gets it back, so a slow one is never checked twice at once and never
+    /// waits for, or holds up, another.
+    pub(crate) fn due<A: Arkiv>(
+        &mut self,
+        a: &A,
+        cfg: &Config,
+        shared: &Shared,
+        now: Instant,
+    ) -> Vec<Job> {
         if shared.paused().is_some_and(|until| now < until) {
-            return;
+            return vec![];
         }
         let quota = a.quota();
         let Some(slow) = slowdown(quota.as_ref().and_then(Quota::used)) else {
-            return self.pause(shared, &cfg.home, quota.map(|q| q.until()));
+            self.pause(shared, &cfg.home, quota.map(|q| q.until()));
+            return vec![];
         };
         self.pause(shared, &cfg.home, None);
+        let mut jobs = vec![];
         for rid in shared.by_focus(&cfg.home) {
+            if self.flying.contains(&rid) {
+                continue;
+            }
             let step = match shared.take_retry(&rid) {
                 true => Step::Full,
                 false => self.step(shared, &cfg.home, &rid, now, slow),
@@ -248,16 +318,27 @@ impl Pacer {
             if step == Step::Wait {
                 continue;
             }
-            if let Err(e) = self.run(a, cfg, shared, rid, step, now).await {
-                if let Some(wait) = retry_after(&e) {
-                    let until = now + wait.unwrap_or(REFUSED_PAUSE);
-                    return self.pause(shared, &cfg.home, Some(until));
-                }
-                charter_sync::warn(&format!("ui sync {}: {e}", charter_sync::ids::hex32(&rid)));
-                shared.failed(rid, &e);
-                shared.emit(rid, Kind::Sync);
-            }
+            self.flying.insert(rid);
+            let st = self.repos.remove(&rid).unwrap_or_default();
+            jobs.push(Job { rid, step, now, st });
         }
+        jobs
+    }
+
+    /// Takes back a finished check; a failure pauses on a 429 or is shown on the repo.
+    pub(crate) fn done(&mut self, shared: &Shared, home: &Path, job: Job, r: Result<(), UiError>) {
+        let Job { rid, now, st, .. } = job;
+        self.flying.remove(&rid);
+        self.repos.insert(rid, st);
+        let Err(e) = r else {
+            return;
+        };
+        if let Some(wait) = retry_after(&e) {
+            return self.pause(shared, home, Some(now + wait.unwrap_or(REFUSED_PAUSE)));
+        }
+        charter_sync::warn(&format!("ui sync {}: {e}", charter_sync::ids::hex32(&rid)));
+        shared.failed(rid, &e);
+        shared.emit(rid, Kind::Sync);
     }
 
     /// Sets or clears the pause; the pages hear of a change.
@@ -271,18 +352,12 @@ impl Pacer {
             .into_iter()
             .for_each(|r| shared.emit(r, Kind::Sync));
     }
+}
 
-    async fn run<A: Arkiv>(
-        &mut self,
-        a: &A,
-        cfg: &Config,
-        shared: &Shared,
-        rid: Rid,
-        step: Step,
-        now: Instant,
-    ) -> Result<(), UiError> {
-        let st = self.repos.entry(rid).or_default();
-        st.checked = Some(now);
+impl Job {
+    async fn run<A: Arkiv>(&mut self, a: &A, cfg: &Config, shared: &Shared) -> Result<(), UiError> {
+        let (rid, step, st) = (self.rid, self.step, &mut self.st);
+        st.checked = Some(self.now);
         let saturated = st.probe.as_ref().is_some_and(|p| p.saturated);
         let heads = step == Step::Check && saturated && st.watch.is_some() && st.heads_next;
         st.heads_next = saturated && !heads;
@@ -314,7 +389,13 @@ impl Pacer {
         if r.as_ref().is_err_and(|e| retry_after(e).is_some()) {
             return r.map(|_| ());
         }
-        st.dirty = !matches!(r, Ok(Outcome::Synced(_)));
+        st.dirty = match &r {
+            Ok(o) => *o == Outcome::Busy,
+            Err(e) => !settled(e),
+        };
+        if let Err(e) = &r {
+            charter_sync::warn(&format!("ui sync {}: {e}", charter_sync::ids::hex32(&rid)));
+        }
         let kinds = Outcome::kinds(&r);
         shared.recorded(rid, r);
         kinds.into_iter().for_each(|k| shared.emit(rid, k));
