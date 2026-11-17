@@ -5,12 +5,11 @@
 //! `https://unpkg.com/htmx.org@2.0.11/dist/htmx.min.js`, sha256
 //! `d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717`.
 //!
-//! Fonts (OFL-1.1, licences in `assets/licenses/`), from github.com/google/fonts at
-//! c30b221beb0c1da59d563feb91ec8656a1fa972a, subset to Latin-1 plus the punctuation,
-//! arrows and math signs pages use (`pyftsubset`, woff2):
-//! `schibsted-grotesk.woff2` from `ofl/schibstedgrotesk/SchibstedGrotesk[wght].ttf`
-//! (weights 400 to 700), `plex-mono-400.woff2` and `plex-mono-500.woff2` from
-//! `ofl/ibmplexmono/IBMPlexMono-{Regular,Medium}.ttf`.
+//! Fonts (OFL-1.1, licence in `assets/licenses/geist-OFL.txt`), Geist and Geist Mono variable
+//! fonts from github.com/vercel/geist-font (`fonts/Geist/variable/Geist[wght].ttf`,
+//! `fonts/GeistMono/variable/GeistMono[wght].ttf`), subset to Latin-1 plus the punctuation,
+//! arrows and math signs pages use (fontTools `subset`, woff2): `geist.woff2` and
+//! `geist-mono.woff2`, both with the weight axis (100 to 900) kept.
 //!
 //! `icons.svg` is a sprite of 42 Phosphor "light" icons (MIT, `@phosphor-icons/core`
 //! 2.1.1), each a `<symbol id="i-<name>">`; pages use `<use href="/assets/icons.svg?v=..#i-x">`.
@@ -23,7 +22,7 @@ use axum::extract::Path;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-const FILES: [(&str, &str, &[u8]); 10] = [
+const FILES: [(&str, &str, &[u8]); 9] = [
     (
         "app.css",
         "text/css; charset=utf-8",
@@ -60,19 +59,14 @@ const FILES: [(&str, &str, &[u8]); 10] = [
         include_bytes!("../assets/favicon.svg"),
     ),
     (
-        "schibsted-grotesk.woff2",
+        "geist.woff2",
         "font/woff2",
-        include_bytes!("../assets/schibsted-grotesk.woff2"),
+        include_bytes!("../assets/geist.woff2"),
     ),
     (
-        "plex-mono-400.woff2",
+        "geist-mono.woff2",
         "font/woff2",
-        include_bytes!("../assets/plex-mono-400.woff2"),
-    ),
-    (
-        "plex-mono-500.woff2",
-        "font/woff2",
-        include_bytes!("../assets/plex-mono-500.woff2"),
+        include_bytes!("../assets/geist-mono.woff2"),
     ),
 ];
 
@@ -86,8 +80,9 @@ pub fn version() -> &'static str {
     })
 }
 
-/// The CSS with its comments, indentation, trailing spaces and blank lines removed: the source keeps them
-/// for readers, the pages do not pay for them.
+/// The CSS with its comments removed and its whitespace squeezed (none around `{ } ; , >`
+/// or after `:`, one space elsewhere): the source keeps both for readers, the pages do not pay
+/// for them.
 fn strip_css(src: &str) -> String {
     let mut bare = String::with_capacity(src.len());
     let mut rest = src;
@@ -98,12 +93,25 @@ fn strip_css(src: &str) -> String {
             .map_or("", |(_, after)| after);
     }
     bare.push_str(rest);
-    let mut out: String = bare
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut out = String::with_capacity(bare.len());
+    let (mut space, mut prev) = (false, ' ');
+    for c in bare.chars() {
+        if c.is_whitespace() {
+            space = true;
+            continue;
+        }
+        if space
+            && !out.is_empty()
+            && !matches!(prev, '{' | '}' | ';' | ',' | '>' | ':')
+            && !matches!(c, '{' | '}' | ';' | ',' | '>')
+        {
+            out.push(' ');
+        }
+        space = false;
+        out.push(c);
+        prev = c;
+    }
+    let mut out = out.replace(";}", "}");
     out.push('\n');
     out
 }
@@ -145,11 +153,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn css_loses_comments_and_indentation_but_no_rule() {
-        let src = "/* head */\n.a { color: red; }\n\n  @media (x) {\n    .b { top: 0; } /* tail */\n  }\n";
+    fn css_loses_comments_and_whitespace_but_no_rule() {
+        let src = "/* head */\n.a { color: red; margin: 0 1px; }\n\n  @media (x) {\n    .b > .c :hover { top: 0; } /* tail */\n  }\n";
         assert_eq!(
             strip_css(src),
-            ".a { color: red; }\n@media (x) {\n.b { top: 0; }\n}\n"
+            ".a{color:red;margin:0 1px}@media (x){.b>.c :hover{top:0}}\n"
         );
         assert_eq!(strip_css("a{} /* open"), "a{}\n");
     }
