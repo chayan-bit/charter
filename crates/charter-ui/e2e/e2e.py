@@ -574,6 +574,8 @@ def search_flow(browser, axe_src):
     page.keyboard.press("Enter")
     page.wait_for_url(re.compile(r".*/search\?q=smaller"))
     page.wait_for_selector("#h-commits")
+    cur = page.evaluate("[...document.querySelectorAll('.primary a[aria-current]')].filter(a => a.offsetParent).map(a => a.textContent.trim())")
+    rec("the top bar marks Search as the current page", scope, cur == ["Search"], str(cur))
     rec("Jump to finds a commit subject, Local only asks Arkiv nothing", scope,
         "smaller main" in page.inner_text("main") and page.locator("#arkiv").count() == 0 and not asked, str(asked))
     page.goto(f"{base}/settings", wait_until="load")
@@ -643,6 +645,12 @@ def layout_checks(page, name, scope, vp, rid):
         rec("verification seal fits its two lines", scope, m["vpH"] is not None and m["vpH"] <= 56, f'height {m["vpH"]}')
         if vp == "phone":
             rec("phone: content starts in the first 360 px", scope, m["repoBottom"] <= 360, f'repo header ends at y={m["repoBottom"]}')
+    if vp == "phone":
+        cov = page.evaluate("""(() => { window.scrollTo(0, document.documentElement.scrollHeight);
+          const n = document.querySelector('.botnav'), m = document.querySelector('main');
+          const end = m.getBoundingClientRect().bottom - parseFloat(getComputedStyle(m).paddingBottom);
+          const out = [Math.round(end), Math.round(n.getBoundingClientRect().top)]; window.scrollTo(0, 0); return out; })()""")
+        rec("phone: the bottom nav never covers the end of the page", scope, cov[0] <= cov[1], f"content ends at {cov[0]}, nav starts at {cov[1]}")
     if name == "repo":
         rec("README images resolve to /raw/ and load", scope,
             any(f"/r/{rid}/raw/main/docs/diagram.png" == s and w > 0 for s, w in m["imgs"]), str(m["imgs"]))
@@ -815,7 +823,8 @@ def perf(cookie, pages):
         gz = len(gzip.compress(body)) + gz_css + (gz_search_css if b"/assets/search.css" in body else 0)
         PAGE_STATS.setdefault(name, {}).update(
             {"p50_ms": round(p50, 1), "max_ms": round(p99, 1), "html_bytes": len(body), "html_css_gz_bytes": gz})
-        big_ok = name in ("blob-long", "commit-long", "blob-wide")  # inherently large content
+        # Inherently large content; patch-files carries a comment box per diff line (audit 1.5, open).
+        big_ok = name in ("blob-long", "commit-long", "blob-wide", "patch-files")
         rec("HTML + CSS under 20 KB gzipped (plan section 6)", name, gz <= 20_000,
             f"{gz} B gzipped ({len(body)} B raw)", warn=big_ok)
         rec("server time p50 < 20 ms, max of up to 15 < 50 ms", name, p50 < 20 and p99 < 50,
