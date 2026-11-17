@@ -18,7 +18,7 @@
 </article>
 <div class="sec">
 {% for f in files %}
-<details class="file" open data-copy="{{ f.path }}">
+<details class="file"{% if f.lines.len() <= 300 %} open{% endif %} data-copy="{{ f.path }}">
 <summary><code>{% if let Some(from) = f.from %}{{ from }} to {% endif %}{{ f.path }}</code><span class="delta"><span class="add">+{{ f.add }}</span><span class="del">-{{ f.del }}</span></span></summary>
 {% if f.binary %}<p class="muted codefoot">Binary file.</p>{% else %}
 <div class="scroll" tabindex="0" role="region" aria-label="Changes to {{ f.path }}">

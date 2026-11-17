@@ -10,16 +10,9 @@
 {% if !outdated.is_empty() %}<details class="outdated"><summary>{{ outdated.len() }} outdated comment{% if outdated.len() != 1 %}s{% endif %} <span class="dim">made on an older version or a line this diff does not show</span></summary>{% for n in outdated %}{% include "note.html" %}{% endfor %}</details>{% endif %}
 <div class="sec">
 {% for fv in files %}{% let f = fv.f %}
-<details class="file" open data-copy="{{ f.path }}">
-<summary><code>{% if let Some(from) = f.from %}{{ from }} to {% endif %}{{ f.path }}</code><span class="delta"><span class="add">+{{ f.add }}</span><span class="del">-{{ f.del }}</span></span></summary>
-{% if f.binary %}<p class="muted codefoot">Binary file.</p>{% else %}
-<div class="scroll" tabindex="0" role="region" aria-label="Changes to {{ f.path }}">
-<table class="code diff"><tbody>
-{% for row in fv.rows %}{% let d = row.d %}{% if d.kind == '@' %}<tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="hunk" colspan="2">{{ d.text }}</td></tr>{% else %}<tr{% if d.kind == '+' %} class=a{% else if d.kind == '-' %} class=d{% endif %}><td class=ln>{% if let Some(n) = d.old %}{{ n }}{% endif %}<td class=ln>{% if let Some(n) = d.new %}{{ n }}{% endif %}<td class=sg><td class=lc>{{ self.esc(d.text)|safe }}{% if l.writes %}{% let (sd, n) = self.anchor(d) %}<details class=ac><summary title="Comment on line {{ n }}" aria-label="Comment on line {{ n }}">+</summary><span class=acbox><textarea name="c.{{ fv.idx }}.{{ sd }}.{{ n }}" form=rv rows=3 placeholder="Comment on line {{ n }}"></textarea>{% if sd == "n" %}<textarea class=mono name="s.{{ fv.idx }}.n.{{ n }}" form=rv rows=2 placeholder="Suggested replacement for this line (optional)"></textarea>{% endif %}</span></details>{% endif %}</tr>{% if !row.notes.is_empty() %}<tr class=ic><td colspan=4>{% for n in row.notes %}{% include "note.html" %}{% endfor %}</tr>{% endif %}{% endif %}
-{% endfor %}
-</tbody></table>
-</div>
-{% endif %}
+<details class="file" id="f{{ fv.idx }}"{% if !fv.lazy %} open{% endif %} data-copy="{{ f.path }}">
+<summary><code>{% if let Some(from) = f.from %}{{ from }} to {% endif %}{{ f.path }}</code>{% if fv.notes() > 0 %}<span class="chip">{{ fv.notes() }} comment{% if fv.notes() != 1 %}s{% endif %}</span>{% endif %}<span class="delta"><span class="add">+{{ f.add }}</span><span class="del">-{{ f.del }}</span></span></summary>
+{% if f.binary %}<p class="muted codefoot">Binary file.</p>{% else if fv.lazy %}<div class="lazy" hx-get="?file={{ fv.idx }}" hx-trigger="toggle from:closest details once" hx-swap="outerHTML" hx-boost="false"><p class="codefoot">{{ fv.rows.len() }} lines load when you open this file. <a href="?open={{ fv.idx }}#f{{ fv.idx }}" hx-boost="false">Load it without scripts</a></p></div>{% else %}{% include "diff_table.html" %}{% endif %}
 </details>
 {% endfor %}
 {% if hidden > 0 %}<p class="more">{{ hidden }} more diff lines. <a href="?all=1">Show all</a></p>{% endif %}

@@ -41,6 +41,18 @@ pub struct FileView {
     pub idx: usize,
     pub f: FileDiff,
     pub rows: Vec<Row>,
+    /// Closed, with its lines fetched when it is opened (`?file=<idx>`).
+    pub lazy: bool,
+}
+
+/// Files with more rows than this load on demand, so a big patch is one small page.
+const LAZY_ROWS: usize = 60;
+
+impl FileView {
+    /// Inline comments already placed on this file's lines.
+    pub fn notes(&self) -> usize {
+        self.rows.iter().map(|r| r.notes.len()).sum()
+    }
 }
 
 #[derive(Template)]
@@ -57,6 +69,15 @@ pub struct Files {
     pub missing: bool,
 }
 
+/// The side (`n` new, `o` old) and line number a comment on row `d` names.
+fn anchor(d: &Line) -> (&'static str, u32) {
+    match (d.kind, d.new, d.old) {
+        ('-', _, Some(o)) => ("o", o),
+        (_, Some(n), _) => ("n", n),
+        (_, _, o) => ("o", o.unwrap_or(0)),
+    }
+}
+
 impl Files {
     pub fn short(&self, s: &str) -> String {
         short(s)
@@ -67,19 +88,36 @@ impl Files {
     pub fn back(&self) -> String {
         format!("/r/{}/patches/{}/files", self.r.hex, self.t.id)
     }
-    /// The side (`n` new, `o` old) and line number a comment on row `d` names.
     pub fn anchor(&self, d: &Line) -> (&'static str, u32) {
-        match (d.kind, d.new, d.old) {
-            ('-', _, Some(o)) => ("o", o),
-            (_, Some(n), _) => ("n", n),
-            (_, _, o) => ("o", o.unwrap_or(0)),
-        }
+        anchor(d)
+    }
+}
+
+/// The lines of one file, the answer to `?file=<idx>`.
+#[derive(Template)]
+#[template(path = "files_frag.html")]
+pub struct FileFrag {
+    pub l: Layout,
+    pub r: Head,
+    pub fv: FileView,
+}
+
+impl FileFrag {
+    pub fn esc(&self, s: &str) -> String {
+        crate::highlight::escape_text(s)
+    }
+    pub fn anchor(&self, d: &Line) -> (&'static str, u32) {
+        anchor(d)
     }
 }
 
 #[derive(serde::Deserialize)]
 pub struct All {
     all: Option<String>,
+    /// A file to render open in the page (the no-script way to read a lazy file).
+    open: Option<usize>,
+    /// A file whose lines alone are wanted.
+    file: Option<usize>,
 }
 
 fn field<'a>(e: Option<&'a Entry>, k: &str) -> Option<&'a str> {
@@ -143,7 +181,8 @@ fn place(t: &Thread, head: &str, files: &mut [FileView]) -> Vec<Note> {
     outdated
 }
 
-fn files_page(app: &App, pref: &Pref, r: &Repo, id: &str, all: bool) -> Response {
+fn files_page(app: &App, pref: &Pref, r: &Repo, id: &str, q: &All) -> Response {
+    let all = q.all.is_some();
     let ops = r.ops();
     let found = fold::threads(&ops, fold::PATCH, r.view.as_ref())
         .into_iter()
@@ -163,14 +202,34 @@ fn files_page(app: &App, pref: &Pref, r: &Repo, id: &str, all: bool) -> Response
         .into_iter()
         .enumerate()
         .map(|(idx, mut f)| {
-            let rows = std::mem::take(&mut f.lines)
+            let rows: Vec<Row> = std::mem::take(&mut f.lines)
                 .into_iter()
                 .map(|d| Row { d, notes: vec![] })
                 .collect();
-            FileView { idx, f, rows }
+            let lazy = rows.len() > LAZY_ROWS && q.open != Some(idx);
+            FileView { idx, f, rows, lazy }
         })
         .collect();
     let outdated = place(&t, &head, &mut files);
+    for f in &mut files {
+        f.lazy = f.lazy && f.notes() == 0;
+    }
+    if let Some(i) = q.file {
+        let Some(fv) = files.into_iter().find(|f| f.idx == i) else {
+            return error_page(
+                app,
+                pref,
+                StatusCode::NOT_FOUND,
+                "No such file in this patch.",
+            );
+        };
+        let (l, h) = frame(app, pref, r, "patches", "");
+        return html(&FileFrag {
+            l,
+            r: h,
+            fv: FileView { lazy: false, ..fv },
+        });
+    }
     let (mut l, h) = frame(app, pref, r, "patches", &format!("Files of {}", t.title));
     l.crumbs
         .push((format!("/r/{}/patches", r.hex), "patches".into()));
@@ -196,7 +255,7 @@ pub async fn files(
     Query(q): Query<All>,
 ) -> Response {
     blocking(move || match open(&app, &pref, &rid) {
-        Ok(r) => files_page(&app, &pref, &r, &id, q.all.is_some()),
+        Ok(r) => files_page(&app, &pref, &r, &id, &q),
         Err(e) => e,
     })
     .await

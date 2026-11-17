@@ -1,0 +1,6 @@
+<div class="scroll" tabindex="0" role="region" aria-label="Changes to {{ fv.f.path }}">
+<table class="code diff"><tbody>
+{% for row in fv.rows %}{% let d = row.d %}{% if d.kind == '@' %}<tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="hunk" colspan="2">{{ d.text }}</td></tr>{% else %}<tr{% if d.kind == '+' %} class=a{% else if d.kind == '-' %} class=d{% endif %}><td class=ln>{% if let Some(n) = d.old %}{{ n }}{% endif %}<td class=ln>{% if let Some(n) = d.new %}{{ n }}{% endif %}<td class=sg><td class=lc>{{ self.esc(d.text)|safe }}{% if l.writes %}{% let (sd, n) = self.anchor(d) %}<details class=ac><summary aria-label="Comment on line {{ n }}">+</summary><span class=acbox><textarea name="c.{{ fv.idx }}.{{ sd }}.{{ n }}" form=rv rows=3 placeholder="Comment on line {{ n }}"></textarea>{% if sd == "n" %}<textarea class=mono name="s.{{ fv.idx }}.n.{{ n }}" form=rv rows=2 placeholder="Suggested replacement for this line (optional)"></textarea>{% endif %}</span></details>{% endif %}</tr>{% if !row.notes.is_empty() %}<tr class=ic><td colspan=4>{% for n in row.notes %}{% include "note.html" %}{% endfor %}</tr>{% endif %}{% endif %}
+{% endfor %}
+</tbody></table>
+</div>
