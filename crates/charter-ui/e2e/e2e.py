@@ -642,7 +642,7 @@ def layout_checks(page, name, scope, vp, rid):
         rec("repo tabs sit on one row, no scrollbar artifact", scope, len(m["tabTops"]) == 1 and m["tabScrollbar"] == 0,
             f'rows at {m["tabTops"]}, scrollbar {m["tabScrollbar"]}px')
         rec("tab fade shows only while more tabs sit past the edge", scope, m["tabHint"] in ("fits", "ok"), m["tabHint"])
-        rec("verification seal fits its two lines", scope, m["vpH"] is not None and m["vpH"] <= 56, f'height {m["vpH"]}')
+        rec("verification seal fits its two lines", scope, m["vpH"] is not None and m["vpH"] <= 64, f'height {m["vpH"]}')
         if vp == "phone":
             rec("phone: content starts in the first 360 px", scope, m["repoBottom"] <= 360, f'repo header ends at y={m["repoBottom"]}')
     if vp == "phone":

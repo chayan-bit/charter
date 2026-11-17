@@ -176,3 +176,39 @@ Fixed in 8f10adc: the default branch of a repo with no commits shows the empty l
 - CSS: `app.css` 45,930 B (10,180 B gzipped), `search.css` 1,366 B on the search page only.
 - JS: `htmx.min.js` 52,182 B, `keys.js` 9,315 B, `live.js` 2,393 B; fonts 63,408 B.
 - Server time (debug build, p50): repo page 2.5 ms, issue 2.7 ms, patch files 15.7 ms, blob-long 393 ms.
+
+## 5. v4 direction: ink and signal
+
+Audit of v3 against the design-taste checklist.
+v3 is cleaner than v2 but reads as a GitHub reskin: a grey canvas with white bordered cards, a GitHub tab bar and file table, blue links, pill badges everywhere.
+The product (cryptographic verification) is a 40 px tinted box in the corner, so it does not set the identity of the page.
+Concrete defects the review found, all confirmed on the v3 screenshots:
+
+- The "Verified / checked just now" badge is a boxed pill in the top right, detached from the content it vouches for.
+- The address wraps mid-string in the sidebar.
+- "Permanent on Arkiv" and the "Public" badge say the same thing twice.
+- Every file row repeats the same truncated commit message, and the list reads as noise.
+- The maintainer is "you" plus a bare hex, with no hint what the hex is.
+- The sidebar is three short text blocks with a screenful of dead space under them.
+- Release sha256 values wrap, and the patch files page is about 1 MB and 6,000 px tall.
+
+Dials: DESIGN_VARIANCE 5, MOTION_INTENSITY 3, VISUAL_DENSITY 7.
+Reading it as: a local developer tool for git users who care about provenance, with a calm and dense language, leaning toward native CSS, Geist and Geist Mono, and one signal colour.
+
+Direction, in five lines:
+
+1. Palette: one flat canvas (`#fbfcfb`, near-black `#0b0d0c` in dark) with green-tinted greys, hairlines instead of cards, no page-background panels. One accent, a deep signal green (`#0a6b4d`, `#3dd29a` in dark) that means "proven" and also marks what you can act on. Warn amber, error red and merged violet are status colours only.
+2. Type: Geist for text and Geist Mono (zero slashed) for hashes, counts and addresses, both self-hosted variable fonts (53 KB together, 10 KB less than v3). Body 14 px, titles 24 px at -0.025em, small labels 12 px sentence case.
+3. Shape and spacing: three radii only (4 chips and keys, 6 controls, 12 dialogs and the band); 4 px grid; rows 34 to 40 px; lists and tables are flush with a hairline above and below, not boxed.
+4. Signature element: the stamp (a solid green square with a check; amber, red or hollow for the other states) and the provenance band under the repo title. The band is a full-width signature line: stamp, state, and the head hash, block number and signing quorum as mono cells. The repo list is a column of stamps. Nothing else on the page is green-filled, so verification is the first thing the eye lands on.
+5. Information design: one fact once. Visibility lives in the header, storage and network in a spec sheet, the address is one copyable line that never wraps, each file row shows a commit message only when it differs from the latest-commit line above it, and large diffs start collapsed.
+
+Constraints kept: every URL, feature and htmx behaviour; one accent; WCAG AA in both themes (palette pairs checked, axe in the e2e); loading, empty and error states; `prefers-reduced-motion`; no gradients, glows or emoji; no runtime CDN.
+
+### Measured result (kratos, debug e2e and release render bench)
+
+- Fixed: boxed pill (now the provenance band), address wrapping, public and permanent duplication, repeated file-row messages, sha256 wrapping, patch files page size, sparse sidebar, bare maintainer hex.
+- Patch files page: 964,511 B to 13,191 B of HTML (68,203 B to 14,802 B with CSS, gzipped); large files load on open and a no-JS link opens them.
+- Every other page: HTML plus CSS gzipped within +0.3 percent of v3 (+40 to +110 B); fonts are 10 KB lighter.
+- Server time (release, 60 runs, p50): unchanged within 0.01 ms on every page except the repo home, 0.23 to 0.35 ms, far under the 20 ms budget.
+- e2e: 2,868 checks, 0 failures; axe WCAG 2.1 A and AA 0 violations on 81 page and theme pairs. The three warnings (blob-long, commit-long size and the debug-build time of blob-long) are the stress pages and predate v4.
