@@ -32,7 +32,9 @@ TAB_CAP = 400
 SHOT_MAX_H = 6000  # full-page screenshots of taller pages are clipped to this
 
 THEMES = ("light", "dark")
-VIEWPORTS = {"desktop": (1280, 800), "phone": (390, 844)}
+VIEWPORTS = {"desktop": (1280, 800), "wide": (1440, 900), "phone": (390, 844)}
+# Flows that write or fetch run at the two extremes only; every page is still shot at all three.
+FLOW_VPS = ("desktop", "phone")
 
 
 def get(path, cookie=None, host=None, method="GET", headers=None):
@@ -95,7 +97,7 @@ def rec(name, scope, ok, detail="", warn=False):
 def discover(cookie):
     s, _, body, _ = get("/", cookie)
     assert s == 200, f"/ -> {s}"
-    rid = re.search(r"/r/([0-9a-f]{64})", body.decode()).group(1)
+    rid = re.search(r'href="/r/([0-9a-f]{64})"[^>]*>\s*charter-demo', body.decode()).group(1)
     r = f"/r/{rid}"
     log = get(f"{r}/log/main", cookie)[2].decode()
     shas = list(dict.fromkeys(re.findall(r"/commit/([0-9a-f]{40})", log)))
@@ -121,10 +123,13 @@ def discover(cookie):
         ("issue", f"{r}/issues/{issue}", ["crashes"], 200),
         ("patches", f"{r}/patches", ["Fix the crash"], 200),
         ("patch", f"{r}/patches/{patch}", ["Fix the crash"], 200),
+        ("patch-files", f"{r}/patches/{patch}/files", ["Fix the crash", "main.rs"], 200),
+        ("issues-filtered", f"{r}/issues?label=nope", ["No issues match"], 200),
         ("releases", f"{r}/releases", ["v0.1.0"], 200),
         ("issue-new", f"{r}/issues/new", ["New issue", "Title"], 200),
         ("release-new", f"{r}/releases/new", ["New release", "Artifacts"], 200),
         ("program", f"{r}/rules", ["Rules and CI", "Bounties"], 200),
+        ("manage", f"{r}/manage", ["Manage repository", "Hand over to"], 200),
         ("wallet", "/wallet", ["Balance", "Spent from this computer"], 200),
         ("settings", "/settings", ["Peer names", "Small writes", "Search scope", "Theme"], 200),
         ("search", "/search", ["Search", "Local only", "Search 1 repository"], 200),
@@ -416,7 +421,7 @@ def writes(browser, pages, axe_src, cookie):
     issue_path = next(p for n, p, *_ in pages if n == "issue")
     issue_url = f"http://{HOST}:{PORT}{issue_path}"
     for theme in THEMES:
-        for vp in VIEWPORTS:
+        for vp in FLOW_VPS:
             scope = f"write/{theme}/{vp}"
             ctx, page, sink = context(browser, theme, vp)
             comment_to_confirm(page, issue_url, "never sent")
@@ -469,7 +474,7 @@ def sent_status(page, sink, scope, theme, vp, axe_src):
 def write_error(browser, pages):
     """A boosted write the server refuses (400) shows its error page, not a silent no-op."""
     repo_path = next(p for n, p, *_ in pages if n == "repo")
-    for vp in VIEWPORTS:
+    for vp in FLOW_VPS:
         scope = f"write-error/light/{vp}"
         ctx, page, sink = context(browser, "light", vp)
         page.goto(f"http://{HOST}:{PORT}{repo_path}/manage", wait_until="load")
@@ -575,7 +580,7 @@ def search_flow(browser, axe_src):
     page.check("input[name=search][value=arkiv]")
     page.click("button:has-text('Save settings')")
     page.wait_for_selector("text=Saved.")
-    for vp in VIEWPORTS:
+    for vp in FLOW_VPS:
         vscope = f"search/light/{vp}"
         c2, pg, sk = context(browser, "light", vp)
         reqs = []
@@ -817,6 +822,75 @@ def perf(cookie, pages):
             f"p50 {p50:.1f} ms, max {p99:.1f} ms" + (" (debug build)" if DEBUG_BUILD else ""), warn=DEBUG_BUILD)
 
 
+BROKEN_RID = "0e" * 32  # a cache directory with no repo behind it on the chain: its first sync fails
+
+
+def edge_states(browser, axe_src):
+    """Edge states (docs/p6/ui-v3-audit.md): a repo whose first sync fails says why on the list,
+    in the header and on its page, and Retry runs a round at once; an empty repo shows its
+    empty states. Runs last: it adds two repos."""
+    base = f"http://{HOST}:{PORT}"
+    home = Path(os.environ["CHARTER_HOME"])
+    subprocess.run(["git", "init", "-q", "--bare", str(home / "repos" / BROKEN_RID / "git")], check=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    out = subprocess.run(["chart", "init", "--name", "empty-demo", "--description", "A repo with no commits yet"],
+                         env=env, capture_output=True, text=True, check=True).stdout
+    url = re.search(r"^url: *(\S+)", out, re.M).group(1)
+    clone = Path(os.environ["E2E_WORK"]) / "empty-clone"
+    subprocess.run(["git", "clone", "-q", url, str(clone)], env=env, capture_output=True)
+    cookie = session_cookie()[0]
+    deadline = time.monotonic() + 30
+    body = b""
+    while time.monotonic() < deadline:
+        body = get("/", cookie)[2]
+        if b"empty-demo" in body and b"Sync failed" in body:
+            break
+        time.sleep(0.25)
+    rec("a failed first sync shows on the repo list, with its reason", "edge/home",
+        b"Sync failed" in body and b"empty-demo" in body, body.decode(errors="replace")[:0])
+    m = re.search(rb'href="/r/([0-9a-f]{64})"[^>]*>\s*empty-demo', body)
+    empty = f"/r/{m.group(1).decode()}" if m else None
+    broken = f"/r/{BROKEN_RID}"
+    targets = [("edge-home", "/"), ("edge-broken", broken)]
+    if empty:
+        targets += [("empty-repo", empty), ("empty-log", f"{empty}/log/main"), ("empty-issues", f"{empty}/issues"),
+                    ("empty-patches", f"{empty}/patches"), ("empty-releases", f"{empty}/releases"), ("empty-rules", f"{empty}/rules")]
+    for theme in THEMES:
+        for vp in VIEWPORTS:
+            ctx, page, sink = context(browser, theme, vp)
+            for name, path in targets:
+                scope = f"{name}/{theme}/{vp}"
+                for k in sink:
+                    sink[k].clear()
+                resp = page.goto(base + path, wait_until="load")
+                page.wait_for_timeout(120)
+                rec("status", scope, resp.status == 200, str(resp.status))
+                state_checks(page, sink, scope)
+                shot(page, name, theme, vp)
+                if vp == "desktop":
+                    run_axe(page, axe_src, name, theme)
+            ctx.close()
+    ctx, page, sink = context(browser, "light", "desktop", live=True)
+    page.goto(base + broken, wait_until="load")
+    page.wait_for_timeout(200)
+    head = page.locator("header.top").inner_text()
+    rec("the header says how many repos failed to sync", "edge/header", "failed" in head.lower(), head[:120])
+    text = page.inner_text("main")
+    rec("a failed repo page shows the sync error", "edge/broken", "Sync failed" in text, text[:200])
+    retry = page.get_by_role("button", name="Retry now")
+    ok = retry.count() == 1
+    if ok:
+        retry.click()
+        try:
+            page.wait_for_selector("text=Retrying", timeout=5000)
+        except Exception:
+            pass
+        page.wait_for_load_state("load")
+        state_checks(page, sink, "edge/retry")
+    rec("Retry now runs a sync round at once", "edge/retry", ok, "")
+    ctx.close()
+
+
 def main():
     from playwright.sync_api import sync_playwright
 
@@ -854,6 +928,7 @@ def main():
         write_error(browser, pages)
         live_update(browser, pages)  # last: it adds a branch
         search_flow(browser, axe_src)  # after the visits: Fetch adds a repo to the list
+        edge_states(browser, axe_src)  # last: it adds a broken repo and an empty one
         browser.close()
     write_reports(first)
     fails = [c for c in CHECKS if c["status"] == "fail"]
