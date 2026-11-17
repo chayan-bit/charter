@@ -924,21 +924,24 @@ def main():
         rec("first repo page after server start < 1 s", "chart ui", False, "first-page timing did not run")
     rid, pages = discover(cookie)
     print(f"repo {rid[:12]}..., {len(pages)} pages")
-    security(cookie, rid, pages)
-    perf(cookie, pages)
+    only_edge = os.environ.get("E2E_ONLY") == "edge"  # repeat the edge states alone (flake hunting)
+    if not only_edge:
+        security(cookie, rid, pages)
+        perf(cookie, pages)
     with sync_playwright() as p:
         try:
             browser = p.chromium.launch(channel="chrome", headless=True)
         except Exception:  # nix-provided browsers, if the system Chrome is missing
             browser = p.chromium.launch(headless=True)
-        nojs(browser, pages)
-        header_1024(browser, pages)
-        visit_all(browser, pages, axe_src, cookie, rid)
-        writes(browser, pages, axe_src, cookie)  # last: the comments change the issue page
-        writes_nojs(browser, pages, cookie)
-        write_error(browser, pages)
-        live_update(browser, pages)  # last: it adds a branch
-        search_flow(browser, axe_src)  # after the visits: Fetch adds a repo to the list
+        if not only_edge:
+            nojs(browser, pages)
+            header_1024(browser, pages)
+            visit_all(browser, pages, axe_src, cookie, rid)
+            writes(browser, pages, axe_src, cookie)  # last: the comments change the issue page
+            writes_nojs(browser, pages, cookie)
+            write_error(browser, pages)
+            live_update(browser, pages)  # last: it adds a branch
+            search_flow(browser, axe_src)  # after the visits: Fetch adds a repo to the list
         edge_states(browser, axe_src)  # last: it adds a broken repo and an empty one
         browser.close()
     write_reports(first)
