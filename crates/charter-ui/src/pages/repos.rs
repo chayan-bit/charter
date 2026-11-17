@@ -44,7 +44,9 @@ impl Index {
     pub fn attention(&self) -> Vec<&RepoRow> {
         self.repos
             .iter()
-            .filter(|r| r.verify.state == "equivocation" || r.verify.error.is_some())
+            .filter(|r| {
+                r.verify.state == "equivocation" || (r.verify.error.is_some() && !r.verify.expired)
+            })
             .collect()
     }
 }

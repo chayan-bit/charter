@@ -223,6 +223,10 @@ pub struct RepoView {
     /// The identity head is archived (issue #63); left out of the file when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// The earliest block at which a ref, manifest or anchor the repo needs expires on Arkiv,
+    /// read from the rows the round already fetched (no extra query).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_expiry: Option<u64>,
 }
 
 impl Cobs {
@@ -274,6 +278,12 @@ impl RepoView {
             patches: 0,
             revoked_leaves: 0,
             archived: id.is_archived(),
+            min_expiry: view
+                .peers
+                .values()
+                .flat_map(|p| p.refs.iter().chain(&p.manifests).chain(&p.anchors))
+                .map(|o| o.expires_at)
+                .min(),
         }
     }
 }

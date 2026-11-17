@@ -532,6 +532,18 @@ async fn a_first_sync_that_fails_shows_on_the_repo_list_with_its_reason() {
         assert!(index.contains(want), "{want}: {index}");
     }
     assert!(!index.contains("Checked never"), "{index}");
+    // The repo page says it once: one band with Retry now, no second notice, no Clone.
+    let hex = hex32(&s.rid);
+    let page = send(s.router(), req(&format!("/r/{hex}"))).await.text();
+    assert_eq!(page.matches("Retry now").count(), 1, "{page}");
+    assert!(
+        page.contains("Sync failed") && !page.contains("notice bad"),
+        "{page}"
+    );
+    assert!(
+        !page.contains("Clone with git"),
+        "nothing was verified to clone"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -574,6 +586,19 @@ async fn an_expired_repo_says_so_then_costs_one_probe_per_check() {
     let first = s.run(0, 1).await;
     let r = s.shared.round(&s.rid);
     assert!(r.hint.is_some_and(|h| h.contains("expired")), "{r:?}");
+    assert!(r.expired, "{r:?}");
+    let hex = hex32(&s.rid);
+    let index = send(s.router(), req("/")).await.text();
+    assert!(index.contains("Expired on Arkiv"), "{index}");
+    assert!(
+        !index.contains("Needs attention"),
+        "permanent expiry is no banner: {index}"
+    );
+    let page = send(s.router(), req(&format!("/r/{hex}"))).await.text();
+    assert!(
+        page.contains("Expired on Arkiv") && !page.contains("notice bad"),
+        "{page}"
+    );
     let later = s.run(1, 601).await;
     eprintln!("expired repo on screen: {first} queries at first, then {later} in 10 min");
     assert!(later <= 62, "one probe every 10 s, no full rounds: {later}");

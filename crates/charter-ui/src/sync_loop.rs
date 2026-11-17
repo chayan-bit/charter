@@ -67,6 +67,8 @@ pub struct Round {
     pub error: Option<String>,
     /// What the error means for the user, when it is one they can act on or wait out.
     pub hint: Option<&'static str>,
+    /// The error is a record that expired on Arkiv: only its maintainers can bring it back.
+    pub expired: bool,
     /// When the last round or probe failed (ms).
     pub failed_ms: u64,
     /// A full round is in flight (a probe alone is not).
@@ -293,7 +295,10 @@ impl Shared {
 
     pub fn recorded(&self, rid: Rid, r: Result<Outcome, UiError>) {
         self.record(rid, |s| match r {
-            Ok(Outcome::Synced(_)) => (s.error, s.hint, s.ok_ms) = (None, None, now_ms()),
+            Ok(Outcome::Synced(_)) => {
+                (s.error, s.hint, s.ok_ms) = (None, None, now_ms());
+                s.expired = false;
+            }
             Ok(Outcome::Busy) => s.busy += 1,
             Err(e) => s.fail(&e),
         });
@@ -311,7 +316,14 @@ pub struct Health {
 impl Round {
     fn fail(&mut self, e: &UiError) {
         (self.error, self.hint, self.failed_ms) = (Some(e.to_string()), hint(e), now_ms());
+        self.expired = expired(e);
     }
+}
+
+/// A record the repo needs is gone from Arkiv (its lifetime ran out).
+pub fn expired(e: &UiError) -> bool {
+    use charter_core::ErrorCode as C;
+    matches!(e, UiError::Sync(e) if matches!(e.code(), C::NotLive | C::IdNotLive | C::ControlNotLive))
 }
 
 /// A plain sentence for the sync errors a user can act on or wait out.

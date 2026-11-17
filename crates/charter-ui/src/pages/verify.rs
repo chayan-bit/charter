@@ -34,6 +34,8 @@ pub struct Verify {
     pub error: Option<String>,
     /// What the error means, in a sentence, when it is one to act on or wait out.
     pub hint: Option<&'static str>,
+    /// The last error is a record that expired on Arkiv.
+    pub expired: bool,
     /// `3 min ago`: when the last round or probe failed.
     pub failed: String,
     /// A full round is in flight, or Retry now is queued.
@@ -94,6 +96,7 @@ impl Verify {
             head_block: v.head_block,
             error: round.error.clone(),
             hint: round.hint,
+            expired: round.expired,
             failed: ago(round.failed_ms),
             running: round.running,
             retry: round.retry,
@@ -104,6 +107,14 @@ impl Verify {
     fn unsynced(round: &Round) -> Self {
         let error = round.error.clone();
         let (state, word, sub, heading, summary) = match &error {
+            Some(_) if round.expired => (
+                "failed",
+                "Expired on Arkiv",
+                "nothing checked",
+                "A record this repo needs is no longer on Arkiv",
+                "Only its maintainers can publish it again. Until then this computer cannot \
+                 rebuild or check it.",
+            ),
             Some(_) => (
                 "failed",
                 "Sync failed",
@@ -142,6 +153,7 @@ impl Verify {
             head_block: 0,
             error,
             hint: round.hint,
+            expired: round.expired,
             failed: ago(round.failed_ms),
             running: round.running,
             retry: round.retry,

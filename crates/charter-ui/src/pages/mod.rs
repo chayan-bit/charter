@@ -397,6 +397,8 @@ pub struct Head {
     pub pushed: Option<(u64, String)>,
     /// Archived (issue #63): advisory, so honest clients stop writing to it.
     pub archived: bool,
+    /// When the earliest entity the repo needs runs out on Arkiv: `(date, class)`.
+    pub renew: Option<(String, &'static str)>,
 }
 
 /// The newest signed head of a view: `(block, peer)`.
@@ -405,6 +407,23 @@ pub fn last_push(v: Option<&RepoView>) -> Option<(u64, String)> {
         .flat_map(|v| &v.peers)
         .filter_map(|p| p.head.as_ref().map(|h| (h.block, p.nid.clone())))
         .max()
+}
+
+/// The date of the earliest expiry among what the repo needs, read off the cached view, and
+/// how loud to be about it: `bad` once passed, `warn` under 30 days.
+fn renew_by(v: &RepoView) -> Option<(String, &'static str)> {
+    const MONTH_MS: u64 = 30 * 86_400_000;
+    let ahead = v.min_expiry?.saturating_sub(v.head_block);
+    let at = v
+        .synced_ms
+        .saturating_add(ahead.saturating_mul(people::BLOCK_MS));
+    let left = at.saturating_sub(crate::sync_loop::now_ms());
+    let class = match left {
+        0 => "bad",
+        l if l < MONTH_MS => "warn",
+        _ => "",
+    };
+    Some((people::date(at), class))
 }
 
 impl Head {
@@ -430,6 +449,7 @@ impl Head {
             clock: Clock::of(v),
             pushed: last_push(v),
             archived: v.is_some_and(|v| v.archived),
+            renew: v.and_then(renew_by),
             people,
         }
     }
