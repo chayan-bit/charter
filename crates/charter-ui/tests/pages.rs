@@ -72,21 +72,24 @@ async fn tree_lists_directories_first_and_walks_down() {
     );
     assert!(dir < file, "directories first");
     assert!(h.contains("rel=\"up\""));
-    // Each entry names the commit that last changed it, subject escaped.
     let row = |name: &str| {
         let at = h.find(&format!(">{name}<")).expect("row");
-        h[at..].split("</tr>").next().expect("tr").to_owned()
+        h[at..].split("</li>").next().expect("li").to_owned()
     };
     let main_rs = row("main.rs");
     assert!(
-        main_rs.contains(&format!("/commit/{}\"", f.main)),
-        "{main_rs}"
+        !main_rs.contains("/commit/"),
+        "same commit as the strip: {main_rs}"
     );
-    assert!(
-        main_rs.contains(">fix: &#60;smaller&#62; main</a>"),
-        "{main_rs}"
+    // The latest-commit line above the list names it, subject escaped; a row whose last
+    // commit is that one does not repeat the message, one with another commit shows its own.
+    assert_eq!(
+        h.matches(">fix: &#60;smaller&#62; main</a>").count(),
+        1,
+        "{h}"
     );
     assert!(row("deep/").contains(&format!("/commit/{}\"", f.first)));
+    assert!(row("deep/").contains(">feat: first</a>"));
     let h = page(&format!("/r/{}/tree/{}/src/deep", f.hex, f.first)).await;
     assert!(h.contains("x.txt"));
     let r = get(&format!("/r/{}/tree/main/README.md", f.hex)).await;

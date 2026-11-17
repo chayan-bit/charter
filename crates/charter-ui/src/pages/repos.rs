@@ -174,16 +174,20 @@ impl Home {
     pub fn age(&self, secs: &i64) -> String {
         super::age(*secs)
     }
+    /// An entry's last commit is not the one the "latest commit" line above the list already shows.
+    pub fn differs(&self, c: &CommitRow) -> bool {
+        !self.last.as_ref().is_some_and(|l| l.oid == c.oid)
+    }
     /// Path of a root entry (`entries.html` is shared with the tree page).
     pub fn join(&self, name: &str) -> String {
         name.to_owned()
     }
 }
 
-/// The repo's rule for changing the default branch, in a sentence.
+/// The repo's rule for changing the default branch, in a sentence (empty before the first sync).
 fn rule(v: Option<&cache::RepoView>) -> String {
     let Some(v) = v else {
-        return "Shown once the first sync finishes.".into();
+        return String::new();
     };
     if v.program.is_some() {
         return format!(

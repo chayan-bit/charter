@@ -1,13 +1,6 @@
 <section class="repo-head">
-<div class="rh-main">
-<div class="rh-title"><div class="crumb"><a href="/">Repositories</a><span class="sep" aria-hidden="true">/</span></div><h1 class="repo-name"><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1><span class="badge">{% if r.private %}{{ m::i(l.v, "lock-simple") }}Private{% else %}{{ m::i(l.v, "globe-simple") }}Public{% endif %}</span>{% if r.archived %}<span class="arch">{{ m::i(l.v, "archive") }}Archived</span>{% endif %}</div>
-{% if !r.description.is_empty() %}<p class="repo-desc">{{ r.description }}</p>{% endif %}
-<p class="perm"><span>{% if r.private %}Sealed for its members{% else %}Permanent on Arkiv{% endif %}</span>{% include "pushed.html" %}</p>
-{% include "syncnote.html" %}
-{% if r.private && r.revoked_leaves > 0 && l.writes %}<form method="post" action="/r/{{ r.hex }}/write" class="notice warn revoked" role="status"><input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="remove-revoked"><input type="hidden" name="back" value="/r/{{ r.hex }}">{{ m::i(l.v, "warning-circle") }}<div><p><b>{% if r.revoked_leaves == 1 %}A revoked device is{% else %}{{ r.revoked_leaves }} revoked devices are{% endif %} still in the group.</b> {% if r.revoked_leaves == 1 %}It{% else %}They{% endif %} can read what is written from now on until removed. Removing takes one paid commit.</p><button class="btn btn-sm" type="submit">Remove from the group</button></div></form>{% endif %}
-</div>
+<div class="rh-top"><h1 class="repo-name"><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1><span class="vis" title="{% if r.private %}Sealed for its members{% else %}Readable by anyone, permanent on Arkiv{% endif %}">{% if r.private %}{{ m::i(l.v, "lock-simple") }}Private{% else %}{{ m::i(l.v, "globe-simple") }}Public{% endif %}</span>{% if r.archived %}<span class="arch">{{ m::i(l.v, "archive") }}Archived</span>{% endif %}
 <div class="rh-side">
-{% include "verify.html" %}
 <details class="pop">
 <summary class="btn">{{ m::i(l.v, "terminal-window") }}Clone{{ m::i(l.v, "caret-down") }}</summary>
 <div class="popover">
@@ -17,6 +10,12 @@
 </div>
 </details>
 </div>
+</div>
+{% if !r.description.is_empty() %}<p class="repo-desc">{{ r.description }}</p>{% endif %}
+<p class="perm">{% include "pushed.html" %}</p>
+{% include "syncnote.html" %}
+{% if r.private && r.revoked_leaves > 0 && l.writes %}<form method="post" action="/r/{{ r.hex }}/write" class="notice warn revoked" role="status"><input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="remove-revoked"><input type="hidden" name="back" value="/r/{{ r.hex }}">{{ m::i(l.v, "warning-circle") }}<div><p><b>{% if r.revoked_leaves == 1 %}A revoked device is{% else %}{{ r.revoked_leaves }} revoked devices are{% endif %} still in the group.</b> {% if r.revoked_leaves == 1 %}It{% else %}They{% endif %} can read what is written from now on until removed. Removing takes one paid commit.</p><button class="btn btn-sm" type="submit">Remove from the group</button></div></form>{% endif %}
+{% include "verify.html" %}
 </section>
 <nav class="tabs" id="tabs" data-live="op" aria-label="Repository">
 <a href="/r/{{ r.hex }}" data-go="c"{% if r.tab == "code" %} aria-current="page"{% endif %}>{{ m::i(l.v, "code") }}Code</a>

@@ -440,6 +440,11 @@ impl Head {
         you.is_some_and(|y| self.verify.delegates.contains(y))
     }
 
+    /// `nid` is this computer's own identity.
+    pub fn is_you(&self, nid: &str) -> bool {
+        self.people.you.as_deref() == Some(nid)
+    }
+
     /// A peer's name (alias, nickname or short id, per Settings).
     pub fn who(&self, nid: &str) -> String {
         self.people.name(nid)

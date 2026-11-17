@@ -83,6 +83,10 @@ impl Tree {
     pub fn age(&self, secs: &i64) -> String {
         super::age(*secs)
     }
+    /// An entry's last commit is not the one the "latest commit" line above the list already shows.
+    pub fn differs(&self, c: &CommitRow) -> bool {
+        !self.last.as_ref().is_some_and(|l| l.oid == c.oid)
+    }
     pub fn join(&self, name: &str) -> String {
         if self.path.is_empty() {
             name.to_owned()

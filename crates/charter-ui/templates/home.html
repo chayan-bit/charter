@@ -15,17 +15,20 @@
 </ul>
 </div>
 {% endif %}
-{% if let Some((name, html)) = readme %}<article class="readme box"><p class="filelabel">{{ m::i(l.v, "book-open") }}{{ name }}</p><div class="md">{{ html|safe }}</div></article>{% endif %}
+{% if let Some((name, html)) = readme %}<article class="readme"><p class="filelabel">{{ m::i(l.v, "book-open") }}{{ name }}</p><div class="md">{{ html|safe }}</div></article>{% endif %}
 </div>
 <aside class="side" aria-label="About this repository">
 <section><h2>Maintainers</h2>
-{% if r.verify.delegates.is_empty() %}<p>Shown once the first sync finishes.</p>{% else %}<ul class="people">{% for d in r.verify.delegates %}{% let who = r.who(d) %}{% let id = r.short(d) %}<li><b>{{ who }}</b>{% if who != id %}<small title="{{ d }}">{{ id }}</small>{% endif %}</li>{% endfor %}</ul>{% endif %}
+{% if r.verify.delegates.is_empty() %}<p>Shown once the first sync finishes.</p>{% else %}<ul class="people">{% for d in r.verify.delegates %}{% let who = r.who(d) %}{% let id = r.short(d) %}<li><b>{{ who }}</b>{% if r.is_you(d) %}<span class="tag">this device</span>{% endif %}<small class="key" title="{{ d }}">key {{ id }}</small></li>{% endfor %}</ul>{% endif %}
+<p class="note">{% if !rule.is_empty() %}{{ rule }} {% endif %}<a href="/r/{{ r.hex }}/rules">Rules and CI</a></p>
 {% if r.maintains() %}<a class="btn btn-sm manage" href="/r/{{ r.hex }}/manage">{{ m::i(l.v, "gear-six") }}Manage repository</a>{% endif %}
 </section>
-<section><h2>Changing {{ picker.current }}</h2><p>{{ rule }} <a href="/r/{{ r.hex }}/rules">Rules and CI</a></p></section>
-<section><h2>Address</h2>
-<div class="clonebox"><code>{{ r.addr }}</code><button class="copy js" type="button" data-copy="arkiv::{{ r.addr }}" aria-label="Copy address">{{ m::i(l.v, "copy") }}</button></div>
-<p class="muted small note">Arkiv Rabdi testnet</p>
+<section><h2>Repository</h2>
+<dl class="spec">
+<div><dt>Storage</dt><dd>{% if r.private %}Sealed for its members{% else %}Permanent on Arkiv{% endif %}</dd></div>
+<div><dt>Network</dt><dd>Arkiv Rabdi testnet</dd></div>
+<div><dt>Address</dt><dd><div class="clonebox fit"><code title="{{ r.addr }}">{{ r.addr }}</code><button class="copy js" type="button" data-copy="arkiv::{{ r.addr }}" aria-label="Copy address">{{ m::i(l.v, "copy") }}</button></div></dd></div>
+</dl>
 </section>
 </aside>
 </div>

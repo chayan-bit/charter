@@ -32,7 +32,7 @@
 </div>
 <aside class="side" aria-label="Wallet address">
 <section><h2>Address</h2>
-<div class="clonebox"><code>{{ addr }}</code><button class="copy js" type="button" data-copy="{{ addr }}" aria-label="Copy wallet address">{{ m::i(l.v, "copy") }}</button></div>
+<div class="clonebox fit"><code title="{{ addr }}">{{ addr }}</code><button class="copy js" type="button" data-copy="{{ addr }}" aria-label="Copy wallet address">{{ m::i(l.v, "copy") }}</button></div>
 <p class="note">Send test tokens here, or run <code>chart fund</code>.</p></section>
 <section><h2>Your keys</h2><p>They stay in <code>$CHARTER_HOME</code> on this computer. The browser never sees them.</p></section>
 </aside>
