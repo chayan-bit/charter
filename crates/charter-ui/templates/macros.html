@@ -3,3 +3,4 @@
 {% macro amt(a) %}<span title="{{ a.exact }}">{{ a }}</span>{% endmacro %}
 {% macro amtcol(a) %}<span class="amtc" title="{{ a.exact }}">{{ a.fixed() }} <span class="u">{{ a.unit }}</span></span>{% endmacro %}
 {% macro i(v, name) %}<svg class="i" aria-hidden="true"><use href="/assets/icons.svg?v={{ v }}#i-{{ name }}"/></svg>{% endmacro %}
+{% macro st(v, kind, s) %}<span class="st {{ s }}"><svg class="i" aria-hidden="true"><use href="/assets/icons.svg?v={{ v }}#i-{% if s == "merged" %}git-merge{% else if s == "closed" %}{% if kind == "patches" %}x-circle{% else %}check-circle{% endif %}{% else if kind == "patches" %}git-pull-request{% else %}circle-dashed{% endif %}"/></svg><span class="lbl-t">{{ s }}</span></span>{% endmacro %}

@@ -6,26 +6,36 @@
 <div id="live" data-live="op">
 <header class="thread-head">
 <h1>{{ t.title }}</h1>
-<p class="meta"><span class="chip">{{ t.state }}</span><span>Opened by <b>{{ r.who(t.author) }}</b> <time title="{{ r.full(t.block) }}">{{ r.when(t.block) }}</time></span>{% if t.inferred %}<span>{{ r.default_ref }} already contains its latest commit</span>{% endif %}<button class="copy js" type="button" data-copy="{{ t.id }}" aria-label="Copy id" title="Copy id">{{ m::i(l.v, "copy") }}</button></p>
-{% let tr = t.triage %}{% if !tr.labels.is_empty() || !tr.assignees.is_empty() || tr.milestone.is_some() %}<dl class="facts triage">{% if !tr.labels.is_empty() %}<dt>Labels</dt><dd class="lbls">{% for lb in tr.labels %}<a class="lbl" href="{{ self.q("label", lb) }}">{{ lb }}</a>{% endfor %}</dd>{% endif %}{% if !tr.assignees.is_empty() %}<dt>Assignees</dt><dd>{% for a in tr.assignees %}<a href="{{ self.q("assignee", a) }}">{{ r.who(a) }}</a>{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}{% if let Some(ms) = tr.milestone %}<dt>Milestone</dt><dd><a href="{{ self.q("milestone", ms) }}">{{ ms }}</a></dd>{% endif %}</dl>{% endif %}
-{% if kind == "patches" %}<p class="meta"><a class="btn btn-sm" href="/r/{{ r.hex }}/patches/{{ t.id }}/files">Files changed</a></p>{% endif %}
-{% if t.revisions.len() > 1 %}<p class="meta">Versions: {% for h in t.revisions %}<span class="nw">{{ loop.index }} <a class="hash" href="/r/{{ r.hex }}/commit/{{ h }}" title="{{ h }}">{{ r.short(h) }}</a></span>{% endfor %}</p>{% endif %}
+<p class="meta">{{ m::st(l.v, kind, t.state) }}<span>Opened by <b>{{ r.who(t.author) }}</b> <time title="{{ r.full(t.block) }}">{{ r.when(t.block) }}</time></span>{% if t.inferred %}<span>{{ r.default_ref }} already contains its latest commit</span>{% endif %}<button class="copy js" type="button" data-copy="{{ t.id }}" aria-label="Copy id" title="Copy id">{{ m::i(l.v, "copy") }}</button>{% if kind == "patches" %}<a class="btn btn-sm" href="/r/{{ r.hex }}/patches/{{ t.id }}/files">{{ m::i(l.v, "file") }}Files changed</a>{% endif %}</p>
 </header>
+<div class="tcols">
+<div class="maincol">
+{% let rv = false %}
 <ol class="ledger">
 {% for e in t.entries %}{% include "entry.html" %}{% endfor %}
 </ol>
 {% if !t.reviews.is_empty() %}
 <h2 class="h2 sec">Reviews</h2>
+{% let rv = true %}
 <ol class="ledger">
 {% for e in t.reviews %}{% include "entry.html" %}{% endfor %}
 </ol>
 {% endif %}
 </div>
+{% let tr = t.triage %}
+<aside class="side" aria-label="Details">
+<section><h2>Labels</h2>{% if tr.labels.is_empty() %}<p class="muted">None yet</p>{% else %}<p class="lbls">{% for lb in tr.labels %}<a class="lbl" href="{{ self.q("label", lb) }}">{{ lb }}</a>{% endfor %}</p>{% endif %}</section>
+<section><h2>Assignees</h2>{% if tr.assignees.is_empty() %}<p class="muted">No one</p>{% else %}<p>{% for a in tr.assignees %}<a href="{{ self.q("assignee", a) }}">{{ r.who(a) }}</a>{% if !loop.last %}, {% endif %}{% endfor %}</p>{% endif %}</section>
+<section><h2>Milestone</h2>{% if let Some(ms) = tr.milestone %}<p><a href="{{ self.q("milestone", ms) }}">{{ ms }}</a></p>{% else %}<p class="muted">None</p>{% endif %}</section>
+{% if t.revisions.len() > 1 %}<section><h2>Versions</h2><ol class="vers">{% for h in t.revisions %}<li><span class="muted">{{ loop.index }}</span> <a class="hash" href="/r/{{ r.hex }}/commit/{{ h }}" title="{{ h }}">{{ r.short(h) }}</a></li>{% endfor %}</ol></section>{% endif %}
+</aside>
+</div>
+</div>
 {% let back = self.back() %}
-<section class="sec">
+<section class="sec tform">
 {% if !l.writes %}<p class="off">{{ l.off() }}</p>
 {% else if kind == "issues" %}
-<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<form method="post" action="/r/{{ r.hex }}/write" class="fm box">
 <input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="comment"><input type="hidden" name="issue" value="{{ t.id }}"><input type="hidden" name="back" value="{{ back }}">
 <label for="w-body">Comment <span class="dim">Markdown supported</span></label><textarea id="w-body" name="body" rows="4" required></textarea>
 <p class="help">Comments are public and permanent. You see the cost before anything is sent.</p>
@@ -47,7 +57,7 @@
 <div class="acts"><button class="btn btn-ink" type="submit">Open patch</button></div>
 </form></details>
 {% else %}
-<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<form method="post" action="/r/{{ r.hex }}/write" class="fm box">
 <input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="review"><input type="hidden" name="patch" value="{{ t.id }}"><input type="hidden" name="head" value="{{ self.head() }}"><input type="hidden" name="back" value="{{ back }}">
 <label for="w-review">Review <span class="dim">Markdown supported</span></label><textarea id="w-review" name="body" rows="4"></textarea>
 <fieldset class="radios"><legend>Verdict</legend><label><input type="radio" name="verdict" value="approve" checked> Approve commit <code>{{ self.short(self.head()) }}</code></label><label><input type="radio" name="verdict" value="comment"> Comment only</label></fieldset>

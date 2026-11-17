@@ -8,12 +8,14 @@
 <h2>{% for (href, label) in l.crumbs %}{% if loop.first %}<a href="{{ href }}">{{ r.name }}</a>{% else if href.is_empty() && !path.is_empty() %} / {{ label }}{% else if loop.index0 > 1 %} / <a href="{{ href }}">{{ label }}</a>{% endif %}{% endfor %}</h2>
 <div class="acts">{% let small = true %}{% include "picker.html" %}{% if !path.is_empty() %}<button class="btn btn-sm js" type="button" data-copy="{{ path }}">{{ m::i(l.v, "copy") }}Copy path</button>{% endif %}<a class="btn btn-sm" href="/r/{{ r.hex }}/log/{{ rev }}">History</a></div>
 </div>
+{% if entries.is_empty() && up.is_none() %}<section class="empty">{{ m::i(l.v, "folder") }}<p>Empty folder.</p></section>{% else %}
+<div class="box">
 {% include "lastc.html" %}
-{% if entries.is_empty() && up.is_none() %}<section class="empty"><p>Empty folder.</p></section>{% else %}
 <ul class="files" data-list>
 {% if let Some(u) = up %}<li>{{ m::i(l.v, "folder") }}<a class="name" href="{{ u }}">..</a><span class="msg">parent folder</span><span></span><span class="sz"></span></li>{% endif %}
 {% include "entries.html" %}
 </ul>
+</div>
 {% endif %}
 </div>
 {% endblock %}

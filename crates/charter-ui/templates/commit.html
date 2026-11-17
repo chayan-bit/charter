@@ -8,7 +8,7 @@
 <p class="meta"><span><b>{{ c.author }}</b> committed on {{ date }}</span><a class="hash" href="/r/{{ r.hex }}/commit/{{ c.oid }}" title="{{ c.oid }}">{{ self.short(c.oid) }}</a><button class="copy js" type="button" data-copy="{{ c.oid }}" aria-label="Copy commit hash" title="Copy commit hash">{{ m::i(l.v, "copy") }}</button></p>
 </header>
 {% if !body.is_empty() %}<pre class="md sec">{{ body }}</pre>{% endif %}
-<dl class="facts sec">
+<dl class="facts box cbox sec">
 {% if c.committer != c.author %}<dt>Committer</dt><dd>{{ c.committer }}</dd>{% endif %}
 <dt>{% if c.parents.len() == 1 %}Parent{% else %}Parents{% endif %}</dt><dd>{% for p in c.parents %}<a class="hash" href="/r/{{ r.hex }}/commit/{{ p }}" title="{{ p }}">{{ self.short(p) }}</a> {% endfor %}{% if c.parents.is_empty() %}<span class="muted">none, this is the first commit</span>{% endif %}</dd>
 <dt>On Arkiv</dt><dd>{% if anchors.is_empty() %}<span class="muted">not in any verified push</span>{% else %}{% for a in anchors %}<span class="signed">{{ m::i(l.v, "seal-check") }}Pushed by {{ r.who(a.nid) }}</span> <time class="muted" title="{{ r.full(a.block) }}">{{ r.when(a.block) }}</time>, on {% for n in a.refs %}<code>{{ m::refname(n) }}</code>{% if !loop.last %}, {% endif %}{% endfor %}{% if !loop.last %}<br>{% endif %}{% endfor %}{% endif %}</dd>

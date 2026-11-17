@@ -4,20 +4,22 @@
 {% include "repo.html" %}
 <div class="cols" id="live" data-live="push">
 <div class="maincol">
-<div class="toolbar">{% let small = false %}{% include "picker.html" %}<a class="muted small" href="/r/{{ r.hex }}/branches">{{ picker.branches }} branch{% if picker.branches != 1 %}es{% endif %}, {{ picker.tags }} tag{% if picker.tags != 1 %}s{% endif %}</a></div>
+<div class="toolbar">{% let small = false %}{% include "picker.html" %}<a class="small" href="/r/{{ r.hex }}/branches">{{ m::i(l.v, "git-branch") }}<span><b>{{ picker.branches }}</b> branch{% if picker.branches != 1 %}es{% endif %}</span></a><a class="small" href="/r/{{ r.hex }}/branches">{{ m::i(l.v, "tag") }}<span><b>{{ picker.tags }}</b> tag{% if picker.tags != 1 %}s{% endif %}</span></a></div>
 {% if entries.is_empty() %}
-<section class="empty"><h2>Nothing on {{ picker.current }} yet</h2><p>No verified commits on the default branch. Push one with <code>git push</code>; it shows here once a sync round checks it.</p></section>
+<section class="empty">{{ m::i(l.v, "git-commit") }}<h2>Nothing on {{ picker.current }} yet</h2><p>No verified commits on the default branch. Push one with <code>git push</code>; it shows here once a sync round checks it.</p><div class="clonebox"><code>git clone arkiv::{{ r.addr }}</code><button class="copy js" type="button" data-copy="git clone arkiv::{{ r.addr }}" aria-label="Copy clone command">{{ m::i(l.v, "copy") }}</button></div></section>
 {% else %}
+<div class="box">
 {% include "lastc.html" %}
 <ul class="files" data-list>
 {% include "entries.html" %}
 </ul>
+</div>
 {% endif %}
-{% if let Some((name, html)) = readme %}<article class="readme"><p class="filelabel">{{ m::i(l.v, "book-open") }}{{ name }}</p><div class="md">{{ html|safe }}</div></article>{% endif %}
+{% if let Some((name, html)) = readme %}<article class="readme box"><p class="filelabel">{{ m::i(l.v, "book-open") }}{{ name }}</p><div class="md">{{ html|safe }}</div></article>{% endif %}
 </div>
 <aside class="side" aria-label="About this repository">
 <section><h2>Maintainers</h2>
-{% if r.verify.delegates.is_empty() %}<p>Shown once the first sync finishes.</p>{% else %}<ul class="people">{% for d in r.verify.delegates %}<li><b>{{ r.who(d) }}</b><small title="{{ d }}">{{ r.short(d) }}</small></li>{% endfor %}</ul>{% endif %}
+{% if r.verify.delegates.is_empty() %}<p>Shown once the first sync finishes.</p>{% else %}<ul class="people">{% for d in r.verify.delegates %}{% let who = r.who(d) %}{% let id = r.short(d) %}<li><b>{{ who }}</b>{% if who != id %}<small title="{{ d }}">{{ id }}</small>{% endif %}</li>{% endfor %}</ul>{% endif %}
 {% if r.maintains() %}<a class="btn btn-sm manage" href="/r/{{ r.hex }}/manage">{{ m::i(l.v, "gear-six") }}Manage repository</a>{% endif %}
 </section>
 <section><h2>Changing {{ picker.current }}</h2><p>{{ rule }} <a href="/r/{{ r.hex }}/rules">Rules and CI</a></p></section>

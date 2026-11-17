@@ -21,7 +21,10 @@ async fn repo_list_shows_the_synced_repo_verified() {
     assert!(h.contains("sealmini verified") && h.contains("Verified"));
     assert!(h.contains("Updated <time title=\""), "last push, as a time");
     assert!(!h.contains("block <code>"), "no bare block number");
-    assert!(h.contains("1 issue, 1 patch<"), "counted at sync: {h}");
+    assert!(
+        h.contains("1 issue<") && h.contains("1 patch<"),
+        "counted at sync: {h}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -162,7 +165,8 @@ async fn issues_fold_into_a_closed_thread_with_sanitized_bodies() {
     let h = page(&format!("/r/{}/issues", f.hex)).await;
     assert!(
         h.contains("Crash on &#60;b&#62;start&#60;/b&#62;")
-            && h.contains("<span class=\"chip\">closed</span>")
+            && h.contains("<span class=\"st closed\">")
+            && h.contains("<span class=\"lbl-t\">closed</span>")
     );
     assert!(h.contains("1 comment"));
     let h = page(&format!("/r/{}/issues/{}", f.hex, f.issue)).await;
@@ -181,7 +185,7 @@ async fn issues_fold_into_a_closed_thread_with_sanitized_bodies() {
 async fn patches_show_revisions_and_reviews() {
     let f = fixture();
     let h = page(&format!("/r/{}/patches", f.hex)).await;
-    assert!(h.contains("Fix the crash") && h.contains("<span class=\"chip\">merged</span>"));
+    assert!(h.contains("Fix the crash") && h.contains("<span class=\"st merged\">"));
     assert!(
         h.contains("merged into main"),
         "inferred from the default branch"

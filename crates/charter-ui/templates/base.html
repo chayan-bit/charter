@@ -23,7 +23,7 @@
 <a href="/settings"{% if l.nav == "settings" %} aria-current="page"{% endif %}>Settings</a>
 <a class="s" href="/search" hx-boost="false"{% if l.nav == "search" %} aria-current="page"{% endif %}>Search</a>
 </nav>
-{% if l.nav != "search" %}<form class="jump" role="search" action="/search" hx-boost="false"><label class="vh" for="jump">Jump to</label>{{ m::i(l.v, "magnifying-glass") }}<input id="jump" type="search" name="q" placeholder="Jump to" autocomplete="off" maxlength="100"><kbd class="js" aria-hidden="true">/</kbd></form>{% endif %}
+{% if l.nav != "search" %}<form class="jump" role="search" action="/search" hx-boost="false"><label class="vh" for="jump">Jump to</label>{{ m::i(l.v, "magnifying-glass") }}<input id="jump" type="search" name="q" placeholder="Search or jump to" autocomplete="off" maxlength="100"><kbd class="js" aria-hidden="true">/</kbd></form>{% endif %}
 <div class="top-right">
 {% include "sync_chip.html" %}
 <span id="wallet-slot">{% include "wallet_chip_a.html" %}</span>

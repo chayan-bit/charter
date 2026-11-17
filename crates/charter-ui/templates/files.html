@@ -6,7 +6,7 @@
 <h2><a href="/r/{{ r.hex }}/patches/{{ t.id }}">{{ t.title }}</a> / files</h2>
 <div class="acts">{% if !head.is_empty() %}<a class="btn btn-sm" href="/r/{{ r.hex }}/commit/{{ head }}">Commit <code>{{ self.short(head) }}</code></a>{% endif %}<a class="btn btn-sm" href="/r/{{ r.hex }}/patches/{{ t.id }}">Conversation</a></div>
 </div>
-{% if missing %}<section class="empty"><p>The patch head {% if !head.is_empty() %}<code>{{ self.short(head) }}</code> {% endif %}is not in this computer's git cache yet. It shows here once a push that contains it is synced.</p></section>{% endif %}
+{% if missing %}<section class="empty">{{ m::i(l.v, "git-commit") }}<p>The patch head {% if !head.is_empty() %}<code>{{ self.short(head) }}</code> {% endif %}is not in this computer's git cache yet. It shows here once a push that contains it is synced.</p></section>{% endif %}
 {% if !outdated.is_empty() %}<details class="outdated"><summary>{{ outdated.len() }} outdated comment{% if outdated.len() != 1 %}s{% endif %} <span class="dim">made on an older version or a line this diff does not show</span></summary>{% for n in outdated %}{% include "note.html" %}{% endfor %}</details>{% endif %}
 <div class="sec">
 {% for fv in files %}{% let f = fv.f %}
@@ -28,7 +28,7 @@
 <section class="sec">
 {% if !l.writes %}<p class="off">{{ l.off() }}</p>
 {% else if !head.is_empty() %}
-<form id="rv" method="post" action="/r/{{ r.hex }}/write" class="fm">
+<form id="rv" method="post" action="/r/{{ r.hex }}/write" class="fm box">
 <input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="review"><input type="hidden" name="patch" value="{{ t.id }}"><input type="hidden" name="head" value="{{ head }}"><input type="hidden" name="back" value="{{ self.back() }}">{% for fv in files %}<input type="hidden" name="p.{{ fv.idx }}" value="{{ fv.f.path }}">{% endfor %}
 <label for="w-review">Review <span class="dim">Markdown supported</span></label><textarea id="w-review" name="body" rows="4"></textarea>
 <fieldset class="radios"><legend>Verdict</legend><label><input type="radio" name="verdict" value="comment" checked> Comment</label><label><input type="radio" name="verdict" value="approve"> Approve commit <code>{{ self.short(head) }}</code></label></fieldset>

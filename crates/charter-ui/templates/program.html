@@ -40,7 +40,7 @@
 {% endfor %}</pre></details>{% endif %}
 </section>
 {% else %}
-<section class="empty"><h2>No rules pinned</h2><p>Without pinned rules, the maintainers' signatures decide what {{ r.default_ref }} is. Pin rules with <code>chart program pin</code>.</p></section>
+<section class="empty">{{ m::i(l.v, "list-checks") }}<h2>No rules pinned</h2><p>Without pinned rules, the maintainers' signatures decide what {{ r.default_ref }} is. Pin rules with <code>chart program pin</code>.</p></section>
 {% endif %}
 </div>
 {% endblock %}

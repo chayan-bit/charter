@@ -244,7 +244,7 @@ async fn assert_applied(app: &axum::Router) {
         .await
         .text();
     assert!(
-        t.contains("<span class=\"chip\">open</span>"),
+        t.contains("<span class=\"st open\">"),
         "merged only on a note: {t}"
     );
 }

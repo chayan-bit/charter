@@ -6,7 +6,7 @@
 {% if !keys %}<p class="off">{{ l.off() }}</p>
 {% else if !r.maintains() %}<p class="off">Only maintainers change the repository: its name, who maintains it and whether it is archived.</p>
 {% else %}
-<form method="post" action="/r/{{ r.hex }}/write" class="fm">
+<form method="post" action="/r/{{ r.hex }}/write" class="fm box">
 <input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="identity"><input type="hidden" name="back" value="/r/{{ r.hex }}"><input type="hidden" name="cur_name" value="{{ r.name }}"><input type="hidden" name="cur_archived" value="{% if r.archived %}1{% else %}0{% endif %}">
 <label for="m-name">Name <span class="dim">a-z, 0-9, dot, dash, underscore</span></label><input id="m-name" name="name" value="{{ r.name }}" required maxlength="64" pattern="[a-z0-9._\-]+" autocomplete="off" spellcheck="false">
 <label for="m-to">Hand over to <span class="dim">optional; that peer maintains it in your place</span></label><input id="m-to" class="mono" name="hand_to" placeholder="z... or 64 hex digits" autocomplete="off" spellcheck="false">

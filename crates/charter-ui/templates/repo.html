@@ -1,9 +1,8 @@
 <section class="repo-head">
-<div>
-<p class="crumb"><a href="/">Repositories</a> /</p>
-<h1 class="repo-name"><a href="/r/{{ r.hex }}">{{ r.name }}</a>{% if r.archived %} <span class="arch">{{ m::i(l.v, "archive") }}Archived</span>{% endif %}</h1>
+<div class="rh-main">
+<div class="rh-title"><div class="crumb"><a href="/">Repositories</a><span class="sep" aria-hidden="true">/</span></div><h1 class="repo-name"><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1><span class="badge">{% if r.private %}{{ m::i(l.v, "lock-simple") }}Private{% else %}{{ m::i(l.v, "globe-simple") }}Public{% endif %}</span>{% if r.archived %}<span class="arch">{{ m::i(l.v, "archive") }}Archived</span>{% endif %}</div>
 {% if !r.description.is_empty() %}<p class="repo-desc">{{ r.description }}</p>{% endif %}
-<p class="perm"><span>{% if r.private %}{{ m::i(l.v, "lock-simple") }}Private: sealed for its members{% else %}{{ m::i(l.v, "globe-simple") }}Public and permanent on Arkiv{% endif %}</span>{% include "pushed.html" %}</p>
+<p class="perm"><span>{% if r.private %}Sealed for its members{% else %}Permanent on Arkiv{% endif %}</span>{% include "pushed.html" %}</p>
 {% include "syncnote.html" %}
 {% if r.private && r.revoked_leaves > 0 && l.writes %}<form method="post" action="/r/{{ r.hex }}/write" class="notice warn revoked" role="status"><input type="hidden" name="csrf" value="{{ l.csrf }}"><input type="hidden" name="kind" value="remove-revoked"><input type="hidden" name="back" value="/r/{{ r.hex }}">{{ m::i(l.v, "warning-circle") }}<div><p><b>{% if r.revoked_leaves == 1 %}A revoked device is{% else %}{{ r.revoked_leaves }} revoked devices are{% endif %} still in the group.</b> {% if r.revoked_leaves == 1 %}It{% else %}They{% endif %} can read what is written from now on until removed. Removing takes one paid commit.</p><button class="btn btn-sm" type="submit">Remove from the group</button></div></form>{% endif %}
 </div>
@@ -14,16 +13,16 @@
 <div class="popover">
 <h3>Clone with git</h3>
 <div class="clonebox"><code>git clone arkiv::{{ r.addr }}</code><button class="copy js" type="button" data-copy="git clone arkiv::{{ r.addr }}" aria-label="Copy clone command">{{ m::i(l.v, "copy") }}</button></div>
-<p>Reading and cloning are free. Git needs the <code>chart</code> helper installed.</p>
+<p class="small">Reading and cloning are free. Git needs the <code>chart</code> helper installed.</p>
 </div>
 </details>
 </div>
 </section>
 <nav class="tabs" id="tabs" data-live="op" aria-label="Repository">
-<a href="/r/{{ r.hex }}" data-go="c"{% if r.tab == "code" %} aria-current="page"{% endif %}>Code</a>
-<a href="/r/{{ r.hex }}/log/{{ r.default_ref }}" data-go="l"{% if r.tab == "log" %} aria-current="page"{% endif %}>Commits</a>
-<a href="/r/{{ r.hex }}/issues" data-go="i"{% if r.tab == "issues" %} aria-current="page"{% endif %}>Issues <span class="n">{{ r.issues }}</span></a>
-<a href="/r/{{ r.hex }}/patches" data-go="p"{% if r.tab == "patches" %} aria-current="page"{% endif %}>Patches <span class="n">{{ r.patches }}</span></a>
-<a href="/r/{{ r.hex }}/releases" data-go="r"{% if r.tab == "releases" %} aria-current="page"{% endif %}>Releases</a>
-<a href="/r/{{ r.hex }}/rules"{% if r.tab == "program" %} aria-current="page"{% endif %}>Rules and CI</a>
+<a href="/r/{{ r.hex }}" data-go="c"{% if r.tab == "code" %} aria-current="page"{% endif %}>{{ m::i(l.v, "code") }}Code</a>
+<a href="/r/{{ r.hex }}/log/{{ r.default_ref }}" data-go="l"{% if r.tab == "log" %} aria-current="page"{% endif %}>{{ m::i(l.v, "git-commit") }}Commits</a>
+<a href="/r/{{ r.hex }}/issues" data-go="i"{% if r.tab == "issues" %} aria-current="page"{% endif %}>{{ m::i(l.v, "circle-dashed") }}Issues <span class="n">{{ r.issues }}</span></a>
+<a href="/r/{{ r.hex }}/patches" data-go="p"{% if r.tab == "patches" %} aria-current="page"{% endif %}>{{ m::i(l.v, "git-pull-request") }}Patches <span class="n">{{ r.patches }}</span></a>
+<a href="/r/{{ r.hex }}/releases" data-go="r"{% if r.tab == "releases" %} aria-current="page"{% endif %}>{{ m::i(l.v, "tag") }}Releases</a>
+<a href="/r/{{ r.hex }}/rules"{% if r.tab == "program" %} aria-current="page"{% endif %}>{{ m::i(l.v, "list-checks") }}Rules and CI</a>
 </nav>

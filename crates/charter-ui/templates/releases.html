@@ -4,7 +4,7 @@
 {% include "repo.html" %}
 {% if l.writes %}<div class="lh"><a class="btn btn-ink" href="/r/{{ r.hex }}/releases/new">New release</a></div>{% endif %}
 <div id="live" data-live="op"{% if !l.writes %} class="sec"{% endif %}>
-{% if releases.is_empty() %}<section class="empty"><h2>No releases yet</h2><p>Releases are signed lists of files and their hashes. Publish one with <code>chart release publish</code>.</p></section>{% endif %}
+{% if releases.is_empty() %}<section class="empty">{{ m::i(l.v, "package") }}<h2>No releases yet</h2><p>Releases are signed lists of files and their hashes. Publish one with <code>chart release publish</code>.</p></section>{% endif %}
 {% for x in releases %}
 <article class="release" id="{{ x.tag }}">
 <div class="rel-h"><h2>{{ x.tag }}</h2>{% if self.valid(x.verdict) %}<span class="chip ok">{{ m::i(l.v, "seal-check") }}Allowed by the repo's rules</span>{% else if let Some(need) = self.missing(x.verdict) %}<span class="chip bad">Not allowed by the rules</span>{% else %}<span class="chip">{% if pinned %}not tracked by the rules{% else %}no rules pinned{% endif %}</span>{% endif %}</div>

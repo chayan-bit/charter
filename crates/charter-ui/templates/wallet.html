@@ -3,10 +3,10 @@
 {% block main %}
 <div class="page-head"><div><h1>Wallet</h1><p>Pays for what you publish on Arkiv. Reading and cloning are free. These are test tokens on the Rabdi testnet, with no real value.</p></div></div>
 {% if let Some(addr) = address %}
-{% if low %}<div class="notice warn">{{ m::i(l.v, "warning-circle") }}<p><b>Running low.</b> Under {{ self.low_mark() }} tGLM covers only a few writes. Add funds with <code>chart fund</code>.</p></div>{% endif %}
+{% if low %}<div class="notice warn lowbal">{{ m::i(l.v, "warning-circle") }}<p><b>Running low.</b> Under {{ self.low_mark() }} tGLM covers only a few writes. Add funds with <code>chart fund</code>.</p></div>{% endif %}
 <div class="cols">
 <div class="maincol">
-<section>
+<section class="box cbox balance">
 <p class="label">Balance</p>
 <p class="big num">{% if let Some(b) = balance %}<span title="{{ b.exact }}">{{ b.num }} <small>{{ b.unit }}</small></span>{% else %}<small>Not read yet</small>{% endif %}</p>
 <form method="post" action="/wallet/refresh" class="toolbar sec">
@@ -39,7 +39,7 @@
 </div>
 {% else %}
 <section class="empty">
-<svg class="i i-xl" aria-hidden="true"><use href="/assets/icons.svg?v={{ l.v }}#i-wallet"/></svg>
+{{ m::i(l.v, "wallet") }}
 <h2>No wallet on this computer</h2>
 <p>{{ off }}</p>
 </section>

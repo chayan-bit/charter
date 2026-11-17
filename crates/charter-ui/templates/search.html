@@ -13,13 +13,14 @@
 {% if let Some(f) = fetching %}<div class="notice off" role="status">{{ m::i(l.v, "check-circle") }}<p><b>Fetching {{ self.short(f) }}.</b> It is checked here first, then it shows under <a href="/">Repositories</a>.</p></div>{% endif %}
 {% if q.is_empty() %}
 <section class="empty">
-<svg class="i i-xl" aria-hidden="true"><use href="/assets/icons.svg?v={{ l.v }}#i-magnifying-glass"/></svg>
+{{ m::i(l.v, "magnifying-glass") }}
 {% if local.here == 0 %}<h2>No repositories on this computer yet</h2><p>Fetch one with <code>chart ui &lt;address&gt;</code>, then search it here.{% if arkiv_on %} Searches also ask Arkiv, so you can type a name and fetch what it finds.{% endif %}</p>
 {% else %}<h2>Search {{ local.here }} repositor{% if local.here == 1 %}y{% else %}ies{% endif %}</h2><p>Type part of a name, a title, a commit subject or a file name, then press Enter. Press <kbd>/</kbd> on any page to jump here.</p>{% endif %}
 </section>
 {% else %}
 {% if local.is_empty() %}
 <section class="empty">
+{{ m::i(l.v, "magnifying-glass") }}
 <h2>Nothing on this computer matches</h2>
 <p>None of the {{ local.here }} repositor{% if local.here == 1 %}y{% else %}ies{% endif %} here has <b>{{ q }}</b> in a name, description, title, file name or recent commit subject (the newest 2,000 commits of each default branch).</p>
 {% if !arkiv_on %}<p>To look for repositories you have not fetched, choose Local + Arkiv in <a href="/settings#s-search">Settings</a>.</p>{% endif %}

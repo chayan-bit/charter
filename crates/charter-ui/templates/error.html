@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block main %}
 <section class="empty">
+<svg class="i" aria-hidden="true"><use href="/assets/icons.svg?v={{ l.v }}#i-warning-circle"/></svg>
 <h1>{{ status }}</h1>
 <p>{{ msg }}</p>
-<p><a href="/">Back to the repo list</a></p>
+<p><a class="btn btn-sm" href="/">Back to the repo list</a></p>
 </section>
 {% endblock %}

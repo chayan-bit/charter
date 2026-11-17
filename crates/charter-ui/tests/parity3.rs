@@ -242,7 +242,10 @@ async fn labels_milestones_and_assignees_show_and_filter() {
     let none = html(&format!("/r/{}/issues?milestone=v9", f.hex)).await;
     assert!(none.contains("No issues match"), "{none}");
     let page = html(&format!("/r/{}/issues/{}", f.hex, f.issue)).await;
-    assert!(page.contains("<dt>Labels</dt>") && page.contains("<dt>Milestone</dt>"));
+    assert!(
+        page.contains("<h2>Labels</h2><p class=\"lbls\">")
+            && page.contains("<h2>Milestone</h2><p><a")
+    );
     assert!(
         page.contains(r#"added <span class="lbl">docs</span>"#),
         "{page}"
