@@ -25,6 +25,17 @@ impl Releases {
     pub fn short(&self, s: &str) -> String {
         short(s)
     }
+    /// A signed size in the units the file lists use; a value that is not a number stays as signed.
+    pub fn bytes(&self, size: &str) -> String {
+        let Ok(n) = size.parse::<u64>() else {
+            return format!("{size} B");
+        };
+        match n {
+            0..1024 => format!("{n} B"),
+            1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.0),
+            _ => format!("{:.1} MB", n as f64 / 1_048_576.0),
+        }
+    }
     pub fn valid(&self, v: &Verdict) -> bool {
         *v == Verdict::Valid
     }

@@ -577,6 +577,15 @@ a.lbl:hover { border-color: var(--accent); color: var(--accent); text-decoration
 .tbl .r { text-align: right; }
 .tbl tr.bad td { color: var(--bad); }
 .tbl td a:not(.hash):not(.lbl) { color: var(--fg); } .tbl td a:not(.hash):not(.lbl):hover { color: var(--accent); }
+@media (max-width: 640px) {
+  .tbl.stack thead { display: none; }
+  .tbl.stack, .tbl.stack tbody, .tbl.stack tr, .tbl.stack td { display: block; }
+  .tbl.stack tbody tr { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .tbl.stack tbody tr:last-child { border-bottom: 0; }
+  .tbl.stack td, .tbl.stack tbody tr:hover td { padding: 2px 0; border: 0; background: none; text-align: left; }
+  .tbl.stack td:first-child { font-weight: 500; }
+  .tbl.stack td[data-k]::before { content: attr(data-k); display: inline-block; min-width: 56px; margin-right: 8px; color: var(--fg-3); font-size: var(--t-xs); }
+}
 .release { padding: 4px 0 28px; }
 .release + .release { padding-top: 24px; border-top: 1px solid var(--border); }
 .rel-h { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }

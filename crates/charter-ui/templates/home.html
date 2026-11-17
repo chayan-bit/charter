@@ -4,7 +4,7 @@
 {% include "repo.html" %}
 <div class="cols" id="live" data-live="push">
 <div class="maincol">
-<div class="toolbar">{% let small = false %}{% include "picker.html" %}<a class="small" href="/r/{{ r.hex }}/branches">{{ m::i(l.v, "git-branch") }}<span><b>{{ picker.branches }}</b> branch{% if picker.branches != 1 %}es{% endif %}</span></a><a class="small" href="/r/{{ r.hex }}/branches">{{ m::i(l.v, "tag") }}<span><b>{{ picker.tags }}</b> tag{% if picker.tags != 1 %}s{% endif %}</span></a></div>
+{% if !entries.is_empty() || r.verify.state != "failed" %}<div class="toolbar">{% let small = false %}{% include "picker.html" %}<a class="small" href="/r/{{ r.hex }}/branches">{{ m::i(l.v, "git-branch") }}<span><b>{{ picker.branches }}</b> branch{% if picker.branches != 1 %}es{% endif %}</span></a><a class="small" href="/r/{{ r.hex }}/branches">{{ m::i(l.v, "tag") }}<span><b>{{ picker.tags }}</b> tag{% if picker.tags != 1 %}s{% endif %}</span></a></div>{% endif %}
 {% if entries.is_empty() && r.verify.state == "failed" %}
 <section class="empty">{{ m::i(l.v, "warning-circle") }}<h2>Nothing to show until a sync works</h2><p>The first sync failed, so nothing in this repo is verified yet. The reason and Retry now are in the red notice above; Charter also tries again on its own.</p></section>
 {% else if entries.is_empty() %}
@@ -21,7 +21,7 @@
 </div>
 <aside class="side" aria-label="About this repository">
 <section><h2>Maintainers</h2>
-{% if r.verify.delegates.is_empty() %}<p>Shown once the first sync finishes.</p>{% else %}<ul class="people">{% for d in r.verify.delegates %}{% let who = r.who(d) %}{% let id = r.short(d) %}<li><b>{{ who }}</b>{% if r.is_you(d) %}<span class="tag">this device</span>{% endif %}<small class="key" title="{{ d }}">key {{ id }}</small></li>{% endfor %}</ul>{% endif %}
+{% if r.verify.delegates.is_empty() %}<p>Shown once the first sync finishes.</p>{% else %}<ul class="people">{% for d in r.verify.delegates %}{% let who = r.who(d) %}{% let id = r.short(d) %}<li><b>{{ who }}</b>{% if r.is_you(d) %}<span class="tag">this device</span>{% endif %}{% if who != id %}<small class="key" title="{{ d }}">key {{ id }}</small>{% endif %}</li>{% endfor %}</ul>{% endif %}
 <p class="note">{% if !rule.is_empty() %}{{ rule }} {% endif %}<a href="/r/{{ r.hex }}/rules">Rules and CI</a></p>
 {% if r.maintains() %}<a class="btn btn-sm manage" href="/r/{{ r.hex }}/manage">{{ m::i(l.v, "gear-six") }}Manage repository</a>{% endif %}
 </section>

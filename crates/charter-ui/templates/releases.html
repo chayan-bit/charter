@@ -11,8 +11,8 @@
 {% if let Some(need) = self.missing(x.verdict) %}<p class="notice bad sec">Needs: {{ need }}</p>{% endif %}
 <p class="rel-sub">Commit <a class="hash" href="/r/{{ r.hex }}/commit/{{ x.commit }}" title="{{ x.commit }}">{{ self.short(x.commit) }}</a>, signed by {{ r.who(x.author) }} <time title="{{ r.full(x.block) }}">{{ r.when(x.block) }}</time>{% if x.revisions > 0 %}, revised {{ x.revisions }} time{% if x.revisions != 1 %}s{% endif %}{% endif %}</p>
 {% if let Some(n) = x.notes %}<div class="md">{{ n|safe }}</div>{% endif %}
-<div class="tblwrap"><table class="tbl"><thead><tr><th>File</th><th>sha256</th><th class="r">Size</th><th>Where</th></tr></thead><tbody>
-{% for a in x.artifacts %}<tr><td>{{ a.name }}{% if !a.target.is_empty() %} <span class="muted">{{ a.target }}</span>{% endif %}</td><td><span class="sha" title="{{ a.sha256 }}">{{ a.sha256 }}</span> <button class="copy js" type="button" data-copy="{{ a.sha256 }}" aria-label="Copy sha256 of {{ a.name }}">{{ m::i(l.v, "copy") }}</button></td><td class="r nw">{{ a.size }} B</td><td>{% for u in a.locations %}<code class="sha wide" title="{{ u }}">{{ u }}</code>{% if !loop.last %}<br>{% endif %}{% endfor %}</td></tr>{% endfor %}
+<div class="tblwrap"><table class="tbl stack"><thead><tr><th>File</th><th>sha256</th><th class="r">Size</th><th>Where</th></tr></thead><tbody>
+{% for a in x.artifacts %}<tr><td>{{ a.name }}{% if !a.target.is_empty() %} <span class="muted">{{ a.target }}</span>{% endif %}</td><td data-k="sha256"><span class="sha" title="{{ a.sha256 }}">{{ a.sha256 }}</span> <button class="copy js" type="button" data-copy="{{ a.sha256 }}" aria-label="Copy sha256 of {{ a.name }}">{{ m::i(l.v, "copy") }}</button></td><td class="r nw" data-k="Size" title="{{ a.size }} B">{{ self.bytes(a.size) }}</td><td data-k="Where">{% for u in a.locations %}<code class="sha wide" title="{{ u }}">{{ u }}</code>{% if !loop.last %}<br>{% endif %}{% endfor %}</td></tr>{% endfor %}
 </tbody></table></div>
 <p class="muted small sec">The hashes are the signed claim; <code>chart release verify --tag {{ x.tag }}</code> downloads the files and checks them.</p>
 </article>
