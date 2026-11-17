@@ -25,16 +25,13 @@ impl Releases {
     pub fn short(&self, s: &str) -> String {
         short(s)
     }
-    /// A signed size in the units the file lists use; a value that is not a number stays as signed.
+    /// The host of an `http(s)` download URL, the text of its link.
+    pub fn host(&self, url: &str) -> Option<String> {
+        host_of(url)
+    }
+    /// A signed size in the units the file lists use.
     pub fn bytes(&self, size: &str) -> String {
-        let Ok(n) = size.parse::<u64>() else {
-            return format!("{size} B");
-        };
-        match n {
-            0..1024 => format!("{n} B"),
-            1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.0),
-            _ => format!("{:.1} MB", n as f64 / 1_048_576.0),
-        }
+        size_text(size)
     }
     pub fn valid(&self, v: &Verdict) -> bool {
         *v == Verdict::Valid
@@ -132,4 +129,64 @@ pub async fn program(State(app): State<Arc<App>>, t: Pref, Path(rid): Path<Strin
         Err(e) => e,
     })
     .await
+}
+
+/// The host of an `http(s)` URL; anything else (a signed string can say `javascript:`) is not
+/// linked.
+fn host_of(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let ok = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-:".contains(c));
+    ok.then(|| host.to_owned())
+}
+
+/// A signed size in B, KB or MB; a value that is not a number stays as signed.
+fn size_text(size: &str) -> String {
+    let Ok(n) = size.parse::<u64>() else {
+        return format!("{size} B");
+    };
+    match n {
+        0..1024 => format!("{n} B"),
+        1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.0),
+        _ => format!("{:.1} MB", n as f64 / 1_048_576.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_web_urls_link_and_show_their_host() {
+        assert_eq!(
+            host_of("https://github.com/a/b.tgz").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            host_of("http://localhost:8080/x").as_deref(),
+            Some("localhost:8080")
+        );
+        for bad in [
+            "javascript:alert(1)",
+            "https:///x",
+            "ftp://a/b",
+            "https://a b/c",
+            "https://evil.com\"x/y",
+        ] {
+            assert_eq!(host_of(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn sizes_read_in_the_nearest_unit() {
+        assert_eq!(size_text("15"), "15 B");
+        assert_eq!(size_text("26140693"), "24.9 MB");
+        assert_eq!(size_text("1536"), "1.5 KB");
+        assert_eq!(size_text("not a number"), "not a number B");
+    }
 }

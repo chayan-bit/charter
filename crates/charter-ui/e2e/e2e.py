@@ -236,7 +236,7 @@ LAYOUT_JS = """() => {
     tabs.scrollLeft = keep; fadeAt();
     out.tabHint = more ? (atStart && !atEnd ? 'ok' : 'start ' + atStart + ', end ' + atEnd) : (atStart ? 'fade with nothing to scroll' : 'fits');
     out.repoBottom = Math.round(r(q('.repo-head')).bottom);
-    const vs = q('#verify > summary'); out.vpH = vs ? Math.round(r(vs).height) : null;
+    const vs = q('#verify > summary, #verify > .sum'); out.vpH = vs ? Math.round(r(vs).height) : null; out.vpFailed = !!q('#verify > .sum');
   }
   out.emptyOpen = [...document.querySelectorAll('details.file[open]')].filter(d => !d.querySelector('tr, .codefoot, .lazy')).map(d => d.dataset.copy || '?');
   out.gutters = [...document.querySelectorAll('.diff')].map(t => {
@@ -644,7 +644,7 @@ def layout_checks(page, name, scope, vp, rid):
         rec("repo tabs sit on one row, no scrollbar artifact", scope, len(m["tabTops"]) == 1 and m["tabScrollbar"] == 0,
             f'rows at {m["tabTops"]}, scrollbar {m["tabScrollbar"]}px')
         rec("tab fade shows only while more tabs sit past the edge", scope, m["tabHint"] in ("fits", "ok"), m["tabHint"])
-        rec("verification seal fits its two lines", scope, m["vpH"] is not None and m["vpH"] <= 64, f'height {m["vpH"]}')
+        rec("verification seal fits its two lines", scope, m["vpH"] is not None and m["vpH"] <= (170 if m["vpFailed"] else 64), f'height {m["vpH"]}')
         if vp == "phone":
             rec("phone: content starts in the first 360 px", scope, m["repoBottom"] <= 360, f'repo header ends at y={m["repoBottom"]}')
     if vp == "phone":
@@ -854,11 +854,11 @@ def edge_states(browser, axe_src):
     body = b""
     while time.monotonic() < deadline:
         body = get("/", cookie)[2]
-        if b"empty-demo" in body and b"Sync failed" in body:
+        if b"empty-demo" in body and b"Expired on Arkiv" in body:
             break
         time.sleep(0.25)
     rec("a failed first sync shows on the repo list, with its reason", "edge/home",
-        b"Sync failed" in body and b"empty-demo" in body, body.decode(errors="replace")[:0])
+        b"Expired on Arkiv" in body and b"empty-demo" in body, body.decode(errors="replace")[:0])
     m = re.search(rb'href="/r/([0-9a-f]{64})"[^>]*>\s*empty-demo', body)
     empty = f"/r/{m.group(1).decode()}" if m else None
     broken = f"/r/{BROKEN_RID}"
@@ -887,7 +887,8 @@ def edge_states(browser, axe_src):
     head = page.locator("header.top").inner_text()
     rec("the header says how many repos failed to sync", "edge/header", "failed" in head.lower(), head[:120])
     text = page.inner_text("main")
-    rec("a failed repo page shows the sync error", "edge/broken", "Sync failed" in text, text[:200])
+    rec("a failed repo page says so once, with Retry now", "edge/broken",
+        "Expired on Arkiv" in text and text.count("Retry now") == 1 and "Clone" not in text, text[:200])
     retry = page.get_by_role("button", name="Retry now")
     ok = retry.count() == 1
     if ok:

@@ -1,14 +1,14 @@
 <section class="repo-head">
-<div class="rh-top"><h1 class="repo-name"><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1><span class="vis" title="{% if r.private %}Sealed for its members{% else %}Readable by anyone, permanent on Arkiv{% endif %}">{% if r.private %}{{ m::i(l.v, "lock-simple") }}Private{% else %}{{ m::i(l.v, "globe-simple") }}Public{% endif %}</span>{% if r.archived %}<span class="arch">{{ m::i(l.v, "archive") }}Archived</span>{% endif %}
+<div class="rh-top"><h1 class="repo-name"><a href="/r/{{ r.hex }}">{{ r.name }}</a></h1><span class="vis" title="{% if r.private %}Sealed for its members{% else %}Readable by anyone{% endif %}">{% if r.private %}{{ m::i(l.v, "lock-simple") }}Private{% else %}{{ m::i(l.v, "globe-simple") }}Public{% endif %}</span>{% if r.archived %}<span class="arch">{{ m::i(l.v, "archive") }}Archived</span>{% endif %}
 <div class="rh-side">
-<details class="pop">
+{% if r.verify.state != "failed" && r.verify.state != "pending" %}<details class="pop">
 <summary class="btn">{{ m::i(l.v, "terminal-window") }}Clone{{ m::i(l.v, "caret-down") }}</summary>
 <div class="popover">
 <h3>Clone with git</h3>
 <div class="clonebox"><code>git clone arkiv::{{ r.addr }}</code><button class="copy js" type="button" data-copy="git clone arkiv::{{ r.addr }}" aria-label="Copy clone command">{{ m::i(l.v, "copy") }}</button></div>
 <p class="small">Reading and cloning are free. Git needs the <code>chart</code> helper installed.</p>
 </div>
-</details>
+</details>{% endif %}
 </div>
 </div>
 {% if !r.description.is_empty() %}<p class="repo-desc">{{ r.description }}</p>{% endif %}
