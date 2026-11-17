@@ -12,7 +12,7 @@
 //! (weights 400 to 700), `plex-mono-400.woff2` and `plex-mono-500.woff2` from
 //! `ofl/ibmplexmono/IBMPlexMono-{Regular,Medium}.ttf`.
 //!
-//! `icons.svg` is a sprite of 33 Phosphor "light" icons (MIT, `@phosphor-icons/core`
+//! `icons.svg` is a sprite of 42 Phosphor "light" icons (MIT, `@phosphor-icons/core`
 //! 2.1.1), each a `<symbol id="i-<name>">`; pages use `<use href="/assets/icons.svg?v=..#i-x">`.
 //! `favicon.svg` is its seal-check symbol in the proof green.
 
