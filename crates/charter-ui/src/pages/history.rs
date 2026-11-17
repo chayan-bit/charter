@@ -64,16 +64,20 @@ fn by_day(rows: Vec<CommitRow>) -> Vec<Day> {
 }
 
 fn log_page(app: &App, pref: &Pref, r: &Repo, rev: &str, page: usize) -> Response {
-    let Some(commit) = gitread::resolve(&r.git, r.view.as_ref(), rev) else {
+    let commit = gitread::resolve(&r.git, r.view.as_ref(), rev);
+    // The Commits tab links the default branch, which has no commit yet in an empty repo.
+    if commit.is_none() && rev != r.default_ref() {
         return error_page(
             app,
             pref,
             StatusCode::NOT_FOUND,
             "No such branch, tag or commit.",
         );
-    };
+    }
     let page = page.max(1);
-    let mut rows = gitread::log(&r.git, &commit, (page - 1) * PAGE, PAGE + 1);
+    let mut rows = commit.map_or_else(Vec::new, |c| {
+        gitread::log(&r.git, &c, (page - 1) * PAGE, PAGE + 1)
+    });
     let next = rows.len() > PAGE;
     rows.truncate(PAGE);
     let (mut l, head) = frame(app, pref, r, "log", "Commits");

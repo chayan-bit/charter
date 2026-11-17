@@ -249,6 +249,23 @@ async fn a_cached_repo_before_its_first_ui_sync_is_pending() {
     assert!(r.text().contains("No issues yet"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_commits_tab_of_a_repo_with_no_commits_is_empty_not_missing() {
+    let d = tempfile::tempdir().expect("tmp");
+    let rid = [8u8; 32];
+    drop(charter_sync::Repo::open(d.path(), &rid).expect("layout"));
+    let hex = charter_sync::ids::hex32(&rid);
+    let r = send(app_for(d.path()), req(&format!("/r/{hex}/log/main"))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert!(r.text().contains("No commits"), "{}", r.text());
+    let r = send(app_for(d.path()), req(&format!("/r/{hex}/log/nope"))).await;
+    assert_eq!(
+        r.status,
+        StatusCode::NOT_FOUND,
+        "another missing ref still 404s"
+    );
+}
+
 /// Regression for the repo-home p99 spike: a page never waits on the lock a sync round or
 /// push holds, and never sees a torn `view.json` or `cobs.json` while they are rewritten.
 #[tokio::test(flavor = "multi_thread")]
