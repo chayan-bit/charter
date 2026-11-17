@@ -80,6 +80,9 @@ The UI must never make a push wait on it, so:
   What is not: the first rows of a new device or a new peer (a first bind, anchor or head, or a cob op from a new wallet) show only in the count, so a writer who deletes one of its own junk rows in the same block hides that create until the next change the probe or the watch sees.
   Closing this would need those writers' addresses in the watch query, and a new device's or peer's address is not known before its first row, so no single query can name it.
   A single query cannot do both: the count must include rows from any wallet (issues and binds from new peers), and every order the node offers (user attributes, `$creator`, `$key`, `$expiresAt`, which a patch keeps) lets their writer place 100 rows after the real heads.
+- Failures: a round that failed on RPC trouble or a busy lock runs again at the next check; one that failed on the data itself (an expired entity, a bad signature or format) runs again only when the probe sees the repo change or Retry now is pressed, so a dead repo costs one probe per check, not a full round (`settled` in `crates/charter-ui/src/pace.rs`).
+  Every failure is printed on stderr as `ui sync <rid>: <error>` as well as shown on the pages.
+- The repos are checked concurrently, at most one check per repo at a time, so a slow or stuck repo never delays another repo or the header; the query count is the same as one at a time.
 - Quota: the RPC client keeps the latest `RateLimit` and `Arkiv-Quota-Used-Percent` headers; the loop slows from 50 % used, pauses at 80 % or on a 429 until the reset, never sleeps out a `Retry-After` inside a round, and the pages show "paused: RPC quota".
 
 Additions to `charter-sync` (both small, both tested): `Repo::try_open`, and `cob::list_since(rid, from_block)` so the loop reads only new ops.

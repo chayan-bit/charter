@@ -14,6 +14,7 @@ use charter_store::{
     Address, Arkiv, Operation, Query, QueryOpts, QueryPage, Quota, Receipt, SignedTx, StoreError,
     TxHash, TxInfo, U256,
 };
+use charter_sync::ids::hex32;
 use charter_ui::pace::Pacer;
 use charter_ui::security::Auth;
 use charter_ui::sync_loop::{Kind, Outcome, round};
@@ -32,6 +33,8 @@ struct Counting {
     refuse: Mutex<Option<Duration>>,
     /// Every query fails with an RPC error while set.
     fail: Mutex<bool>,
+    /// Queries about this repo never answer (a stuck RPC call).
+    stall: Mutex<Option<Rid>>,
     /// Records, per query, whether this repo's round was marked running.
     watch: Mutex<Option<(Arc<Shared>, Rid)>>,
     running: Mutex<Vec<bool>>,
@@ -61,6 +64,11 @@ impl Arkiv for Counting {
         }
         if *self.fail.lock().expect("lock") {
             return Err(StoreError::Rpc("boom from the test".into()));
+        }
+        let stall = *self.stall.lock().expect("lock");
+        let about = |r: Rid| q.render().is_ok_and(|s| s.contains(&hex32(&r)));
+        if stall.is_some_and(about) {
+            std::future::pending::<()>().await;
         }
         if let Some(d) = self.refuse.lock().expect("lock").take() {
             return Err(StoreError::RateLimited {
@@ -125,6 +133,7 @@ async fn sim(seed: u8, fresh: bool) -> Sim {
         quota: Mutex::new(None),
         refuse: Mutex::new(None),
         fail: Mutex::new(false),
+        stall: Mutex::new(None),
         watch: Mutex::new(None),
         running: Mutex::new(vec![]),
     };
@@ -524,4 +533,68 @@ async fn the_repo_on_screen_is_checked_before_the_others() {
     s.run(0, 1).await;
     let first = events.try_recv().expect("an event");
     assert_eq!(first.rid, on, "the page being looked at goes first");
+}
+
+/// A repo whose data expired on Arkiv fails every round the same way (a real v1 repo whose
+/// refs had expired re-ran a 14-query round every 10 s while on screen). It says so once,
+/// then costs one probe per check like any repo, and gets a full round again only when the
+/// probe sees it change or Retry now is pressed, so it cannot drain the quota every other
+/// repo shares.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_repo_says_so_then_costs_one_probe_per_check() {
+    let mut s = sim(50, true).await;
+    // Alice pushes data that expires; the UI reads as a reader who never cloned it.
+    let reader = Peer::new(&s.c.net, 51);
+    let mut alice = std::mem::replace(&mut s.alice, reader);
+    alice.cfg.data_lifetime = 400;
+    let dir = tempfile::tempdir().expect("work");
+    let work = work_repo(dir.path(), "w");
+    commit(&work, &[("f", &noise(3, 200_000))], "first");
+    push(&s.c.net, &alice, &s.rid, &work, &["refs/heads/main"])
+        .await
+        .expect("push");
+    s.c.net.mine(500);
+    s.shared.want(s.rid);
+    s.shared.focus(s.rid);
+    let _v = s.shared.viewer(s.rid);
+    let first = s.run(0, 1).await;
+    let r = s.shared.round(&s.rid);
+    assert!(r.hint.is_some_and(|h| h.contains("expired")), "{r:?}");
+    let later = s.run(1, 601).await;
+    eprintln!("expired repo on screen: {first} queries at first, then {later} in 10 min");
+    assert!(later <= 62, "one probe every 10 s, no full rounds: {later}");
+    assert!(s.shared.round(&s.rid).error.is_some(), "it still says so");
+}
+
+/// A repo whose RPC calls never answer holds up only itself: the loop checks every other
+/// repo as usual, so their pages and the header are never stuck behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stuck_repo_never_holds_up_the_others() {
+    let s = sim(52, false).await;
+    let other = init(&s.c.net, &s.alice, "other").await;
+    round(&s.c, &s.alice.cfg, &other).await.expect("round");
+    // The stuck one sorts first, so a loop that checks one repo at a time reaches it first.
+    let (stuck, fine) = (s.rid.min(other), s.rid.max(other));
+    *s.c.stall.lock().expect("lock") = Some(stuck);
+    s.shared.touch(); // the repo list is open
+    let Sim {
+        c, alice, shared, ..
+    } = s;
+    let cfg = alice.cfg.clone();
+    charter_ui::sync_loop::spawn(Arc::new(c), cfg, shared.clone(), None).expect("spawn");
+    let t0 = Instant::now();
+    while shared.round(&fine).ok_ms == 0 {
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "{} was never checked while {} hung",
+            hex32(&fine),
+            hex32(&stuck)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        shared.round(&stuck).ok_ms,
+        0,
+        "the stuck one is still waiting"
+    );
 }

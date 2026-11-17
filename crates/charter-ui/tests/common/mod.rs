@@ -20,7 +20,7 @@ use tower::ServiceExt;
 
 // Each test crate uses a different subset.
 #[allow(unused_imports)]
-pub use sync::{Net, Peer, commit, git, init, push, push2, work_repo};
+pub use sync::{Net, Peer, commit, git, init, noise, push, push2, work_repo};
 
 pub const PORT: u16 = 4321;
 pub const TOKEN: &str = "t0ken";
