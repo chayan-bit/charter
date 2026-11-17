@@ -35,19 +35,28 @@ Fixed in bb915b6: a running round shows as "checking for changes now", the list 
 ### 1.4 Search nav item never highlighted on desktop (header, `/search`)
 
 On `/search` at 901 px and wider the Search link is hidden (`.primary .s { display: none }`) and the Jump box is removed, so no main destination is marked as current.
+Fixed in e153541: the Search link shows in the top bar while it is the current page, and the e2e run checks it.
 
 ### 1.5 Patch files page is one megabyte and 2,000 tab stops (patch files)
 
 `/r/<rid>/patches/<id>/files` on the fixture is 963 KB of HTML (66 KB gzipped), because every diff line carries a `<details>` with one or two textareas for an inline comment.
 Keyboard users tab through 2,032 "+" buttons before they reach the review form.
+Open: making the comment boxes lazy needs a change to the review form contract (one box per line, posted as `c.<file>.<side>.<line>`), so v3 leaves it and the e2e size check reports this page as a warning, like `commit-long`.
 
 ### 1.6 Maintainer name and id duplicated (repo sidebar)
 
 When a peer has no alias the sidebar printed the short id twice: "d72c851 ... d72c851".
+Fixed in e153541: the id is printed only when it differs from the name.
 
 ### 1.7 Phone screenshots show the bottom nav in the middle of the page
 
 The fixed bottom nav sits over content in full-page captures, and on short pages it covers the last row; content has 120 px of bottom padding but the README end and forms still sit under it on 390x844.
+Fixed in e153541: the bottom nav is sticky at the end of the page, so it never covers content; full-page captures still draw it where the first screen ends, which is how Playwright captures sticky elements.
+
+### 1.8 The Commits tab of an empty repo is a 404 (commits)
+
+The Commits tab links `/r/<rid>/log/<default branch>`, and a repo with no commit yet has no such branch, so the tab opened the "No such branch, tag or commit" error page.
+Fixed in 8f10adc: the default branch of a repo with no commits shows the empty log; any other missing ref is still a 404.
 
 ## 2. Global visual and UX problems
 
