@@ -25,6 +25,8 @@ pub struct FileDiff {
     pub add: usize,
     pub del: usize,
     pub binary: bool,
+    /// Some of its lines were left out by the line budget.
+    pub cut: bool,
     pub lines: Vec<Line>,
 }
 
@@ -65,6 +67,7 @@ impl Parser {
         }
         if self.shown >= self.limit {
             self.hidden += 1;
+            f.cut = true;
             return;
         }
         self.shown += 1;
@@ -291,5 +294,7 @@ mod tests {
         assert_eq!((f[2].path.as_str(), f[2].from.as_deref()), ("d", Some("c")));
         let (f, hidden) = parse(D, 2);
         assert_eq!((f[0].lines.len(), hidden, f[0].add), (2, 2, 1));
+        assert!(f[0].cut, "a file with lines left out says so");
+        assert!(!f[1].cut && !f[2].cut);
     }
 }

@@ -2,8 +2,8 @@
 {% import "macros.html" as m %}
 {% block main %}
 {% include "repo.html" %}
-<div class="pathbar">
-<h2><a href="/r/{{ r.hex }}/patches/{{ t.id }}">{{ t.title }}</a> / files</h2>
+<div class="pathbar titled">
+<h2><a href="/r/{{ r.hex }}/patches/{{ t.id }}">{{ t.title }}</a> <span>files</span></h2>
 <div class="acts">{% if !head.is_empty() %}<a class="btn btn-sm" href="/r/{{ r.hex }}/commit/{{ head }}">Commit <code>{{ self.short(head) }}</code></a>{% endif %}<a class="btn btn-sm" href="/r/{{ r.hex }}/patches/{{ t.id }}">Conversation</a></div>
 </div>
 {% if missing %}<section class="empty">{{ m::i(l.v, "git-commit") }}<p>The patch head {% if !head.is_empty() %}<code>{{ self.short(head) }}</code> {% endif %}is not in this computer's git cache yet. It shows here once a push that contains it is synced.</p></section>{% endif %}
@@ -12,10 +12,9 @@
 {% for fv in files %}{% let f = fv.f %}
 <details class="file" id="f{{ fv.idx }}"{% if !fv.lazy %} open{% endif %} data-copy="{{ f.path }}">
 <summary><code>{% if let Some(from) = f.from %}{{ from }} to {% endif %}{{ f.path }}</code>{% if fv.notes() > 0 %}<span class="chip">{{ fv.notes() }} comment{% if fv.notes() != 1 %}s{% endif %}</span>{% endif %}<span class="delta"><span class="add">+{{ f.add }}</span><span class="del">-{{ f.del }}</span></span></summary>
-{% if f.binary %}<p class="muted codefoot">Binary file.</p>{% else if fv.lazy %}<div class="lazy" hx-get="?file={{ fv.idx }}" hx-trigger="toggle from:closest details once" hx-swap="outerHTML" hx-boost="false"><p class="codefoot">{{ fv.rows.len() }} lines load when you open this file. <a href="?open={{ fv.idx }}#f{{ fv.idx }}" hx-boost="false">Load it without scripts</a></p></div>{% else %}{% include "diff_table.html" %}{% endif %}
+{% if f.binary %}<p class="muted codefoot">Binary file.</p>{% else if fv.lazy %}<div class="lazy" hx-get="?file={{ fv.idx }}" hx-trigger="toggle from:closest details once" hx-swap="outerHTML" hx-boost="false"><p class="codefoot">{{ f.add + f.del }} changed line{% if f.add + f.del != 1 %}s{% endif %} load when you open this file. <a href="?open={{ fv.idx }}#f{{ fv.idx }}" hx-boost="false">Load it without scripts</a></p></div>{% else %}{% include "diff_table.html" %}{% endif %}
 </details>
 {% endfor %}
-{% if hidden > 0 %}<p class="more">{{ hidden }} more diff lines. <a href="?all=1">Show all</a></p>{% endif %}
 {% if files.is_empty() && !missing %}<section class="empty"><p>This patch changes no files.</p></section>{% endif %}
 </div>
 <section class="sec">

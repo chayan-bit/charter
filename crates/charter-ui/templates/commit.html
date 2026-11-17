@@ -18,9 +18,9 @@
 </article>
 <div class="sec">
 {% for f in files %}
-<details class="file"{% if f.lines.len() <= 300 %} open{% endif %} data-copy="{{ f.path }}">
+<details class="file"{% if f.lines.len() <= 300 && !f.cut %} open{% endif %} data-copy="{{ f.path }}">
 <summary><code>{% if let Some(from) = f.from %}{{ from }} to {% endif %}{{ f.path }}</code><span class="delta"><span class="add">+{{ f.add }}</span><span class="del">-{{ f.del }}</span></span></summary>
-{% if f.binary %}<p class="muted codefoot">Binary file.</p>{% else %}
+{% if f.binary %}<p class="muted codefoot">Binary file.</p>{% else if f.lines.is_empty() %}<p class="muted codefoot">Not shown here, past the line limit. <a href="?all=1">Show all</a></p>{% else %}
 <div class="scroll" tabindex="0" role="region" aria-label="Changes to {{ f.path }}">
 <table class="code diff"><tbody>
 {#- Lean rows (optional </td> end tags left out, the sign drawn by CSS): long diffs are 2,000 rows. -#}

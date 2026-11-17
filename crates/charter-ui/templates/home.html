@@ -5,7 +5,9 @@
 <div class="cols" id="live" data-live="push">
 <div class="maincol">
 <div class="toolbar">{% let small = false %}{% include "picker.html" %}<a class="small" href="/r/{{ r.hex }}/branches">{{ m::i(l.v, "git-branch") }}<span><b>{{ picker.branches }}</b> branch{% if picker.branches != 1 %}es{% endif %}</span></a><a class="small" href="/r/{{ r.hex }}/branches">{{ m::i(l.v, "tag") }}<span><b>{{ picker.tags }}</b> tag{% if picker.tags != 1 %}s{% endif %}</span></a></div>
-{% if entries.is_empty() %}
+{% if entries.is_empty() && r.verify.state == "failed" %}
+<section class="empty">{{ m::i(l.v, "warning-circle") }}<h2>Nothing to show until a sync works</h2><p>The first sync failed, so nothing in this repo is verified yet. The reason and Retry now are in the red notice above; Charter also tries again on its own.</p></section>
+{% else if entries.is_empty() %}
 <section class="empty">{{ m::i(l.v, "git-commit") }}<h2>Nothing on {{ picker.current }} yet</h2><p>No verified commits on the default branch. Push one with <code>git push</code>; it shows here once a sync round checks it.</p><div class="clonebox"><code>git clone arkiv::{{ r.addr }}</code><button class="copy js" type="button" data-copy="git clone arkiv::{{ r.addr }}" aria-label="Copy clone command">{{ m::i(l.v, "copy") }}</button></div></section>
 {% else %}
 <div class="box">

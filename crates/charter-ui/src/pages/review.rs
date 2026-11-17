@@ -63,7 +63,6 @@ pub struct Files {
     pub t: Thread,
     pub head: String,
     pub files: Vec<FileView>,
-    pub hidden: usize,
     pub outdated: Vec<Note>,
     /// The head is not in this computer's git cache yet.
     pub missing: bool,
@@ -192,12 +191,17 @@ fn files_page(app: &App, pref: &Pref, r: &Repo, id: &str, q: &All) -> Response {
         return error_page(app, pref, StatusCode::NOT_FOUND, msg);
     };
     let head = t.revisions.last().cloned().unwrap_or_default();
-    let limit = if all { usize::MAX } else { HIGHLIGHT_LINES };
+    // Cut files load whole when opened, so only the page itself keeps the line budget.
+    let limit = if all || q.file.is_some() || q.open.is_some() {
+        usize::MAX
+    } else {
+        HIGHLIGHT_LINES
+    };
     let text = gitread::is_oid(&head)
         .then(|| patch_diff(r, &t, &head))
         .flatten();
     let missing = text.is_none();
-    let (parsed, hidden) = diff::parse(&text.unwrap_or_default(), limit);
+    let (parsed, _) = diff::parse(&text.unwrap_or_default(), limit);
     let mut files: Vec<FileView> = parsed
         .into_iter()
         .enumerate()
@@ -206,7 +210,7 @@ fn files_page(app: &App, pref: &Pref, r: &Repo, id: &str, q: &All) -> Response {
                 .into_iter()
                 .map(|d| Row { d, notes: vec![] })
                 .collect();
-            let lazy = rows.len() > LAZY_ROWS && q.open != Some(idx);
+            let lazy = !all && (rows.len() > LAZY_ROWS || f.cut) && q.open != Some(idx);
             FileView { idx, f, rows, lazy }
         })
         .collect();
@@ -242,7 +246,6 @@ fn files_page(app: &App, pref: &Pref, r: &Repo, id: &str, q: &All) -> Response {
         t,
         head,
         files,
-        hidden,
         outdated,
         missing,
     })

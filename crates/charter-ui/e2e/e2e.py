@@ -238,6 +238,7 @@ LAYOUT_JS = """() => {
     out.repoBottom = Math.round(r(q('.repo-head')).bottom);
     const vs = q('#verify > summary'); out.vpH = vs ? Math.round(r(vs).height) : null;
   }
+  out.emptyOpen = [...document.querySelectorAll('details.file[open]')].filter(d => !d.querySelector('tr, .codefoot, .lazy')).map(d => d.dataset.copy || '?');
   out.gutters = [...document.querySelectorAll('.diff')].map(t => {
     const row = t.querySelector('tr:not(.hunk)'); const lc = row && row.querySelector('.lc');
     return row ? [Math.round(r(lc).left - r(t).left), Math.round(r(row.querySelector('.ln')).width)] : null; });
@@ -638,6 +639,7 @@ def layout_checks(page, name, scope, vp, rid):
     if vp == "desktop":
         rec("top bar and content share left and right edges", scope,
             m["left"][0] == m["left"][1] and (m["right"] is None or abs(m["right"][0] - m["right"][1]) <= 1), f'left {m["left"]}, right {m["right"]}')
+    rec("no expanded diff file has an empty body", scope, not m["emptyOpen"], ", ".join(m["emptyOpen"]))
     if "tabTops" in m:
         rec("repo tabs sit on one row, no scrollbar artifact", scope, len(m["tabTops"]) == 1 and m["tabScrollbar"] == 0,
             f'rows at {m["tabTops"]}, scrollbar {m["tabScrollbar"]}px')

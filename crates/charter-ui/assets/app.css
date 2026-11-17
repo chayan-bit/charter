@@ -383,6 +383,9 @@ a.hash:hover { color: var(--accent); }
 .pathbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 20px 0 12px; }
 .pathbar h2 { font: 500 var(--t-base) var(--f-mono); letter-spacing: 0; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--fg-3); }
 .pathbar h2 a { color: var(--accent); }
+.pathbar.titled h2 { font: 600 var(--t-md)/1.4 var(--f-ui); letter-spacing: -.01em; color: var(--fg); }
+.pathbar.titled h2 a { color: var(--fg); }
+.pathbar.titled h2 span { margin-left: 6px; font-weight: 500; color: var(--fg-3); }
 .owners { margin: -4px 0 12px; font-size: var(--t-sm); color: var(--fg-3); }
 .owners b { font-weight: 600; color: var(--fg-2); }
 .pathbar .acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 0; }
