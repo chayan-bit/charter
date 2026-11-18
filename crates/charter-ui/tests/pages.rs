@@ -56,9 +56,18 @@ async fn repo_home_has_readme_refs_clone_and_panel() {
         "plain words outside Technical details"
     );
     assert!(h.contains("id=\"verify\"") && h.contains("ML-DSA-65"));
+    // The popover never breaks an id: the scheme is one unit, the address a copy box.
+    let tech = &h[h.find("<details class=\"tech\">").expect("tech")..];
+    assert!(tech.contains("<span class=\"nw\">ML-DSA-65 + Ed25519</span>"));
+    let z = charter_sync::ids::to_text(&f.rid);
+    assert!(
+        tech.contains(&format!(
+            "data-copy=\"arkiv::{z}\" aria-label=\"Copy address\""
+        )),
+        "{tech}"
+    );
     assert!(h.contains("README.md") && h.contains("src/"), "root tree");
     // Also reachable by the z-base58 form of the rid.
-    let z = charter_sync::ids::to_text(&f.rid);
     assert!(page(&format!("/r/{z}")).await.contains("<h1>Demo</h1>"));
 }
 

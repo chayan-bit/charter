@@ -299,6 +299,8 @@ details.pop[open] .popover { animation: pop .14s cubic-bezier(.16, 1, .3, 1); }
 .facts dt { color: var(--fg-3); }
 .facts dd { color: var(--fg); overflow-wrap: anywhere; }
 .facts dd.bad { color: var(--bad); }
+#verify .facts code { overflow-wrap: normal; white-space: nowrap; }
+#verify .facts .clonebox { margin: 0; padding-left: 8px; }
 details.tech { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
 details.tech > summary { cursor: pointer; font-size: var(--t-sm); font-weight: 600; color: var(--fg-2); width: fit-content; }
 .clonebox { display: flex; align-items: center; gap: 4px; margin-top: 8px; padding: 3px 3px 3px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r); min-width: 0; }

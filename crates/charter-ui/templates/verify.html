@@ -18,10 +18,10 @@
 <details class="tech"><summary>Technical details</summary>
 <dl class="facts">
 {% if let Some((rev, h, block, key)) = r.verify.head_rev %}<dt>Identity</dt><dd>{{ r.verify.revisions }} revision{% if r.verify.revisions != 1 %}s{% endif %}; head rev {{ rev }} <code title="{{ h }}">{{ r.short(h) }}</code> at block <code>{{ block }}</code>, entity <code title="{{ key }}">{{ r.short(key) }}</code></dd>{% endif %}
-{% for p in r.verify.peers %}<dt>{% if p.delegate %}Maintainer{% else %}Peer{% endif %} {{ r.who(p.nid) }}</dt><dd><code title="{{ p.nid }}" data-copy="{{ p.nid }}">{{ r.short(p.nid) }}</code>{% if let Some((seq, h, block, key)) = p.head %}: head seq {{ seq }}, body <code title="{{ h }}">{{ r.short(h) }}</code> at block <code>{{ block }}</code>, entity <code title="{{ key }}">{{ r.short(key) }}</code>; ML-DSA-65 + Ed25519 valid{% else %}: no signed head{% endif %}</dd>{% endfor %}
+{% for p in r.verify.peers %}<dt>{% if p.delegate %}Maintainer{% else %}Peer{% endif %} {{ r.who(p.nid) }}</dt><dd><code title="{{ p.nid }}" data-copy="{{ p.nid }}">{{ r.short(p.nid) }}</code>{% if let Some((seq, h, block, key)) = p.head %}: head seq {{ seq }}, body <code title="{{ h }}">{{ r.short(h) }}</code> at block <code>{{ block }}</code>, entity <code title="{{ key }}">{{ r.short(key) }}</code>; <span class="nw">ML-DSA-65 + Ed25519</span> valid{% else %}: no signed head{% endif %}</dd>{% endfor %}
 {% for e in r.verify.equivocations %}<dt>Equivocation</dt><dd class="bad">{{ e.kind }} of <code title="{{ e.nid }}">{{ r.short(e.nid) }}</code> at seq {{ e.seq }}: entity <code title="{{ e.keys[0] }}">{{ r.short(e.keys[0]) }}</code> vs <code title="{{ e.keys[1] }}">{{ r.short(e.keys[1]) }}</code></dd>{% endfor %}
 {% if r.verify.head_block > 0 %}<dt>Chain head</dt><dd>block <code>{{ r.verify.head_block }}</code></dd>{% endif %}
-<dt>Address</dt><dd><code>{{ r.addr }}</code></dd>
+<dt>Address</dt><dd><div class="clonebox fit"><code title="{{ r.addr }}">{{ r.addr }}</code><button class="copy js" type="button" data-copy="arkiv::{{ r.addr }}" aria-label="Copy address">{{ m::i(l.v, "copy") }}</button></div></dd>
 </dl>
 </details>
 </div>
