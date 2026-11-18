@@ -410,17 +410,31 @@ pub fn last_push(v: Option<&RepoView>) -> Option<(u64, String)> {
 }
 
 /// The date of the earliest expiry among what the repo needs, read off the cached view, and
-/// how loud to be about it: `bad` once passed, `warn` under 30 days.
+/// how loud to be about it: `bad` once passed, `warn` from where `git fetch` warns (7 days;
+/// a push writes data for 30, so a 30-day line would be amber from the first push).
 fn renew_by(v: &RepoView) -> Option<(String, &'static str)> {
-    const MONTH_MS: u64 = 30 * 86_400_000;
-    let ahead = v.min_expiry?.saturating_sub(v.head_block);
-    let at = v
-        .synced_ms
-        .saturating_add(ahead.saturating_mul(people::BLOCK_MS));
-    let left = at.saturating_sub(crate::sync_loop::now_ms());
+    renew_at(
+        v.min_expiry,
+        v.head_block,
+        v.synced_ms,
+        crate::sync_loop::now_ms(),
+    )
+}
+
+/// [`renew_by`] at the wall-clock time `now` (ms).
+fn renew_at(
+    min_expiry: Option<u64>,
+    head_block: u64,
+    synced_ms: u64,
+    now: u64,
+) -> Option<(String, &'static str)> {
+    const WARN_MS: u64 = charter_sync::repo::WARN_EXPIRY_BLOCKS * people::BLOCK_MS;
+    let ahead = min_expiry?.saturating_sub(head_block);
+    let at = synced_ms.saturating_add(ahead.saturating_mul(people::BLOCK_MS));
+    let left = at.saturating_sub(now);
     let class = match left {
         0 => "bad",
-        l if l < MONTH_MS => "warn",
+        l if l < WARN_MS => "warn",
         _ => "",
     };
     Some((people::date(at), class))
@@ -582,4 +596,47 @@ pub async fn not_found(
     pref: Pref,
 ) -> Response {
     not_found_page(&app, &pref, "Nothing here.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::renew_at;
+
+    const DAY: u64 = 43_200; // blocks of 2 s
+    const SYNCED: u64 = 1_800_000_000_000; // 15 Jan 2027 08:00 UTC
+    const HEAD: u64 = 1_000_000;
+
+    fn at(days_left: u64, now_days: u64) -> Option<(String, &'static str)> {
+        renew_at(
+            Some(HEAD + days_left * DAY),
+            HEAD,
+            SYNCED,
+            SYNCED + now_days * 86_400_000,
+        )
+    }
+
+    /// A push writes data for 30 days, so a fresh repo must not be amber: amber starts
+    /// where `git fetch` starts warning (7 days), red once the date passed.
+    #[test]
+    fn renew_by_is_quiet_for_a_fresh_push_amber_from_7_days_and_red_once_passed() {
+        assert_eq!(at(60, 0), Some(("16 Mar 2027".into(), "")));
+        assert_eq!(at(30, 0).map(|r| r.1), Some(""));
+        assert_eq!(at(29, 0), Some(("13 Feb 2027".into(), "")));
+        assert_eq!(at(7, 0).map(|r| r.1), Some(""));
+        assert_eq!(at(10, 4).map(|r| r.1), Some("warn"));
+        assert_eq!(at(10, 9).map(|r| r.1), Some("warn"));
+        assert_eq!(at(10, 10), Some(("25 Jan 2027".into(), "bad")));
+        assert_eq!(at(10, 11).map(|r| r.1), Some("bad"));
+    }
+
+    #[test]
+    fn renew_by_is_red_for_an_expiry_already_behind_the_synced_head() {
+        let r = renew_at(Some(HEAD - DAY), HEAD, SYNCED, SYNCED);
+        assert_eq!(r, Some(("15 Jan 2027".into(), "bad")));
+    }
+
+    #[test]
+    fn renew_by_is_absent_without_an_expiry() {
+        assert_eq!(renew_at(None, HEAD, SYNCED, SYNCED), None);
+    }
 }
