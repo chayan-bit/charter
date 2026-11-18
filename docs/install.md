@@ -15,16 +15,16 @@ https://github.com/chayan-bit/charter/releases/download/<tag>/charter-<tag>-x86_
 https://github.com/chayan-bit/charter/releases/download/<tag>/SHA256SUMS
 ```
 
-For v0.7.2 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.2/charter-v0.7.2-aarch64-apple-darwin.tar.gz`.
-For v0.7.2 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.2/charter-v0.7.2-x86_64-unknown-linux-gnu.tar.gz`.
-For v0.7.2 on Windows x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.2/charter-v0.7.2-x86_64-pc-windows-msvc.zip`.
+For v0.7.3 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.3/charter-v0.7.3-aarch64-apple-darwin.tar.gz`.
+For v0.7.3 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.3/charter-v0.7.3-x86_64-unknown-linux-gnu.tar.gz`.
+For v0.7.3 on Windows x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.3/charter-v0.7.3-x86_64-pc-windows-msvc.zip`.
 v0.1.0 predates the rename to Charter: its archives are named `arkiv-git-v0.1.0-<target>.tar.gz` and hold `git-remote-arkiv`, `arkiv-git` and `arkiv-git-mcp`.
 A combined `SHA256SUMS` file is attached to the release as well.
 
 ## Install snippet
 
 ```sh
-TAG=v0.7.2
+TAG=v0.7.3
 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 BASE=https://github.com/chayan-bit/charter/releases/download/$TAG
 curl -fsSLO "$BASE/charter-$TAG-$TARGET.tar.gz"
@@ -45,6 +45,21 @@ git clone arkiv::<rid>
 
 Files fetched with `curl` carry no quarantine flag, so the snippet above runs as is.
 If you download the archive in a browser and macOS refuses to open the binaries, clear the flag with `xattr -d com.apple.quarantine ~/.local/bin/git-remote-arkiv ~/.local/bin/chart ~/.local/bin/chart-mcp`.
+
+## Upgrading to v0.7.3
+
+v0.7.3 reads every repo v0.7.2 wrote and changes no storage format, program or zk guest, so v0.7.2 zk receipts stay valid.
+
+- Clone, fetch and push work with git older than 2.42 (Ubuntu 22.04 ships 2.34, Debian 12 ships 2.39); before, every clone and fetch failed with `E_MISSING_OBJECTS`.
+- With git older than 2.45 a commit whose history is still arriving is no longer judged "not an ancestor", so a fast-forward is not rejected while its objects are in flight.
+- `chart ui` is redesigned: a provenance band, a spec sidebar, deduplicated file rows, Geist fonts, and large diffs collapsed until opened.
+- The renew-by line is truthful: it turns amber 7 days before expiry, where `git fetch` warns, and red once the date has passed; a repo whose data has expired says so.
+- A rolled-back or doubled device head is no longer labelled "Expired on Arkiv"; it gets its own hint and stays on the attention strip.
+- Sync no longer stalls on an expired repo: repos are checked concurrently, a round that fails on the data itself reruns only when the repo changes or you press Retry, and a busy repo lock is retried within seconds.
+- A failed sync shows one failure band with the reason and Retry, never a stale page as current.
+- The verify popover keeps ids on one line.
+- `chart keepalive --dry-run` prints the estimated cost instead of "spent: 0 tGLM".
+- `chart search --recent` help says it counts days and only sees format v1 anchors.
 
 ## Upgrading to v0.7.2
 
