@@ -320,22 +320,47 @@ impl Round {
     }
 }
 
+/// A device head that contradicts its own writes (an older head, or two): it shares
+/// `E_CONTROL_NOT_LIVE` with an expired record, but nothing expired.
+fn contradicts(e: &UiError) -> bool {
+    use charter_core::VerifyError as V;
+    matches!(
+        e,
+        UiError::Sync(charter_sync::SyncError::Verify(
+            V::HeadRollback { .. } | V::DuplicateHead { .. }
+        ))
+    )
+}
+
 /// A record the repo needs is gone from Arkiv (its lifetime ran out).
+///
+/// The read cannot tell that from a record written moments ago that Arkiv has not indexed
+/// yet: both are a missing row. Such a lag heals on its own, since the probe sees the row
+/// arrive and the next round clears the error (docs/p6/ui-v3-audit.md 1.9).
 pub fn expired(e: &UiError) -> bool {
     use charter_core::ErrorCode as C;
-    matches!(e, UiError::Sync(e) if matches!(e.code(), C::NotLive | C::IdNotLive | C::ControlNotLive))
+    !contradicts(e)
+        && matches!(e, UiError::Sync(e) if matches!(e.code(), C::NotLive | C::IdNotLive | C::ControlNotLive))
 }
 
 /// A plain sentence for the sync errors a user can act on or wait out.
 pub fn hint(e: &UiError) -> Option<&'static str> {
     use charter_core::ErrorCode as C;
+    if contradicts(e) {
+        return Some(
+            "A device of this repo shows signed records that contradict each other (an older \
+             head, or two), so this computer does not trust them. Charter checks again when \
+             they change.",
+        );
+    }
     let UiError::Sync(e) = e else {
         return None;
     };
     match e.code() {
         C::NotLive | C::IdNotLive | C::ControlNotLive => Some(
             "A record this repo needs is no longer on Arkiv (it expired), so this computer \
-             cannot rebuild or check it. Only its maintainers can publish it again.",
+             cannot rebuild or check it. Only its maintainers can publish it again. A record \
+             written in the last minute can look the same until Arkiv indexes it.",
         ),
         C::Rpc | C::InconsistentView | C::Paging => {
             Some("Arkiv's RPC did not answer as expected. Charter tries again on its own.")
@@ -579,4 +604,54 @@ pub fn spawn<A: Arkiv + 'static>(
     std::thread::Builder::new()
         .name("chart-ui-sync".into())
         .spawn(move || rt.block_on(run(a, cfg, shared, ws)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expired, hint};
+    use crate::UiError;
+    use charter_core::{Missing, VerifyError};
+    use charter_sync::SyncError;
+
+    fn ui(e: VerifyError) -> UiError {
+        UiError::Sync(SyncError::from(e))
+    }
+
+    #[test]
+    fn missing_records_read_as_expired() {
+        for e in [
+            ui(VerifyError::NotLive(Missing::Refs([1; 32]))),
+            ui(VerifyError::IdNotLive),
+            ui(VerifyError::ControlNotLive {
+                nid: [2; 32],
+                address: [3; 20],
+                created: 5,
+                live: 4,
+            }),
+        ] {
+            assert!(expired(&e), "{e}");
+            assert!(hint(&e).is_some_and(|h| h.contains("expired")), "{e}");
+        }
+    }
+
+    /// Both share `E_CONTROL_NOT_LIVE` with an expired control entity, but nothing expired:
+    /// they are records that contradict each other, which the user must see.
+    #[test]
+    fn a_rolled_back_or_doubled_head_is_not_called_expired() {
+        for e in [
+            ui(VerifyError::HeadRollback {
+                device: [1; 32],
+                address: [2; 20],
+                nonce: 7,
+                recorded: 5,
+            }),
+            ui(VerifyError::DuplicateHead {
+                device: [1; 32],
+                count: 2,
+            }),
+        ] {
+            assert!(!expired(&e), "{e}");
+            assert!(hint(&e).is_some_and(|h| !h.contains("expired")), "{e}");
+        }
+    }
 }
