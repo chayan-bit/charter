@@ -145,7 +145,13 @@ pub fn is_ancestor(git: &Git, a: &[u8], b: &[u8]) -> Option<bool> {
             ancestry::remember(git, &pair);
             Some(true)
         }
-        Ok(Some(1)) => Some(false),
+        // git before 2.45 also answers 1 when a commit between is missing; a walk of what
+        // `b` holds beyond `a` fails on that hole, so only a complete history says false.
+        Ok(Some(1)) => {
+            let not_a = format!("^{a}");
+            let walk = git.exit_code(&["rev-list", "--quiet", &b, &not_a]);
+            matches!(walk, Ok(Some(0))).then_some(false)
+        }
         _ => None,
     }
 }
