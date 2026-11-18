@@ -470,10 +470,7 @@ impl Git {
         if tips.is_empty() {
             return true;
         }
-        let mut input = tips.join("\n");
-        input.push_str("\n--not\n");
-        input.push_str(&old.join("\n"));
-        input.push('\n');
+        let input = rev_input(tips, old);
         self.run(
             &[
                 "rev-list",
@@ -559,12 +556,19 @@ pub fn thin_packs_enabled() -> bool {
     std::env::var_os("CHARTER_THIN_PACKS").is_some_and(|v| !v.is_empty())
 }
 
-/// `git rev-list --stdin` style input: tips, then `--not`, then exclusions.
+/// `git rev-list --stdin` style input: tips, then each exclusion as `^<oid>`. No `--not`
+/// line: `rev-list --stdin` takes options only from git 2.42 on.
 fn rev_input(tips: &[String], exclude: &[String]) -> String {
-    let mut input = tips.join("\n");
-    input.push_str("\n--not\n");
-    input.push_str(&exclude.join("\n"));
-    input.push('\n');
+    let mut input = String::new();
+    for t in tips {
+        input.push_str(t);
+        input.push('\n');
+    }
+    for e in exclude {
+        input.push('^');
+        input.push_str(e);
+        input.push('\n');
+    }
     input
 }
 
@@ -659,6 +663,30 @@ mod tests {
         sh(d, &["commit", "-qm", "one"]);
         let head = sh(d, &["rev-parse", "HEAD"]);
         (tmp, head)
+    }
+
+    /// git before 2.42 (Ubuntu 22.04 ships 2.34) refuses `--not` in `rev-list --stdin`
+    /// ("options not supported in --stdin mode"), which failed every clone and push there.
+    #[test]
+    fn stdin_revisions_exclude_with_carets_not_options() {
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            rev_input(&s(&["a", "b"]), &s(&["c", "d"])),
+            "a\nb\n^c\n^d\n"
+        );
+        assert_eq!(rev_input(&s(&["a"]), &[]), "a\n");
+    }
+
+    #[test]
+    fn connected_sees_a_missing_object_and_accepts_old_tips() {
+        let tmp = undeltified_repo();
+        let d = tmp.path();
+        let g = Git::work(Some(d));
+        let two = sh(d, &["rev-parse", "HEAD"]);
+        let one = sh(d, &["rev-parse", "HEAD~1"]);
+        assert!(g.connected(std::slice::from_ref(&two), &[]));
+        assert!(g.connected(std::slice::from_ref(&two), std::slice::from_ref(&one)));
+        assert!(!g.connected(&["1".repeat(40)], std::slice::from_ref(&one)));
     }
 
     #[test]
