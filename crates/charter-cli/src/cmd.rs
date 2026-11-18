@@ -185,7 +185,9 @@ pub struct SearchArgs {
     pub license: Vec<String>,
     #[arg(long)]
     pub peer: Option<String>,
-    #[arg(long)]
+    /// Repos with an anchor written in the last N days. Only format v1 pushes write
+    /// anchors; v2 and later heads carry no time attribute, so this misses them.
+    #[arg(long, value_name = "DAYS")]
     pub recent: Option<u64>,
     #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub limit: u32,

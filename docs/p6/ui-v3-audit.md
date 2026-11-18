@@ -42,6 +42,8 @@ Fixed in e153541: the Search link shows in the top bar while it is the current p
 `/r/<rid>/patches/<id>/files` on the fixture is 963 KB of HTML (66 KB gzipped), because every diff line carries a `<details>` with one or two textareas for an inline comment.
 Keyboard users tab through 2,032 "+" buttons before they reach the review form.
 Open: making the comment boxes lazy needs a change to the review form contract (one box per line, posted as `c.<file>.<side>.<line>`), so v3 leaves it and the e2e size check reports this page as a warning, like `commit-long`.
+Fixed in v4 (9884d28) without touching that contract: large files on the patch files page start collapsed and load on open, so the page went from 964,511 B to 13,191 B of HTML.
+The commit page (`commit-long`) has no comment boxes; its size is the diff itself, cut at 2,000 lines behind "Show all".
 
 ### 1.6 Maintainer name and id duplicated (repo sidebar)
 
@@ -57,6 +59,29 @@ Fixed in e153541: the bottom nav is sticky at the end of the page, so it never c
 
 The Commits tab links `/r/<rid>/log/<default branch>`, and a repo with no commit yet has no such branch, so the tab opened the "No such branch, tag or commit" error page.
 Fixed in 8f10adc: the default branch of a repo with no commits shows the empty log; any other missing ref is still a 404.
+
+### 1.9 "Expired on Arkiv" for a record that is only late or that contradicts itself (repo list, repo page)
+
+The round maps `E_NOT_LIVE`, `E_ID_NOT_LIVE` and `E_CONTROL_NOT_LIVE` to "Expired on Arkiv", keeps the repo off the attention strip and does not re-run the round until the probe sees a change.
+`E_CONTROL_NOT_LIVE` also covers a device head that contradicts its own writes (`HeadRollback`: an older head than its address wrote, `DuplicateHead`: two valid heads), where nothing expired; those now say so, with their own hint, and stay on the attention strip (fix/batch-0.7.3).
+A record written moments ago that Arkiv has not indexed yet is a missing row, exactly like an expired one, and the client cannot tell them apart without another read.
+It is left as "Expired on Arkiv", with a hint sentence that a record written in the last minute can look the same; the label heals on its own, because the probe sees the row arrive and the next round clears the error.
+
+### 1.10 "Renew by" was amber from the first push (repo sidebar)
+
+The storage line turned amber under 30 days, but a push writes refs, manifests and chunks for exactly 30 days, so every repo not yet kept alive was amber from its first push.
+It now turns amber where `git fetch` starts warning (7 days, `WARN_EXPIRY_BLOCKS`) and red once the date passed, with unit tests for the date and both boundaries (fix/batch-0.7.3).
+
+### 1.11 Ids wrapped in the verify popover (repo header)
+
+On a phone the address in Technical details broke mid-string and "ML-DSA-65" broke at its hyphens.
+The address is now the same one-line copy box as the sidebar and short ids never wrap (fix/batch-0.7.3).
+Technical details stays a disclosure inside the popover on purpose: it keeps protocol words (peers, seq, entity keys) out of the plain-language view, which `tests/v2.rs` checks.
+
+### 1.12 Issue and patch state pills (issues, patches, threads)
+
+The v0.7.2 pill was grey for open and closed alike.
+Fixed in v3 (e153541): open is green with a dashed circle, merged violet with a merge icon, closed grey with a check (issues) or a cross (patches).
 
 ## 2. Global visual and UX problems
 
