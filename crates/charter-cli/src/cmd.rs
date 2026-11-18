@@ -346,7 +346,11 @@ async fn keepalive_cmd<A: Arkiv>(a: &A, cfg: &Config, k: &KeepArgs) -> Result<()
         "keep set: {} entities; {verb} {} in {} txs",
         r.kept, r.extended, r.txs
     );
-    println!("gas used: {}; spent: {} tGLM", r.gas, fmt_glm(r.spent));
+    if k.dry_run {
+        println!("estimated cost: {} tGLM", fmt_glm(r.estimate));
+    } else {
+        println!("gas used: {}; spent: {} tGLM", r.gas, fmt_glm(r.spent));
+    }
     if let Some(m) = r.min_expiry_blocks {
         println!(
             "minimum expiry: {} days",

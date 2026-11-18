@@ -3,6 +3,7 @@
 mod common;
 
 use charter_core::Kind;
+use charter_store::U256;
 use charter_sync::keepalive::{self, KeepOpts};
 use charter_sync::search::{SearchQuery, search};
 use charter_sync::state::State;
@@ -43,6 +44,10 @@ async fn keepalive_before_expiry_keeps_the_clone_working_and_ignores_spam() {
         (planned.extended, planned.gas),
         (6, 0),
         "4 chunks, refs, manifest: {planned:?}"
+    );
+    assert!(
+        planned.estimate > U256::ZERO,
+        "a dry run prices what it would extend: {planned:?}"
     );
     let report = keepalive::keepalive(&net, &repo, &alice.cfg, &wallet, &opts)
         .await

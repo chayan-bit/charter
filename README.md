@@ -160,7 +160,7 @@ Never use real funds or mainnet keys.
 4. `chart init --name demo --lang rust --license MIT` creates the repo with you as its single delegate and prints `rid:` and `url: arkiv::<rid>`.
 5. In any git repo: `git remote add arkiv arkiv::<rid>` and `git push arkiv main`.
 6. Anywhere else: `git clone arkiv::<rid> demo-clone`.
-7. `chart status arkiv::<rid>` shows each peer's head and the minimum expiry in days, and `chart keepalive arkiv::<rid> --dry-run` shows what it would extend.
+7. `chart status arkiv::<rid>` shows each peer's head and the minimum expiry in days, and `chart keepalive arkiv::<rid> --dry-run` shows what it would extend and what that would cost.
 
 ### Upgrading to v0.7.2
 

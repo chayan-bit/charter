@@ -87,10 +87,10 @@ fn git_push_and_clone_through_the_remote_helper() {
             .arkiv(&["id", "show", &url])
             .contains("name:           demo")
     );
+    let dry = alice.arkiv(&["keepalive", &url, "--dry-run"]);
     assert!(
-        alice
-            .arkiv(&["keepalive", &url, "--dry-run"])
-            .contains("would extend")
+        dry.contains("would extend") && dry.contains("estimated cost: "),
+        "{dry}"
     );
     assert!(
         alice

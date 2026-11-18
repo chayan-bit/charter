@@ -177,6 +177,9 @@ pub struct KeepReport {
     pub txs: usize,
     pub gas: u64,
     pub spent: U256,
+    /// Predicted cost of the planned extensions at the current base fee (what a dry run
+    /// would pay).
+    pub estimate: U256,
     /// Blocks until the earliest expiry in the keep set after this run.
     pub min_expiry_blocks: Option<u64>,
 }
@@ -186,14 +189,14 @@ fn predicted_gas(k: &Kept, head: u64, horizon: u64) -> u64 {
     OP_GAS + (k.size + SYSTEM_UNITS) * added * 14 / 1_000_000
 }
 
-/// Extension jobs for the due part of `set`, cut off before `max_spend`; returns the jobs
-/// and how many entities (a prefix of `due`) they extend.
+/// Extension jobs for the due part of `set`, cut off before `max_spend`; returns the jobs,
+/// how many entities (a prefix of `due`) they extend and their predicted cost.
 fn plan(
     due: &[&Kept],
     head: u64,
     base_fee: u128,
     opts: &KeepOpts,
-) -> (Vec<Vec<charter_store::Operation>>, usize) {
+) -> (Vec<Vec<charter_store::Operation>>, usize, U256) {
     let gases: Vec<u64> = due
         .iter()
         .map(|k| predicted_gas(k, head, opts.horizon))
@@ -205,14 +208,15 @@ fn plan(
         .collect();
     let (mut at, mut spend, mut jobs) = (0, U256::ZERO, vec![]);
     for job in batch(items, BatchLimits::default()) {
-        spend += write::price(gases[at..at + job.len()].iter().sum(), base_fee);
-        if opts.max_spend.is_some_and(|m| spend > m) {
+        let next = spend + write::price(gases[at..at + job.len()].iter().sum(), base_fee);
+        if opts.max_spend.is_some_and(|m| next > m) {
             break;
         }
+        spend = next;
         at += job.len();
         jobs.push(job);
     }
-    (jobs, at)
+    (jobs, at, spend)
 }
 
 /// The fetch sync for the control plane (no chunk bodies), then design 5 steps 2-6.
@@ -236,11 +240,12 @@ pub async fn keepalive<A: Arkiv>(
         .iter()
         .filter(|k| k.expires_at < head + opts.renew_below)
         .collect();
-    let (jobs, extended) = plan(&due, head, a.base_fee().await?, opts);
+    let (jobs, extended, estimate) = plan(&due, head, a.base_fee().await?, opts);
     let mut report = KeepReport {
         kept: set.len(),
         extended,
         txs: jobs.len(),
+        estimate,
         ..KeepReport::default()
     };
     if !opts.dry_run {
@@ -341,7 +346,7 @@ mod tests {
             horizon: 1_000,
             ..KeepOpts::default()
         };
-        let (jobs, n) = plan(&due, 0, 1, &opts);
+        let (jobs, n, _) = plan(&due, 0, 1, &opts);
         assert_eq!(n, 251);
         assert!(jobs.iter().all(|j| j.len() <= 100) && jobs.len() == 3);
         let one = write::price(predicted_gas(&set[0], 0, 1_000) * 100, 1);
@@ -349,9 +354,9 @@ mod tests {
             max_spend: Some(one),
             ..opts
         };
-        let (jobs, n) = plan(&due, 0, 1, &capped);
+        let (jobs, n, _) = plan(&due, 0, 1, &capped);
         assert_eq!((jobs.len(), n), (1, 100));
-        let (jobs, n) = plan(
+        let (jobs, n, _) = plan(
             &due,
             0,
             1,
