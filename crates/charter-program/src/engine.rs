@@ -13,8 +13,29 @@ use crate::host::{self, Calls};
 pub(crate) const FOLD_FUEL: u64 = 5_000_000;
 /// Operation budget for one ABI call.
 pub(crate) const CALL_FUEL: u64 = 200_000;
+/// Cap on lines and per-line bytes a program's `print`/`debug` log may retain.
+const MAX_LOG_LINES: usize = 256;
+const MAX_LOG_LINE_BYTES: usize = 1_024;
 
 pub(crate) type Logs = Rc<RefCell<Vec<String>>>;
+
+fn push_log(logs: &mut Vec<String>, mut line: String) {
+    if logs.len() >= MAX_LOG_LINES {
+        if logs.len() == MAX_LOG_LINES {
+            logs.push("(log truncated)".into());
+        }
+        return;
+    }
+    if line.len() > MAX_LOG_LINE_BYTES {
+        let mut end = MAX_LOG_LINE_BYTES;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        line.push_str("...");
+    }
+    logs.push(line);
+}
 
 fn sha256_hex(x: &[u8]) -> String {
     hex::encode(charter_crypto::sha256(x))
@@ -31,8 +52,8 @@ fn hardened(logs: &Logs, spent: &Rc<Cell<u64>>, calls: Option<&Rc<Calls>>) -> En
         .set_max_call_levels(32)
         .set_max_expr_depths(64, 32);
     let (p, d) = (logs.clone(), logs.clone());
-    e.on_print(move |s| p.borrow_mut().push(s.into()));
-    e.on_debug(move |s, _, pos| d.borrow_mut().push(format!("debug {pos}: {s}")));
+    e.on_print(move |s| push_log(&mut p.borrow_mut(), s.into()));
+    e.on_debug(move |s, _, pos| push_log(&mut d.borrow_mut(), format!("debug {pos}: {s}")));
     let spent = spent.clone();
     e.on_progress(move |_| {
         spent.set(spent.get() + 1);
@@ -101,6 +122,24 @@ impl Runtime {
     }
 
     pub(crate) fn log(&self, line: String) {
-        self.logs.borrow_mut().push(line);
+        push_log(&mut self.logs.borrow_mut(), line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_cap_line_count_and_truncate_long_utf8_lines() {
+        let mut logs = vec![];
+        push_log(&mut logs, "é".repeat(MAX_LOG_LINE_BYTES));
+        assert!(logs[0].len() <= MAX_LOG_LINE_BYTES + 3);
+        assert!(logs[0].ends_with("..."));
+        for i in 0..MAX_LOG_LINES + 20 {
+            push_log(&mut logs, format!("line {i}"));
+        }
+        assert_eq!(logs.len(), MAX_LOG_LINES + 1);
+        assert_eq!(logs.last().map(String::as_str), Some("(log truncated)"));
     }
 }
