@@ -96,15 +96,15 @@
     "gas": 0
   },
   "ui_round": {
-    "rounds": 8,
-    "calls": 13,
-    "queries": 10,
+    "rounds": 5,
+    "calls": 12,
+    "queries": 9,
     "txs": 0,
     "bytes": 0,
     "gas": 0
   },
   "ui_round_noop": {
-    "rounds": 4,
+    "rounds": 2,
     "calls": 6,
     "queries": 4,
     "txs": 0,
