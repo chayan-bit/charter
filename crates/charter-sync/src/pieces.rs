@@ -306,16 +306,24 @@ async fn snapshot_packs<A: Arkiv>(
     skip: &BTreeSet<Hash32>,
     in_cache: &(dyn Fn(&Hash32) -> bool + Sync),
 ) -> Result<Fetched> {
-    let mut out: Fetched = vec![];
-    for (h, m) in snapshot_manifests(a, rid, dev, wanted).await? {
-        let seen = skip.contains(&m.pack_id) || out.iter().any(|d| d.1 == m.pack_id);
-        if !seen && !in_cache(&m.pack_id) {
-            let tmp = repo.tmp().join(format!("{}.pack", hex::encode(m.pack_id)));
-            download_snapshot(a, rid, dev, &m, &tmp).await?;
-            out.push((h, m.pack_id, tmp));
-        }
-    }
-    Ok(out)
+    let mut unique = BTreeSet::new();
+    let todo: Vec<(Hash32, ManifestBody, std::path::PathBuf)> =
+        snapshot_manifests(a, rid, dev, wanted)
+            .await?
+            .into_iter()
+            .filter(|(_, m)| {
+                !skip.contains(&m.pack_id) && !in_cache(&m.pack_id) && unique.insert(m.pack_id)
+            })
+            .map(|(h, m)| {
+                let tmp = repo.tmp().join(format!("{}.pack", hex::encode(m.pack_id)));
+                (h, m, tmp)
+            })
+            .collect();
+    try_join_all(todo.into_iter().map(|(h, m, tmp)| async move {
+        download_snapshot(a, rid, dev, &m, &tmp).await?;
+        Ok::<_, SyncError>((h, m.pack_id, tmp))
+    }))
+    .await
 }
 
 async fn piece_packs<A: Arkiv>(
@@ -326,9 +334,8 @@ async fn piece_packs<A: Arkiv>(
     (dev, head): (&Device, &DeviceHead),
     todo: &[&Pack],
 ) -> Result<Fetched> {
-    let mut out: Fetched = vec![];
     if todo.is_empty() {
-        return Ok(out);
+        return Ok(vec![]);
     }
     let here = match todo.iter().any(|p| p.has_inline()) {
         true => head_landing(a, v2, dev, head).await?,
@@ -338,12 +345,12 @@ async fn piece_packs<A: Arkiv>(
             index: 0,
         },
     };
-    for p in todo {
+    try_join_all(todo.iter().map(|p| async {
         let tmp = repo.tmp().join(format!("{}.pack", hex::encode(p.pack_id)));
         download_pieces(a, rid, dev, &here, p, &tmp).await?;
-        out.push((p.pack_id, p.pack_id, tmp));
-    }
-    Ok(out)
+        Ok::<_, SyncError>((p.pack_id, p.pack_id, tmp))
+    }))
+    .await
 }
 
 #[cfg(test)]

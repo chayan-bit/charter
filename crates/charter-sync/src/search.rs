@@ -79,17 +79,35 @@ fn id_filter(q: &SearchQuery) -> Option<Pred> {
 
 /// Candidate rids from each requested query, intersected; `at` from recency hits.
 async fn candidates<A: Arkiv>(a: &A, q: &SearchQuery) -> Result<BTreeMap<Rid, Option<u64>>> {
-    let mut sets: Vec<BTreeMap<Rid, Option<u64>>> = vec![];
-    if let Some(f) = id_filter(q) {
+    let by_id = async {
+        let Some(f) = id_filter(q) else {
+            return Ok(None);
+        };
         let rows = page(a, Query::from(f), q.limit).await?;
-        sets.push(rows.iter().filter_map(rid_of).map(|r| (r, None)).collect());
-    }
-    if let Some(n) = &q.peer {
+        Ok::<_, crate::SyncError>(Some(
+            rows.iter()
+                .filter_map(rid_of)
+                .map(|r| (r, None))
+                .collect::<BTreeMap<_, _>>(),
+        ))
+    };
+    let by_peer = async {
+        let Some(n) = &q.peer else {
+            return Ok(None);
+        };
         let f = Pred::And(vec![kind(Kind::Bind), b32("ag.nid", n)]);
         let rows = page(a, Query::from(f), q.limit).await?;
-        sets.push(rows.iter().filter_map(rid_of).map(|r| (r, None)).collect());
-    }
-    if let Some(days) = q.recent_days {
+        Ok::<_, crate::SyncError>(Some(
+            rows.iter()
+                .filter_map(rid_of)
+                .map(|r| (r, None))
+                .collect::<BTreeMap<_, _>>(),
+        ))
+    };
+    let by_recent = async {
+        let Some(days) = q.recent_days else {
+            return Ok(None);
+        };
         let since = a.head().await?.saturating_sub(days * BLOCKS_PER_DAY);
         let f = Pred::And(vec![kind(Kind::Anchor), Pred::ge(attr("ag.at"), since)]);
         let query = Query {
@@ -107,8 +125,12 @@ async fn candidates<A: Arkiv>(a: &A, q: &SearchQuery) -> Result<BTreeMap<Rid, Op
                 *e = (*e).max(at_of(&o));
             }
         }
-        sets.push(m);
-    }
+        Ok::<_, crate::SyncError>(Some(m))
+    };
+    let (s_id, s_peer, s_recent) =
+        futures_util::future::try_join3(by_id, by_peer, by_recent).await?;
+    let sets: Vec<BTreeMap<Rid, Option<u64>>> =
+        [s_id, s_peer, s_recent].into_iter().flatten().collect();
     let mut it = sets.into_iter();
     let first = it.next().unwrap_or_default();
     Ok(it.fold(first, |acc, s| {
@@ -133,9 +155,29 @@ fn matches(q: &SearchQuery, head: &IdBody) -> bool {
                 .is_some_and(|l| q.licenses.contains(l)))
 }
 
+/// Candidates verified concurrently by [`search`].
+const VERIFY_PARALLEL: usize = 6;
+
+async fn verify_hit<A: Arkiv>(a: &A, q: &SearchQuery, rid: Rid, at: Option<u64>) -> Option<Hit> {
+    let (chain, _) = view::identity(a, &rid, &State::default()).await.ok()?;
+    let head = chain.head().body.clone();
+    let delegate_ok = q.peer.is_none_or(|n| head.delegates.contains(&n));
+    (matches(q, &head) && delegate_ok).then_some(Hit { rid, head, at })
+}
+
 /// Verified search hits, newest first for recency queries, else by name.
 pub async fn search<A: Arkiv>(a: &A, q: &SearchQuery) -> Result<Vec<Hit>> {
-    Ok(search_until(a, q, || false).await?.0)
+    let cands: Vec<(Rid, Option<u64>)> = candidates(a, q).await?.into_iter().collect();
+    let mut hits = vec![];
+    for group in cands.chunks(VERIFY_PARALLEL) {
+        let found = futures_util::future::join_all(
+            group.iter().map(|&(rid, at)| verify_hit(a, q, rid, at)),
+        )
+        .await;
+        hits.extend(found.into_iter().flatten());
+    }
+    hits.sort_by(|x, y| y.at.cmp(&x.at).then_with(|| x.head.name.cmp(&y.head.name)));
+    Ok(hits)
 }
 
 /// [`search`] that asks `stop` before each candidate's verification (3 queries for a
@@ -156,13 +198,8 @@ pub async fn search_until<A: Arkiv>(
             stopped = true;
             break;
         }
-        let Ok((chain, _)) = view::identity(a, &rid, &State::default()).await else {
-            continue;
-        };
-        let head = chain.head().body.clone();
-        let delegate_ok = q.peer.is_none_or(|n| head.delegates.contains(&n));
-        if matches(q, &head) && delegate_ok {
-            hits.push(Hit { rid, head, at });
+        if let Some(hit) = verify_hit(a, q, rid, at).await {
+            hits.push(hit);
         }
     }
     hits.sort_by(|x, y| y.at.cmp(&x.at).then_with(|| x.head.name.cmp(&y.head.name)));

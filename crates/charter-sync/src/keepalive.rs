@@ -47,55 +47,80 @@ fn kept(o: &Observed, plane: Plane, peer: Nid) -> Kept {
 
 /// The keep set of design 5 step 2, from a verified view.
 pub async fn keep_set<A: Arkiv>(a: &A, view: &View) -> Result<Vec<Kept>> {
-    let mut out = vec![];
-    for (nid, pv) in &view.peers {
+    use futures_util::future::{try_join, try_join_all, try_join3};
+    let per_peer = try_join_all(view.peers.iter().map(|(&nid, pv)| async move {
         let control = pv.info.binds.control_set();
         let bulk = pv.info.binds.bulk_set();
-        if !control.is_empty() {
-            for o in all(a, creators(&control)).await? {
-                out.push(kept(&o, Plane::Control, *nid));
+        let ctrl_f = async {
+            if control.is_empty() {
+                return Ok(vec![]);
             }
-        }
-        if let Some(v2) = &pv.v2 {
-            out.extend(keep_v2(a, &view.rid, *nid, v2).await?);
-        }
-        if pv.head.is_none() {
-            continue;
-        }
-        if let Some(r) = pv.refs.iter().find(|o| bulk.contains(&o.creator)) {
-            out.push(kept(r, Plane::Bulk, *nid));
-        }
-        let named: Vec<Hash32> = pv
-            .chain
-            .links
-            .iter()
-            .flat_map(|l| l.body.manifests.clone())
-            .collect();
-        let found = by_hashes(a, kind(Kind::Manifest), &named).await?;
-        let mut seen = BTreeSet::new();
-        for m in found.iter().filter(|o| bulk.contains(&o.creator)) {
-            let Ok(e) = charter_core::open::<charter_core::ManifestBody>(m) else {
-                continue;
-            };
-            if !seen.insert(e.h) || e.envelope.signer != *nid {
-                continue;
+            Ok::<_, crate::SyncError>(
+                all(a, creators(&control))
+                    .await?
+                    .iter()
+                    .map(|o| kept(o, Plane::Control, nid))
+                    .collect(),
+            )
+        };
+        let v2_f = async {
+            match &pv.v2 {
+                Some(v2) => keep_v2(a, &view.rid, nid, v2).await,
+                None => Ok(vec![]),
             }
-            out.push(kept(m, Plane::Bulk, *nid));
-            for c in packs::landed(a, &view.rid, &e.body.pack_id, &bulk)
-                .await?
-                .values()
-            {
-                out.push(Kept {
-                    key: c.key,
-                    expires_at: c.expires_at,
-                    size: CHUNK_SIZE as u64,
-                    plane: Plane::Bulk,
-                    peer: *nid,
-                });
+        };
+        let v1_f = async {
+            let mut v1 = vec![];
+            if pv.head.is_none() {
+                return Ok::<_, crate::SyncError>(v1);
             }
-        }
-    }
-    for (nid, o) in crate::program::fold_v1_refs(a, view).await? {
+            if let Some(r) = pv.refs.iter().find(|o| bulk.contains(&o.creator)) {
+                v1.push(kept(r, Plane::Bulk, nid));
+            }
+            let named: Vec<Hash32> = pv
+                .chain
+                .links
+                .iter()
+                .flat_map(|l| l.body.manifests.clone())
+                .collect();
+            let found = by_hashes(a, kind(Kind::Manifest), &named).await?;
+            let mut seen = BTreeSet::new();
+            let mut manifests = vec![];
+            for m in found.iter().filter(|o| bulk.contains(&o.creator)) {
+                let Ok(e) = charter_core::open::<charter_core::ManifestBody>(m) else {
+                    continue;
+                };
+                if !seen.insert(e.h) || e.envelope.signer != nid {
+                    continue;
+                }
+                v1.push(kept(m, Plane::Bulk, nid));
+                manifests.push(e.body.pack_id);
+            }
+            let chunk_maps = try_join_all(
+                manifests
+                    .iter()
+                    .map(|pid| packs::landed(a, &view.rid, pid, &bulk)),
+            )
+            .await?;
+            for cmap in chunk_maps {
+                for c in cmap.values() {
+                    v1.push(Kept {
+                        key: c.key,
+                        expires_at: c.expires_at,
+                        size: CHUNK_SIZE as u64,
+                        plane: Plane::Bulk,
+                        peer: nid,
+                    });
+                }
+            }
+            Ok(v1)
+        };
+        let (c, v2, v1) = try_join3(ctrl_f, v2_f, v1_f).await?;
+        Ok::<_, crate::SyncError>([c, v2, v1].concat())
+    }));
+    let (peer_sets, fold_refs) = try_join(per_peer, crate::program::fold_v1_refs(a, view)).await?;
+    let mut out: Vec<Kept> = peer_sets.into_iter().flatten().collect();
+    for (nid, o) in fold_refs {
         out.push(kept(&o, Plane::Bulk, nid));
     }
     out.sort_by_key(|k| (k.plane == Plane::Bulk, k.size >= CHUNK_SIZE as u64, k.key));
@@ -111,9 +136,12 @@ async fn keep_v2<A: Arkiv>(
     nid: Nid,
     v2: &crate::heads::V2,
 ) -> Result<Vec<Kept>> {
-    let mut out = vec![];
-    for d in &v2.devices {
-        let Some(head) = &d.head else { continue };
+    use futures_util::future::try_join_all;
+    let per_dev = try_join_all(v2.devices.iter().map(|d| async move {
+        let mut out = vec![];
+        let Some(head) = &d.head else {
+            return Ok::<_, crate::SyncError>(out);
+        };
         if let Some(o) = d.rows.iter().find(|o| o.key == head.key) {
             out.push(kept(o, Plane::Control, nid));
         }
@@ -123,6 +151,7 @@ async fn keep_v2<A: Arkiv>(
         let ours = |o: &&charter_core::Observed| {
             o.creator == d.device.bulk || o.creator == d.device.control
         };
+        let mut pack_ids = vec![];
         for m in found.iter().filter(ours) {
             let Ok(e) = charter_core::verify_entity::<charter_core::ManifestBody>(m, &d.device.pk)
             else {
@@ -132,10 +161,12 @@ async fn keep_v2<A: Arkiv>(
                 continue;
             }
             out.push(kept(m, Plane::Bulk, nid));
-            for c in packs::landed(a, rid, &e.body.pack_id, &bulk)
-                .await?
-                .values()
-            {
+            pack_ids.push(e.body.pack_id);
+        }
+        let chunk_maps =
+            try_join_all(pack_ids.iter().map(|pid| packs::landed(a, rid, pid, &bulk))).await?;
+        for cmap in chunk_maps {
+            for c in cmap.values() {
                 out.push(Kept {
                     key: c.key,
                     expires_at: c.expires_at,
@@ -145,8 +176,10 @@ async fn keep_v2<A: Arkiv>(
                 });
             }
         }
-    }
-    Ok(out)
+        Ok(out)
+    }))
+    .await?;
+    Ok(per_dev.into_iter().flatten().collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
