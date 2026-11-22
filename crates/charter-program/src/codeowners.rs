@@ -43,25 +43,58 @@ fn matches(pattern: &Pattern, only_files: bool, path: &str) -> bool {
     hit(path, false) || (!only_files && dirs.into_iter().any(|d| hit(d, true)))
 }
 
+struct Rule {
+    pattern: Pattern,
+    only_files: bool,
+    owners: Vec<String>,
+}
+
+/// A parsed `CODEOWNERS` file, reusable across many paths.
+#[derive(Default)]
+pub struct CodeOwners {
+    rules: Vec<Rule>,
+}
+
+impl CodeOwners {
+    /// Parses `text` once into up to [`MAX_RULES`] rules.
+    pub fn parse(text: &str) -> Self {
+        let mut rules = Vec::new();
+        let lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        for line in lines.filter(|l| !l.starts_with('#')).take(MAX_RULES) {
+            let mut it = line.split_whitespace();
+            let Some(raw) = it.next() else { continue };
+            let Some(pattern) = Pattern::from_bytes(raw.as_bytes()) else {
+                continue;
+            };
+            if pattern.mode.contains(Mode::NEGATIVE) {
+                continue;
+            }
+            let mut owners: Vec<String> = it.filter_map(owner).take(MAX_OWNERS).collect();
+            owners.sort();
+            owners.dedup();
+            rules.push(Rule {
+                pattern,
+                only_files: raw.ends_with("/*"),
+                owners,
+            });
+        }
+        Self { rules }
+    }
+
+    /// The owners (peer ids, hex) of the repo path `path` (no leading `/`).
+    pub fn owners(&self, path: &str) -> Vec<String> {
+        self.rules
+            .iter()
+            .rev()
+            .find(|r| matches(&r.pattern, r.only_files, path))
+            .map(|r| r.owners.clone())
+            .unwrap_or_default()
+    }
+}
+
 /// The owners (peer ids, hex) of the repo path `path` (no leading `/`) under `text`.
 pub fn owners(text: &str, path: &str) -> Vec<String> {
-    let mut found = None;
-    let lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
-    for line in lines.filter(|l| !l.starts_with('#')).take(MAX_RULES) {
-        let mut it = line.split_whitespace();
-        let Some(raw) = it.next() else { continue };
-        let Some(pattern) = Pattern::from_bytes(raw.as_bytes()) else {
-            continue;
-        };
-        if pattern.mode.contains(Mode::NEGATIVE) || !matches(&pattern, raw.ends_with("/*"), path) {
-            continue;
-        }
-        found = Some(it.filter_map(owner).take(MAX_OWNERS).collect::<Vec<_>>());
-    }
-    let mut out = found.unwrap_or_default();
-    out.sort();
-    out.dedup();
-    out
+    CodeOwners::parse(text).owners(path)
 }
 
 #[cfg(test)]
@@ -114,5 +147,19 @@ mod tests {
         let text = format!("!*.md {A}\n*.md nobody {B} {} zzz\n", A.to_uppercase());
         assert_eq!(owners(&text, "a.md"), [A, B]);
         assert!(owners("", "a.md").is_empty());
+    }
+
+    #[test]
+    fn parsed_codeowners_matches_one_shot_across_paths() {
+        let text = format!("* {A}\n*.rs {B}\n/docs/ {}\napps/vendor\n", z(A));
+        let parsed = CodeOwners::parse(&text);
+        for p in [
+            "README.md",
+            "src/lib.rs",
+            "docs/guide/x.rs",
+            "apps/vendor/a.rs",
+        ] {
+            assert_eq!(parsed.owners(p), owners(&text, p), "{p}");
+        }
     }
 }

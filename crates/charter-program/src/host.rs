@@ -32,10 +32,14 @@ pub trait Host {
 type Answer = Result<Dynamic, String>;
 type Fallible = Result<Dynamic, Box<rhai::EvalAltResult>>;
 
+/// Maximum distinct CODEOWNERS files kept parsed during one fold.
+const MAX_CODEOWNERS_CACHE: usize = 16;
+
 /// A host shared by one fold's engine: memo, call budget and the undecided flag.
 pub(crate) struct Calls {
     host: Option<Rc<dyn Host>>,
     memo: RefCell<HashMap<String, Answer>>,
+    codeowners: RefCell<HashMap<String, Rc<crate::codeowners::CodeOwners>>>,
     asked: Cell<u32>,
     pub(crate) undecided: Cell<bool>,
 }
@@ -45,9 +49,23 @@ impl Calls {
         Rc::new(Self {
             host,
             memo: RefCell::default(),
+            codeowners: RefCell::default(),
             asked: Cell::new(0),
             undecided: Cell::new(false),
         })
+    }
+
+    fn codeowners(&self, text: &str, path: &str) -> Vec<String> {
+        if let Some(parsed) = self.codeowners.borrow().get(text) {
+            return parsed.owners(path);
+        }
+        let parsed = Rc::new(crate::codeowners::CodeOwners::parse(text));
+        let out = parsed.owners(path);
+        let mut cache = self.codeowners.borrow_mut();
+        if cache.len() < MAX_CODEOWNERS_CACHE {
+            cache.insert(text.to_owned(), parsed);
+        }
+        out
     }
 
     fn ask(&self, key: String, f: impl FnOnce(&dyn Host) -> Option<Answer>) -> Answer {
@@ -113,15 +131,15 @@ fn file(c: &Calls, commit: &str, path: &str) -> Answer {
 
 /// Registers the rhai/2 functions on `e`.
 pub(crate) fn register(e: &mut Engine, calls: &Rc<Calls>) {
-    let (c1, c2) = (calls.clone(), calls.clone());
+    let (c1, c2, c3) = (calls.clone(), calls.clone(), calls.clone());
     e.register_fn("changed_paths", move |a: &str, b: &str| -> Fallible {
         changed(&c1, a, b).map_err(Into::into)
     });
     e.register_fn("file_at", move |commit: &str, path: &str| -> Fallible {
         file(&c2, commit, path).map_err(Into::into)
     });
-    e.register_fn("codeowners", |text: &str, path: &str| {
-        crate::codeowners::owners(text, path)
+    e.register_fn("codeowners", move |text: &str, path: &str| {
+        c3.codeowners(text, path)
             .into_iter()
             .map(Dynamic::from)
             .collect::<Array>()
