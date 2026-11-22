@@ -15,16 +15,16 @@ https://github.com/chayan-bit/charter/releases/download/<tag>/charter-<tag>-x86_
 https://github.com/chayan-bit/charter/releases/download/<tag>/SHA256SUMS
 ```
 
-For v0.7.3 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.3/charter-v0.7.3-aarch64-apple-darwin.tar.gz`.
-For v0.7.3 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.3/charter-v0.7.3-x86_64-unknown-linux-gnu.tar.gz`.
-For v0.7.3 on Windows x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.3/charter-v0.7.3-x86_64-pc-windows-msvc.zip`.
+For v0.7.4 on Apple Silicon macOS the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.4/charter-v0.7.4-aarch64-apple-darwin.tar.gz`.
+For v0.7.4 on Linux x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.4/charter-v0.7.4-x86_64-unknown-linux-gnu.tar.gz`.
+For v0.7.4 on Windows x86_64 the archive is `https://github.com/chayan-bit/charter/releases/download/v0.7.4/charter-v0.7.4-x86_64-pc-windows-msvc.zip`.
 v0.1.0 predates the rename to Charter: its archives are named `arkiv-git-v0.1.0-<target>.tar.gz` and hold `git-remote-arkiv`, `arkiv-git` and `arkiv-git-mcp`.
 A combined `SHA256SUMS` file is attached to the release as well.
 
 ## Install snippet
 
 ```sh
-TAG=v0.7.3
+TAG=v0.7.4
 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu
 BASE=https://github.com/chayan-bit/charter/releases/download/$TAG
 curl -fsSLO "$BASE/charter-$TAG-$TARGET.tar.gz"
@@ -45,6 +45,22 @@ git clone arkiv::<rid>
 
 Files fetched with `curl` carry no quarantine flag, so the snippet above runs as is.
 If you download the archive in a browser and macOS refuses to open the binaries, clear the flag with `xattr -d com.apple.quarantine ~/.local/bin/git-remote-arkiv ~/.local/bin/chart ~/.local/bin/chart-mcp`.
+
+## Upgrading to v0.7.4
+
+v0.7.4 reads every repo v0.7.3 wrote and changes no storage format, program or zk guest, so v0.7.2 zk receipts stay valid.
+
+- Updates `url` to 2.5.9 (fixes RUSTSEC-2026-0592), with zero `cargo audit` vulnerabilities.
+- Caps Rhai `print`/`debug` output per fold (256 lines, 1 KiB per line) so untrusted programs cannot bloat memory.
+- Validates branch names in `chart-mcp`'s `git_push` tool against refspec injection.
+- Includes live format v2-v4 device heads in `View::min_expiry` for `chart status`, `git fetch` expiry warnings and the UI renew-by line.
+- Writes escrow journals atomically with `fsync` and 0600 permissions, drops a duplicate ledger load, and parallelizes `Agent::send` RPC reads.
+- Matches zero OID length in `git update-ref` for SHA-256 repos and bounds finished UI write history in memory.
+- Adds HTTP/2 and TCP keepalives, a 10 s connect timeout and bounded retries on HTTP 502-504 for idempotent RPC reads.
+- Overlaps `chart ui` sync with op fetching and reuses verified peer keys from the sync view, cutting `ui_round` from 8 to 5 rounds (13 to 12 calls, 10 to 9 queries) and `ui_round_noop` from 4 to 2 rounds.
+- Parallelizes `chart search` candidate and verification queries, multi-pack downloads and `chart keepalive` scans.
+- Skips stdin pipe threads, unchanged `git rev-list`/`for-each-ref` spawns and unchanged `state.json`/`cobs.json` fsyncs on no-op syncs, persists live-fetched memo pages without extending the probe window, and caps the in-memory ref-table cache at 64 entries.
+- Prunes resolved and historical subtrees in `chart ui`'s last-commit index, caches syntect scope roles across requests with single-pass HTML escaping, and pre-parses/caches `CODEOWNERS` rules per Rhai fold.
 
 ## Upgrading to v0.7.3
 
