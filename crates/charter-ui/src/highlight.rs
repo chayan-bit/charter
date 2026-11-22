@@ -3,7 +3,7 @@
 //! carry its own anchor. The syntax set loads once, on the first highlighted file.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock, RwLock};
 
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
@@ -70,6 +70,22 @@ fn role_of(scope: Scope) -> Option<char> {
         .map(|(_, (_, r))| *r)
 }
 
+static SCOPE_ROLES: LazyLock<RwLock<HashMap<Scope, Option<char>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn cached_role_of(scope: Scope) -> Option<char> {
+    if let Ok(map) = SCOPE_ROLES.read()
+        && let Some(&role) = map.get(&scope)
+    {
+        return role;
+    }
+    let r = role_of(scope);
+    if let Ok(mut map) = SCOPE_ROLES.write() {
+        map.insert(scope, r);
+    }
+    r
+}
+
 /// The colour at the top of `stack`: its innermost scope that has a role, as inherited
 /// colour works in CSS.
 fn role(stack: &ScopeStack, memo: &mut HashMap<Scope, Option<char>>) -> Option<char> {
@@ -77,7 +93,7 @@ fn role(stack: &ScopeStack, memo: &mut HashMap<Scope, Option<char>>) -> Option<c
         .as_slice()
         .iter()
         .rev()
-        .find_map(|s| *memo.entry(*s).or_insert_with(|| role_of(*s)))
+        .find_map(|s| *memo.entry(*s).or_insert_with(|| cached_role_of(*s)))
 }
 
 /// One line as flat role runs: adjacent text of one role shares an element, and
@@ -90,23 +106,42 @@ struct Runs {
 }
 
 impl Runs {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            out: String::with_capacity(cap),
+            role: None,
+            text: String::new(),
+        }
+    }
+
     fn push(&mut self, role: Option<char>, text: &str) {
         let blank = text.bytes().all(|b| b == b' ' || b == b'\t');
         if !blank && role != self.role {
             self.flush();
             self.role = role;
         }
-        self.text.push_str(&escape_text(text));
+        escape_text_into(&mut self.text, text);
     }
 
     fn flush(&mut self) {
-        let text = std::mem::take(&mut self.text);
-        match self.role {
-            Some(r) if !text.is_empty() => {
-                self.out.push_str(&format!("<{TAG}{r}>{text}</{TAG}{r}>"));
-            }
-            _ => self.out.push_str(&text),
+        if self.text.is_empty() {
+            return;
         }
+        match self.role {
+            Some(r) => {
+                self.out.push('<');
+                self.out.push_str(TAG);
+                self.out.push(r);
+                self.out.push('>');
+                self.out.push_str(&self.text);
+                self.out.push_str("</");
+                self.out.push_str(TAG);
+                self.out.push(r);
+                self.out.push('>');
+            }
+            None => self.out.push_str(&self.text),
+        }
+        self.text.clear();
     }
 
     fn finish(mut self) -> String {
@@ -148,11 +183,28 @@ fn plain(line: &str) -> String {
     escape_text(line.trim_end_matches(['\n', '\r']))
 }
 
+fn escape_text_into(out: &mut String, s: &str) {
+    let bytes = s.as_bytes();
+    let mut last = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let esc = match b {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            _ => continue,
+        };
+        out.push_str(&s[last..i]);
+        out.push_str(esc);
+        last = i + 1;
+    }
+    out.push_str(&s[last..]);
+}
+
 /// Escaped for element content (never an attribute): only `&`, `<` and `>`.
 pub fn escape_text(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    let mut out = String::with_capacity(s.len());
+    escape_text_into(&mut out, s);
+    out
 }
 
 /// One line as role runs; `None` if syntect fails on it (the caller falls back to plain).
@@ -165,7 +217,7 @@ fn classed(
 ) -> Option<String> {
     let ops = state.parse_line(line, set).ok()?;
     let body = line.trim_end_matches(['\n', '\r']);
-    let mut runs = Runs::default();
+    let mut runs = Runs::with_capacity(body.len() + 32);
     let mut at = 0;
     for (i, op) in ops {
         let i = i.min(body.len());

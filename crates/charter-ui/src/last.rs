@@ -69,7 +69,7 @@ impl Last {
     }
 }
 
-type Entries = Rc<Vec<(String, ObjectId, bool)>>;
+type Entries = Rc<HashMap<String, (ObjectId, bool)>>;
 
 /// Decoded trees, each read once per build.
 struct Trees<'g> {
@@ -89,49 +89,127 @@ impl Trees<'_> {
                 let tree = git.find_tree(t).ok();
                 let d = tree.as_ref().and_then(|t| t.decode().ok());
                 let es = d.iter().flat_map(|d| d.entries.iter());
-                let v = es.map(|e| {
+                let m = es.map(|e| {
                     (
                         e.filename.to_str_lossy().into_owned(),
-                        e.oid.to_owned(),
-                        e.mode.is_tree(),
+                        (e.oid.to_owned(), e.mode.is_tree()),
                     )
                 });
-                Rc::new(v.collect())
+                Rc::new(m.collect())
             })
             .clone()
     }
 
-    /// Adds to `out` every path under `prefix` whose entry differs between trees `a` and
-    /// `b`, descending only into folders that differ.
-    fn diff(
+    /// Collects every path under `tree` into `out` and populates ancestor directory counts in
+    /// `dir_remaining`.
+    fn collect_all(
+        &mut self,
+        tree: Option<ObjectId>,
+        prefix: &str,
+        out: &mut HashSet<String>,
+        dir_remaining: &mut HashMap<String, usize>,
+    ) {
+        let entries = self.entries(tree);
+        for (name, &(oid, is_tree)) in entries.iter() {
+            let path = join_path(prefix, name);
+            if is_tree {
+                self.collect_all(Some(oid), &path, out, dir_remaining);
+            }
+            if out.insert(path.clone()) {
+                for (i, _) in path.match_indices('/') {
+                    *dir_remaining.entry(path[..i].to_owned()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    /// Adds to `out` every path in `want` under `prefix` whose entry differs between trees
+    /// `a` and `b`, pruning subtrees with no remaining paths in `dir_remaining`.
+    fn diff_wanted(
         &mut self,
         a: Option<ObjectId>,
         b: Option<ObjectId>,
         prefix: &str,
+        want: &HashSet<String>,
+        dir_remaining: &HashMap<String, usize>,
         out: &mut HashSet<String>,
     ) {
         if a == b {
             return;
         }
         let (ea, eb) = (self.entries(a), self.entries(b));
-        let find = |es: &Entries, n: &str| es.iter().find(|e| e.0 == n).cloned();
-        let names: BTreeSet<&str> = ea.iter().chain(eb.iter()).map(|e| e.0.as_str()).collect();
-        for name in names {
-            let (x, y) = (find(&ea, name), find(&eb, name));
-            if x.as_ref().map(|e| e.1) == y.as_ref().map(|e| e.1) {
+        for (name, &(oid_a, is_tree_a)) in ea.iter() {
+            let other = eb.get(name).copied();
+            if other.is_some_and(|(oid_b, _)| oid_b == oid_a) {
                 continue;
             }
-            let path = match prefix {
-                "" => name.to_owned(),
-                p => format!("{p}/{name}"),
-            };
-            let folder = |e: Option<(String, ObjectId, bool)>| e.filter(|e| e.2).map(|e| e.1);
-            let (fa, fb) = (folder(x), folder(y));
-            if fa.is_some() || fb.is_some() {
-                self.diff(fa, fb, &path, out);
+            self.visit_diff(
+                prefix,
+                name,
+                is_tree_a.then_some(oid_a),
+                other.filter(|e| e.1).map(|e| e.0),
+                want,
+                dir_remaining,
+                out,
+            );
+        }
+        for (name, &(oid_b, is_tree_b)) in eb.iter() {
+            if ea.contains_key(name) {
+                continue;
             }
+            self.visit_diff(
+                prefix,
+                name,
+                None,
+                is_tree_b.then_some(oid_b),
+                want,
+                dir_remaining,
+                out,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn visit_diff(
+        &mut self,
+        prefix: &str,
+        name: &str,
+        fa: Option<ObjectId>,
+        fb: Option<ObjectId>,
+        want: &HashSet<String>,
+        dir_remaining: &HashMap<String, usize>,
+        out: &mut HashSet<String>,
+    ) {
+        let is_dir = fa.is_some() || fb.is_some();
+        let (path, wanted_here, wanted_below) = if prefix.is_empty() {
+            let here = want.contains(name);
+            let below = is_dir && dir_remaining.contains_key(name);
+            if !here && !below {
+                return;
+            }
+            (name.to_owned(), here, below)
+        } else {
+            let path = format!("{prefix}/{name}");
+            let here = want.contains(&path);
+            let below = is_dir && dir_remaining.contains_key(&path);
+            if !here && !below {
+                return;
+            }
+            (path, here, below)
+        };
+        if wanted_below {
+            self.diff_wanted(fa, fb, &path, want, dir_remaining, out);
+        }
+        if wanted_here {
             out.insert(path);
         }
+    }
+}
+
+fn join_path(prefix: &str, name: &str) -> String {
+    match prefix {
+        "" => name.to_owned(),
+        p => format!("{p}/{name}"),
     }
 }
 
@@ -144,7 +222,8 @@ pub fn build(git: &Git, commit: &str) -> Option<Tip> {
         seen: HashMap::new(),
     };
     let mut want = HashSet::new();
-    trees.diff(tree_of(head), None, "", &mut want);
+    let mut dir_remaining = HashMap::new();
+    trees.collect_all(tree_of(head), "", &mut want, &mut dir_remaining);
     let mut tip = Tip {
         rows: vec![gitread::tip(git, commit)?],
         paths: HashMap::from([(String::new(), 0)]),
@@ -161,8 +240,10 @@ pub fn build(git: &Git, commit: &str) -> Option<Tip> {
         };
         for p in parents {
             let mut c = HashSet::new();
-            trees.diff(mine, p, "", &mut c);
-            c.retain(|x| want.contains(x) && changed.as_ref().is_none_or(|s| s.contains(x)));
+            trees.diff_wanted(mine, p, "", &want, &dir_remaining, &mut c);
+            if let Some(prev) = &changed {
+                c.retain(|x| prev.contains(x));
+            }
             let done = c.is_empty();
             changed = Some(c);
             if done {
@@ -184,7 +265,17 @@ pub fn build(git: &Git, commit: &str) -> Option<Tip> {
             }
         };
         for p in hits {
-            want.remove(&p);
+            if want.remove(&p) {
+                for (i, _) in p.match_indices('/') {
+                    let dir = &p[..i];
+                    if let Some(rem) = dir_remaining.get_mut(dir) {
+                        *rem -= 1;
+                        if *rem == 0 {
+                            dir_remaining.remove(dir);
+                        }
+                    }
+                }
+            }
             tip.paths.insert(p, n);
         }
     }
