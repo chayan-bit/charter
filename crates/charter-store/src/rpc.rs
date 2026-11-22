@@ -186,6 +186,10 @@ impl RpcArkiv {
     pub async fn connect(cfg: RpcConfig) -> Result<Self, StoreError> {
         let http = reqwest::Client::builder()
             .timeout(cfg.timeout)
+            .connect_timeout(Duration::from_secs(10).min(cfg.timeout))
+            .tcp_keepalive(Duration::from_secs(30))
+            .http2_keep_alive_interval(Some(Duration::from_secs(20)))
+            .http2_keep_alive_while_idle(true)
             .build()
             .map_err(|e| StoreError::Rpc(format!("http client: {e}")))?;
         Ok(Self {
@@ -323,6 +327,11 @@ impl RpcArkiv {
                 }
                 Err(e) => return Err(StoreError::Rpc(format!("{method}: {e}"))),
             };
+            if matches!(status, 502..=504) && retries > 0 {
+                retries -= 1;
+                self.status_backoff(method, status, retries).await;
+                continue;
+            }
             if !(200..300).contains(&status) {
                 return Err(StoreError::Http {
                     status,
@@ -356,6 +365,15 @@ impl RpcArkiv {
         let wait = Duration::from_millis(200 << (TRANSPORT_RETRIES - 1 - left));
         if self.trace {
             eprintln!("chart-trace: {method} dropped ({e}), retrying in {wait:?}");
+        }
+        tokio::time::sleep(wait).await;
+    }
+
+    /// Waits 200, 400, then 800 ms before re-sending a read that hit a transient 502-504.
+    async fn status_backoff(&self, method: &str, status: u16, left: u32) {
+        let wait = Duration::from_millis(200 << (TRANSPORT_RETRIES - 1 - left));
+        if self.trace {
+            eprintln!("chart-trace: {method} HTTP {status}, retrying in {wait:?}");
         }
         tokio::time::sleep(wait).await;
     }

@@ -628,3 +628,23 @@ async fn a_zero_wait_twin_bails_on_a_429_while_the_original_waits_and_both_see_t
     assert!(t.elapsed() >= Duration::from_secs(1));
     assert_eq!(refusals.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn transient_gateway_errors_retry_on_reads_but_not_sends() {
+    let left = Arc::new(AtomicUsize::new(2));
+    let l = left.clone();
+    let (rpc, _) = client(move |b| match b["method"].as_str() {
+        Some("eth_blockNumber") if l.load(Ordering::SeqCst) > 0 => {
+            l.fetch_sub(1, Ordering::SeqCst);
+            (503, vec![], json!("temporarily unavailable"))
+        }
+        Some("eth_blockNumber") => ok(json!("0x2a")),
+        Some("eth_sendRawTransaction") => (503, vec![], json!("temporarily unavailable")),
+        _ => ok(json!("0x0")),
+    })
+    .await;
+    assert_eq!(rpc.head().await.expect("retried"), 0x2a);
+    assert_eq!(left.load(Ordering::SeqCst), 0);
+    let err = rpc.send(signed(RABDI_CHAIN_ID, Bytes::new())).await;
+    assert!(matches!(err, Err(StoreError::Http { status: 503, .. })));
+}
