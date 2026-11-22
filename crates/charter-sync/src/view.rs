@@ -62,6 +62,27 @@ impl View {
     pub fn delegates(&self) -> &[Nid] {
         &self.identity.head().body.delegates
     }
+
+    /// Earliest expiry block across the entities this view already read: v1 refs, manifests
+    /// and anchors, plus non-revoked v2/v3/v4 device heads.
+    pub fn min_expiry(&self) -> Option<u64> {
+        self.peers
+            .values()
+            .flat_map(|p| {
+                let heads =
+                    p.v2.iter()
+                        .flat_map(|v| v.devices.iter())
+                        .filter(|d| d.revoked.is_none())
+                        .flat_map(|d| d.rows.iter());
+                p.refs
+                    .iter()
+                    .chain(&p.manifests)
+                    .chain(&p.anchors)
+                    .chain(heads)
+            })
+            .map(|o| o.expires_at)
+            .min()
+    }
 }
 
 /// Which peers to sync and which must verify (delegates always must).
@@ -476,5 +497,131 @@ mod tests {
         assert!(take_prefetched(&a).is_some(), "b's rows must not evict a's");
         assert!(take_prefetched(&a).is_none(), "used once");
         assert!(take_prefetched(&b).is_some());
+    }
+
+    #[test]
+    fn min_expiry_includes_live_v2_device_heads_and_skips_revoked() {
+        let row = |expires_at: u64| Observed {
+            key: [0; 32],
+            creator: [0; 20],
+            block: 1,
+            tx: 0,
+            updated_at: 1,
+            expires_at,
+            attributes: vec![],
+        };
+        let sk = charter_crypto::MasterSeed::from_bytes([1; 32]).signing_key();
+        let dev = charter_core::Device {
+            nid: [2; 32],
+            pk: sk.public_key(),
+            control: [3; 20],
+            bulk: [4; 20],
+            h: [5; 32],
+            position: charter_core::Position {
+                block: 1,
+                tx: 0,
+                key: [6; 32],
+            },
+        };
+        let nonce = charter_core::HeadNonce {
+            address: [3; 20],
+            before: 1,
+            after: 1,
+        };
+        let live_dev = crate::heads::DeviceView {
+            device: dev.clone(),
+            head: None,
+            nonce,
+            rows: vec![row(500)],
+            revoked: None,
+        };
+        let revoked_dev = crate::heads::DeviceView {
+            device: dev,
+            head: None,
+            nonce,
+            rows: vec![row(100)],
+            revoked: Some(crate::revoke::Revoked {
+                record: charter_core::Revocation {
+                    device: [2; 32],
+                    seq: 0,
+                    h: [0; 32],
+                    tx: [0; 32],
+                    record: [7; 32],
+                    block: 2,
+                },
+                landing: None,
+            }),
+        };
+        let pv = PeerView {
+            info: PeerInfo {
+                pk: sk.public_key(),
+                binds: charter_core::BindChain {
+                    nid: [1; 32],
+                    links: vec![],
+                    equivocations: vec![],
+                },
+            },
+            chain: AnchorChain {
+                nid: [1; 32],
+                links: vec![],
+                equivocations: vec![],
+            },
+            head: None,
+            completeness: vec![],
+            anchors: vec![row(900)],
+            refs: vec![],
+            manifests: vec![],
+            v2: Some(crate::heads::V2 {
+                devices: vec![live_dev, revoked_dev],
+                merged: BTreeMap::new(),
+                refs: RefsBody {
+                    rid: [0; 32],
+                    object_hash: 1,
+                    refs: vec![],
+                },
+                landings: BTreeMap::new(),
+            }),
+        };
+        let pos = charter_core::Position {
+            block: 1,
+            tx: 0,
+            key: [0; 32],
+        };
+        let id = IdentityChain {
+            rid: [0; 32],
+            revisions: vec![charter_core::Revision {
+                body: charter_core::IdBody {
+                    rid: None,
+                    rev: 0,
+                    parent: [0; 32],
+                    name: "t".into(),
+                    description: String::new(),
+                    default_branch: "main".into(),
+                    delegates: vec![[1; 32]],
+                    threshold: 1,
+                    visibility: 0,
+                    lang: None,
+                    license: None,
+                    nonce: Some([0; 16]),
+                    program: None,
+                    archived: None,
+                },
+                h: [0; 32],
+                proposer: [1; 32],
+                position: pos,
+                effective: pos,
+            }],
+        };
+        let view = View {
+            rid: [0; 32],
+            chain_id: 1,
+            head_block: 10,
+            identity: id,
+            resolved: BTreeMap::new(),
+            peers: BTreeMap::from([([1; 32], pv)]),
+            equivocations: vec![],
+            program: None,
+        };
+        assert_eq!(view.min_expiry(), Some(500));
     }
 }

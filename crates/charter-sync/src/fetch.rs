@@ -434,13 +434,10 @@ pub fn namespace_ops(ns: &str, current: &BTreeMap<String, String>, refs: &RefsBo
 }
 
 fn warn_expiry(view: &View) {
-    let min = view
-        .peers
-        .values()
-        .flat_map(|p| p.refs.iter().chain(&p.manifests).chain(&p.anchors))
-        .map(|o| o.expires_at)
-        .min();
-    if let Some(m) = min.filter(|m| *m < view.head_block + WARN_EXPIRY_BLOCKS) {
+    if let Some(m) = view
+        .min_expiry()
+        .filter(|m| *m < view.head_block + WARN_EXPIRY_BLOCKS)
+    {
         let days = m.saturating_sub(view.head_block) / crate::repo::BLOCKS_PER_DAY;
         warn(&format!(
             "an entity this repo needs expires in {days} days (block {m}); run `chart keepalive`"

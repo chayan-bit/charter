@@ -278,12 +278,7 @@ impl RepoView {
             patches: 0,
             revoked_leaves: 0,
             archived: id.is_archived(),
-            min_expiry: view
-                .peers
-                .values()
-                .flat_map(|p| p.refs.iter().chain(&p.manifests).chain(&p.anchors))
-                .map(|o| o.expires_at)
-                .min(),
+            min_expiry: view.min_expiry(),
         }
     }
 }
