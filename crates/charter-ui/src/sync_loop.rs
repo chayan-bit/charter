@@ -478,12 +478,18 @@ async fn locked_round<A: Arkiv>(
     let Some(repo) = open_waiting(&cfg.home, rid).await? else {
         return Ok((Outcome::Busy, None));
     };
-    let view = charter_sync::sync(a, &repo, &Want::default()).await?;
     let cobs_path = repo.dir.join(cache::COBS);
     let old: Cobs = cache::read(&cobs_path)?.unwrap_or_default();
-    let since = cob::list_since(a, rid, old.next_block(), &old.ops()?).await?;
+    let (view, raw_cobs) = futures_util::future::try_join(
+        charter_sync::sync(a, &repo, &Want::default()),
+        cob::fetch_since(a, rid, old.next_block()),
+    )
+    .await?;
+    let since = cob::verify_since_with(a, rid, &old.ops()?, raw_cobs, &view.resolved).await?;
     let cobs = old.merged(&since.ops, since.last_block);
-    cache::write(&cobs_path, &cobs)?;
+    if !since.ops.is_empty() || cobs.last_block != old.last_block || !cobs_path.exists() {
+        cache::write(&cobs_path, &cobs)?;
+    }
     let view_path = repo.dir.join(cache::VIEW);
     let was: Option<RepoView> = cache::read(&view_path)?;
     let mut now = RepoView::of(&view, now_ms());

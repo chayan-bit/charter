@@ -179,6 +179,42 @@ pub struct Since {
     pub last_block: Option<u64>,
 }
 
+/// Raw ops read by [`fetch_since`], waiting on peer-key resolution and verification.
+#[derive(Debug, Clone, Default)]
+pub struct RawSince {
+    pub fresh: Vec<Observed>,
+    pub last_block: Option<u64>,
+}
+
+/// Queries all ops of `rid` and splits out those created at or after `from_block`.
+/// Callers that already run a sync view in parallel can pass the result to
+/// [`verify_since_with`] together with `view.resolved`.
+pub async fn fetch_since<A: Arkiv>(a: &A, rid: &Rid, from_block: u64) -> Result<RawSince> {
+    let observed = all(a, Pred::And(vec![kind(Kind::Cob), b32("ag.rid", rid)])).await?;
+    let last_block = observed.iter().map(|o| o.block).max();
+    let fresh = observed
+        .into_iter()
+        .filter(|o| o.block >= from_block)
+        .collect();
+    Ok(RawSince { fresh, last_block })
+}
+
+/// Verifies ops returned by [`fetch_since`], reusing peer keys already verified in `known`.
+pub async fn verify_since_with<A: Arkiv>(
+    a: &A,
+    rid: &Rid,
+    prior: &[VerifiedOp],
+    raw: RawSince,
+    known: &BTreeMap<Nid, charter_core::PeerInfo>,
+) -> Result<Since> {
+    let keys = peer_keys_with(a, &raw.fresh, known).await?;
+    let ops = charter_core::verify_ops_after(rid, &keys, prior, &raw.fresh);
+    Ok(Since {
+        ops,
+        last_block: raw.last_block,
+    })
+}
+
 /// Verified ops of `rid` created at or after `from_block`, given every op accepted before
 /// it (`prior`, in Arkiv order). Appending the result to `prior` gives the same ops in the
 /// same order as a full [`list`]: blocks are atomic, so a block is either wholly before
@@ -193,13 +229,6 @@ pub async fn list_since<A: Arkiv>(
     from_block: u64,
     prior: &[VerifiedOp],
 ) -> Result<Since> {
-    let observed = all(a, Pred::And(vec![kind(Kind::Cob), b32("ag.rid", rid)])).await?;
-    let last_block = observed.iter().map(|o| o.block).max();
-    let fresh: Vec<Observed> = observed
-        .into_iter()
-        .filter(|o| o.block >= from_block)
-        .collect();
-    let keys = peer_keys(a, &fresh).await?;
-    let ops = charter_core::verify_ops_after(rid, &keys, prior, &fresh);
-    Ok(Since { ops, last_block })
+    let raw = fetch_since(a, rid, from_block).await?;
+    verify_since_with(a, rid, prior, raw, &BTreeMap::new()).await
 }
