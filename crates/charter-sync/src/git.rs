@@ -56,8 +56,12 @@ pub enum RefOp {
     },
 }
 
-fn zero_oid() -> String {
-    "0".repeat(40)
+fn zero_oid(len: usize) -> String {
+    let n = match len {
+        64 => 64,
+        _ => 40,
+    };
+    "0".repeat(n)
 }
 
 impl Git {
@@ -256,7 +260,7 @@ impl Git {
         for op in ops {
             match op {
                 RefOp::Update { name, new, old } => {
-                    let old = old.clone().unwrap_or_else(zero_oid);
+                    let old = old.clone().unwrap_or_else(|| zero_oid(new.len()));
                     s.push_str(&format!("update {name} {new} {old}\n"));
                 }
                 RefOp::Delete { name, old } => s.push_str(&format!("delete {name} {old}\n")),

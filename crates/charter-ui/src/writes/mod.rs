@@ -19,6 +19,9 @@ use tokio::sync::{mpsc, oneshot};
 
 /// A confirmation not sent within this long is dropped; the form must be sent again.
 pub const DRAFT_TTL: Duration = Duration::from_secs(15 * 60);
+/// Completed write statuses kept in memory for status-page reloads.
+const WRITE_TTL_MS: u64 = 60 * 60 * 1_000;
+const MAX_FINISHED_WRITES: usize = 256;
 
 /// The object an op belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +265,28 @@ impl Writer {
             ..Status::default()
         }));
         if let Ok(mut w) = self.writes.lock() {
+            let now = crate::sync_loop::now_ms();
+            w.retain(|_, s| {
+                s.lock().is_ok_and(|st| {
+                    st.done_ms == 0 || now.saturating_sub(st.done_ms) < WRITE_TTL_MS
+                })
+            });
+            if w.len() >= MAX_FINISHED_WRITES {
+                let mut finished: Vec<(String, u64)> = w
+                    .iter()
+                    .filter_map(|(k, s)| {
+                        let done = s.lock().ok()?.done_ms;
+                        (done > 0).then(|| (k.clone(), done))
+                    })
+                    .collect();
+                if finished.len() >= MAX_FINISHED_WRITES {
+                    finished.sort_by_key(|(_, done)| *done);
+                    let drop_n = finished.len() + 1 - MAX_FINISHED_WRITES;
+                    for (k, _) in finished.into_iter().take(drop_n) {
+                        w.remove(&k);
+                    }
+                }
+            }
             w.insert(id.to_owned(), status.clone());
         }
         self.jobs
