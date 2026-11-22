@@ -67,7 +67,7 @@ Plan of record: the "Arkiv Git: decentralized code hosting plan" doc (private Cl
 - P1 core: `git-remote-arkiv`, identity documents, signed refs, ref anchoring, search.
 - P2 private: encrypted repos with MLS groups (X-Wing), roles, rotation, blinded annotations.
 
-- P3 collaborative objects and repo programs: on feature branches, not merged to `main` (see "In progress" below).
+- P3 collaborative objects, repo programs, escrow, AI agents and Arkiv-native CI: merged on `main` (see "Merged features" below).
 
 Testnet only. Never use real funds or mainnet keys.
 
@@ -278,7 +278,7 @@ Censorship resistance, open source, privacy and security, as this project stands
   A refused push fails visibly (it ends with an error such as `E_UPLOAD_INCOMPLETE` and nothing is anchored) rather than silently.
 - **O (open source):** MIT OR Apache-2.0, and anyone can build and run it from the repo alone with `nix develop`.
 - **P (privacy):** public repos are public by design.
-  Private repos are in progress and store only ciphertext with keyed-hash ids.
+  Private repos store only MLS-encrypted ciphertext with blinded, keyed-hash attributes.
   The RPC provider sees which entities a client queries, so use your own Arkiv node or a privacy RPC.
 - **S (security):** composite ML-DSA-65 + Ed25519 signatures (both halves must verify), and the seed is stored locally with mode 600.
   Trust assumptions: Arkiv is trusted for ordering and availability only, and nothing else; the client checks every signature, hash and chain link, and keeps its own high-water marks so it refuses to go backwards.
