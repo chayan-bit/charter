@@ -138,6 +138,33 @@ fn url(repo: &str) -> Result<String, String> {
     }
 }
 
+/// Validates a git branch name before placing it in `HEAD:refs/heads/<branch>`: rejects
+/// refspec metacharacters (`:`, whitespace, `..`, `@{`), leading `-`, control bytes, and
+/// malformed path segments from a prompt-injected agent.
+fn branch_name(branch: &str) -> Result<&str, String> {
+    let bad = || usage(format!("{branch:?} is not a valid git branch name"));
+    if branch.is_empty()
+        || branch.starts_with(['-', '/'])
+        || branch.ends_with(['/', '.'])
+        || branch.contains("..")
+        || branch.contains("//")
+        || branch.contains("@{")
+        || branch == "@"
+        || branch
+            .bytes()
+            .any(|b| b <= 0x20 || b == 0x7f || b"~^:?*[\\".contains(&b))
+    {
+        return Err(bad());
+    }
+    if branch
+        .split('/')
+        .any(|s| s.is_empty() || s.starts_with('.') || s.ends_with(".lock"))
+    {
+        return Err(bad());
+    }
+    Ok(branch)
+}
+
 /// `p` as an absolute path inside the working area `work`. Tool arguments come from an agent
 /// that may be prompt-injected, so a path that starts with `-` (git would read an option),
 /// climbs with `..`, or resolves through symlinks outside the working area is refused.
@@ -224,6 +251,7 @@ impl ArkivGit {
     )]
     pub async fn git_push(&self, Parameters(a): Parameters<PushArgs>) -> ToolResult {
         let (url, dir) = (url(&a.repo)?, confine(&self.runner.work, &a.dir)?);
+        let branch = branch_name(&a.branch)?;
         let git = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
             let dir = dir.clone();
@@ -233,7 +261,7 @@ impl ArkivGit {
             git(&["add", "-A"]).await?;
             git(&["commit", "-q", "-m", m]).await?;
         }
-        let refspec = format!("HEAD:refs/heads/{}", a.branch);
+        let refspec = format!("HEAD:refs/heads/{branch}");
         git(&["push", "-q", "--", &url, &refspec]).await?;
         let head = git(&["rev-parse", "HEAD"]).await?;
         Ok(serde_json::json!({ "head": head.trim() }).to_string())

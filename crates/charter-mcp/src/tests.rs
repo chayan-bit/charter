@@ -365,4 +365,20 @@ async fn agent_arguments_cannot_inject_options_or_leave_the_work_area() {
         }))
         .await;
     assert!(push.is_err(), "git_push ran outside the work area");
+    for bad in [
+        "",
+        "-f",
+        "main:other",
+        "../tags/v1",
+        "a..b",
+        "a b",
+        "a/.hidden",
+        "a/b.lock",
+        "a@{0}",
+    ] {
+        assert!(branch_name(bad).is_err(), "accepted bad branch {bad:?}");
+    }
+    for good in ["main", "agent/1a2b3c4d", "feat/fix-1.2_ok"] {
+        assert_eq!(branch_name(good).ok(), Some(good));
+    }
 }
