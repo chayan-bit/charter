@@ -115,24 +115,32 @@ impl Git {
                 args.join(" ").chars().take(80).collect::<String>()
             )
         });
-        let mut child = self
-            .command(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| SyncError::io("git", e))?;
-        let mut pipe = child
-            .stdin
-            .take()
-            .ok_or_else(|| SyncError::io("git", "no stdin"))?;
-        let input = stdin.to_vec();
-        // A writer thread so a large stdout never deadlocks against our stdin.
-        let writer = std::thread::spawn(move || pipe.write_all(&input));
-        let out = child
-            .wait_with_output()
-            .map_err(|e| SyncError::io("git", e))?;
-        let _ = writer.join();
+        let out = if stdin.is_empty() {
+            self.command(args)
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|e| SyncError::io("git", e))?
+        } else {
+            let mut child = self
+                .command(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| SyncError::io("git", e))?;
+            let mut pipe = child
+                .stdin
+                .take()
+                .ok_or_else(|| SyncError::io("git", "no stdin"))?;
+            let input = stdin.to_vec();
+            // A writer thread so a large stdout never deadlocks against our stdin.
+            let writer = std::thread::spawn(move || pipe.write_all(&input));
+            let out = child
+                .wait_with_output()
+                .map_err(|e| SyncError::io("git", e))?;
+            let _ = writer.join();
+            out
+        };
         if !out.status.success() {
             return Err(Self::fail(args, &out.stderr));
         }

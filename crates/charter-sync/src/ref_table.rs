@@ -2,7 +2,7 @@
 //! into its effective refs, and the writer's choice between an inline v3 body, reusing the
 //! previous table, and a new one.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use charter_core::{
@@ -18,12 +18,41 @@ use crate::{Result, SyncError};
 pub const REUSE_INLINE_MAX: usize = 16 * 1024;
 /// Head body bytes besides refs and packs (fixed fields, snapshot hashes), generously.
 const BODY_FIXED: usize = 1_024;
+/// Maximum decoded ref tables kept in memory per process.
+const MAX_CACHED_TABLES: usize = 64;
+
+#[derive(Default)]
+struct TableCache {
+    order: VecDeque<Hash32>,
+    map: HashMap<Hash32, Arc<Vec<HeadRef>>>,
+}
+
+impl TableCache {
+    fn get(&self, id: &Hash32) -> Option<Arc<Vec<HeadRef>>> {
+        self.map.get(id).cloned()
+    }
+
+    fn insert(&mut self, id: Hash32, refs: Arc<Vec<HeadRef>>) {
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.map.entry(id) {
+            e.insert(refs);
+            return;
+        }
+        while self.map.len() >= MAX_CACHED_TABLES {
+            if let Some(evicted) = self.order.pop_front() {
+                self.map.remove(&evicted);
+            } else {
+                break;
+            }
+        }
+        self.order.push_back(id);
+        self.map.insert(id, refs);
+    }
+}
 
 /// Decoded tables by `table_id`; the hash names the bytes, so sharing across devices and
-/// repos is safe. shortcut: per process only, persist it under the repo cache if CLI
-/// fetches of large devices become common (head-model 14.4).
-static TABLES: LazyLock<Mutex<HashMap<Hash32, Arc<Vec<HeadRef>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// repos is safe. Bounded to [`MAX_CACHED_TABLES`] entries per process so long-running
+/// servers do not grow unbounded.
+static TABLES: LazyLock<Mutex<TableCache>> = LazyLock::new(|| Mutex::new(TableCache::default()));
 
 fn bad(t: &RefTable, what: &str) -> SyncError {
     SyncError::coded(
@@ -39,7 +68,7 @@ fn sha256(b: &[u8]) -> Hash32 {
 
 /// A table already read or written by this process.
 pub fn cached(table_id: &Hash32) -> Option<Arc<Vec<HeadRef>>> {
-    TABLES.lock().ok()?.get(table_id).cloned()
+    TABLES.lock().ok()?.get(table_id)
 }
 
 /// Remembers a verified table (read from calldata, written by this push, or from a cache
@@ -261,5 +290,22 @@ mod tests {
             choose(&all, Some((&t, &rows, 12)), 0, MAX),
             Choice::New { .. }
         ));
+    }
+
+    #[test]
+    fn table_cache_evicts_oldest_past_cap() {
+        let mut cache = TableCache::default();
+        let empty = Arc::new(vec![]);
+        for i in 0..(MAX_CACHED_TABLES + 10) {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            cache.insert(id, empty.clone());
+        }
+        assert_eq!(cache.map.len(), MAX_CACHED_TABLES);
+        let first = [0u8; 32];
+        assert!(cache.get(&first).is_none());
+        let mut newest = [0u8; 32];
+        newest[..8].copy_from_slice(&((MAX_CACHED_TABLES + 9) as u64).to_be_bytes());
+        assert!(cache.get(&newest).is_some());
     }
 }

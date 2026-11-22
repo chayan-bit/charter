@@ -284,12 +284,17 @@ fn check_connected(repo: &Repo, view: &mut View, must: &BTreeSet<Nid>) -> Result
         .into_iter()
         .map(|(_, o)| o)
         .collect();
+    let old_set: BTreeSet<&str> = old.iter().map(String::as_str).collect();
     let nids: Vec<Nid> = view.peers.keys().copied().collect();
     for nid in nids {
         let Some(refs) = view.peers.get(&nid).and_then(|p| p.refs_body()) else {
             continue;
         };
-        if !repo.git().connected(&oids(refs), &old) {
+        let tips = oids(refs);
+        if tips.iter().all(|o| old_set.contains(o.as_str())) {
+            continue;
+        }
+        if !repo.git().connected(&tips, &old) {
             let e = SyncError::coded(
                 ErrorCode::MissingObjects,
                 format!("refs of peer {} name objects not on Arkiv", to_text(&nid)),
@@ -344,6 +349,7 @@ fn check_bases(repo: &Repo, view: &mut View, must: &BTreeSet<Nid>) -> Result<()>
 }
 
 fn commit(repo: &Repo, view: &View, state: &mut State, applied: Applied) -> Result<()> {
+    let before = state.clone();
     state.chain_id = Some(view.chain_id);
     let id = view.identity.head();
     let new_id = IdMark {
@@ -367,18 +373,39 @@ fn commit(repo: &Repo, view: &View, state: &mut State, applied: Applied) -> Resu
         state.set_peer_mark(nid, &mark);
     }
     state.note_equivocations(&view.equivocations);
-    state.save(&repo.state_path())?;
-    for (nid, pv) in &view.peers {
-        if let Some(refs) = pv.refs_body() {
-            set_namespace(repo, nid, refs)?;
+    if *state != before {
+        state.save(&repo.state_path())?;
+    }
+    let mid = state.clone();
+    let peer_refs: Vec<(&Nid, &RefsBody)> = view
+        .peers
+        .iter()
+        .filter_map(|(nid, pv)| pv.refs_body().map(|refs| (nid, refs)))
+        .collect();
+    if !peer_refs.is_empty() {
+        let existing: BTreeMap<String, String> =
+            repo.git().refs("refs/namespaces/")?.into_iter().collect();
+        let mut ops = vec![];
+        for (nid, refs) in peer_refs {
+            let ns = namespace(nid);
+            let current: BTreeMap<String, String> = existing
+                .iter()
+                .filter(|(k, _)| k.starts_with(&ns))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            ops.extend(namespace_ops(&ns, &current, refs));
         }
+        repo.git().update_refs(&ops)?;
     }
     state.applied_packs.extend(applied.packs.iter().map(hex32));
     state
         .applied_manifests
         .extend(applied.manifests.iter().map(hex32));
     note_skipped(state, view, &applied.unindexed);
-    state.save(&repo.state_path())
+    if *state != mid {
+        state.save(&repo.state_path())?;
+    }
+    Ok(())
 }
 
 /// Device marks and landings of a v2 peer (head-model 6).

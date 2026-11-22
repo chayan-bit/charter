@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use charter_core::{Kind, Rid};
 use charter_store::{
@@ -287,6 +288,8 @@ pub struct Served<'a, A> {
     log: Mutex<Vec<Entry>>,
     /// The block the probe was read at, answered as the head (it is this sync's head).
     head: Option<u64>,
+    /// True once any recorded-eligible query missed `ready` and hit `inner`.
+    fetched_live: AtomicBool,
 }
 
 impl<'a, A: Arkiv> Served<'a, A> {
@@ -296,7 +299,12 @@ impl<'a, A: Arkiv> Served<'a, A> {
             ready: Mutex::new(ready),
             log: Mutex::new(vec![]),
             head: None,
+            fetched_live: AtomicBool::new(false),
         }
+    }
+
+    fn fetched_live(&self) -> bool {
+        self.fetched_live.load(Ordering::Relaxed)
     }
 
     fn at(self, probe: Option<&Probe>) -> Self {
@@ -351,7 +359,11 @@ impl<A: Arkiv> Arkiv for Served<'_, A> {
         }
         let page = match self.take(&key(q, o)) {
             Some(p) => p,
-            None => self.inner.query(q, o).await?,
+            None => {
+                let p = self.inner.query(q, o).await?;
+                self.fetched_live.store(true, Ordering::Relaxed);
+                p
+            }
         };
         self.record(q, o, &page);
         Ok(page)
@@ -423,20 +435,25 @@ impl<A: Arkiv> Arkiv for Served<'_, A> {
 /// One sync's reads: the backend to read through, and what to record afterwards.
 pub struct Session<'a, A> {
     pub backend: Served<'a, A>,
-    /// The probe read with this sync's pages (`None`: replayed, or not probed).
+    /// The probe read with this sync's pages (`None`: not probed).
     probe: Option<Probe>,
     pub replayed: bool,
+    /// Original full-sync timestamp preserved when a replay fills missing pages.
+    replayed_at: Option<u64>,
+    /// True if a replay fetched a missing identity page live alongside the probe.
+    filled: bool,
 }
 
 impl<A: Arkiv> Session<'_, A> {
-    /// Records this full sync's pages for the next sync (a replayed sync keeps the old
-    /// record, so the window counts from the last full sync).
+    /// Records this full sync's pages for the next sync. A replayed sync skips writing
+    /// unless it had to fetch missing pages live, in which case it persists them under
+    /// the original `at` timestamp so the replay window is not extended.
     pub fn save(&self, repo: &Repo, view: &View) -> Result<()> {
-        if self.replayed {
+        if self.replayed && !self.filled && !self.backend.fetched_live() {
             return Ok(());
         }
         let memo = Memo {
-            at: now(),
+            at: self.replayed_at.unwrap_or_else(now),
             pinned: view.identity.head().body.program.is_some(),
             probe: self.probe.clone(),
             entries: self.backend.entries(),
@@ -479,6 +496,7 @@ pub async fn build<'a, A: Arkiv>(
             format!("same={same} replayable_pages={} of {n}", pages.len())
         });
         if same {
+            let filled = ident.is_some();
             if let Some(p) = ident {
                 pages.insert(key(&q, &o), p);
             }
@@ -487,8 +505,10 @@ pub async fn build<'a, A: Arkiv>(
                 trace("replay", String::new);
                 let s = Session {
                     backend,
-                    probe: None,
+                    probe: Some(old.clone()),
                     replayed: true,
+                    replayed_at: Some(memo.at),
+                    filled,
                 };
                 return Ok((view, s));
             }
@@ -512,6 +532,8 @@ pub async fn build<'a, A: Arkiv>(
                 backend,
                 probe: p.ok(),
                 replayed: false,
+                replayed_at: None,
+                filled: false,
             };
             return Ok((view, s));
         }
@@ -527,6 +549,8 @@ pub async fn build<'a, A: Arkiv>(
         backend,
         probe: p.ok(),
         replayed: false,
+        replayed_at: None,
+        filled: false,
     };
     Ok((view?, s))
 }
