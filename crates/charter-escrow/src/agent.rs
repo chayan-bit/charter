@@ -109,10 +109,8 @@ impl<'a, A: Arkiv, O: ObligationSource> Agent<'a, A, O> {
                 _ => Ok(()),
             };
         };
-        let tmp = p.with_extension("tmp");
-        let bytes = serde_json::to_vec(i).map_err(|e| internal(e.to_string()))?;
-        std::fs::write(&tmp, bytes).map_err(|e| SyncError::io(tmp.display(), e))?;
-        std::fs::rename(&tmp, &p).map_err(|e| SyncError::io(p.display(), e))
+        // Temp file (0600), fsync, rename: a crash after `send` never loses the journal.
+        charter_sync::state::write_json(&p, i)
     }
 
     /// The ledger, refusing to act unless this agent is the one appointed.
@@ -168,11 +166,11 @@ impl<'a, A: Arkiv, O: ObligationSource> Agent<'a, A, O> {
     pub async fn run_once(&self) -> Result<Report> {
         let _lock = self.lock()?;
         let mut report = Report::default();
-        let l = self.ledger().await?;
+        let mut l = self.ledger().await?;
         if let Some(i) = self.journal()? {
             Box::pin(self.recover(&l, i, &mut report)).await?;
+            l = self.ledger().await?;
         }
-        let l = self.ledger().await?;
         let (plan, skipped) = Box::pin(self.plan(&l)).await?;
         report.skipped = skipped;
         for t in plan {
@@ -189,18 +187,24 @@ impl<'a, A: Arkiv, O: ObligationSource> Agent<'a, A, O> {
     }
 
     async fn send(&self, t: &Transfer) -> Result<Intent> {
-        let base = self.a.base_fee().await?;
+        let addr = self.keys.address();
+        let (base, nonce, chain_id, have) = futures_util::future::try_join4(
+            self.a.base_fee(),
+            self.a.tx_count(addr),
+            self.a.chain_id(),
+            self.a.balance(addr),
+        )
+        .await?;
         let p = &self.cfg.pipeline;
         let mut i = Intent {
             transfer: t.clone(),
-            nonce: self.a.tx_count(self.keys.address()).await?,
+            nonce,
             gas_limit: p.gas_limit(TRANSFER_GAS),
             max_fee: p.max_fee(base),
             tip: p.tip,
             tx: TxHash::ZERO,
         };
-        let tx = self.sign(&i).await?;
-        let have = self.a.balance(self.keys.address()).await?;
+        let tx = self.sign_on(&i, chain_id)?;
         if have < tx.max_cost() {
             return Err(internal(format!(
                 "escrow holds {have} wei, transfer needs {}",
@@ -213,7 +217,7 @@ impl<'a, A: Arkiv, O: ObligationSource> Agent<'a, A, O> {
         Ok(i)
     }
 
-    async fn sign(&self, i: &Intent) -> Result<SignedTx> {
+    fn sign_on(&self, i: &Intent, chain_id: u64) -> Result<SignedTx> {
         let p = TxParams {
             nonce: i.nonce,
             to: i.transfer.to,
@@ -223,8 +227,12 @@ impl<'a, A: Arkiv, O: ObligationSource> Agent<'a, A, O> {
             max_fee_per_gas: i.max_fee,
             max_priority_fee_per_gas: i.tip,
         };
-        let chain_id = self.a.chain_id().await?;
         Ok(SignedTx::sign(self.keys.payout(), chain_id, p)?)
+    }
+
+    async fn sign(&self, i: &Intent) -> Result<SignedTx> {
+        let chain_id = self.a.chain_id().await?;
+        self.sign_on(i, chain_id)
     }
 
     async fn recover(&self, l: &Ledger, i: Intent, report: &mut Report) -> Result<()> {
